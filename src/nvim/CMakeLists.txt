@@ -768,6 +768,43 @@ if(WIN32)
   target_sources(nvim_bin PRIVATE ${NVIM_RUNTIME_DIR}/windows_icon.rc)
 endif()
 
+set(RUST_WORKSPACE_DIR "${PROJECT_SOURCE_DIR}")
+set(CARGO_OUTPUT_DIR ${PROJECT_BINARY_DIR}/rust_target)
+
+set(RUST_BUILD_PROFILE "release")
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+  set(RUST_BUILD_PROFILE "dev")
+elseif(CMAKE_BUILD_TYPE STREQUAL "MinSizeRel")
+  set(RUST_BUILD_PROFILE "strip-release")
+endif()
+
+set(RUST_RELEASE_PROFILES "release;strip-release")
+if(RUST_BUILD_PROFILE IN_LIST RUST_RELEASE_PROFILES AND ENABLE_LTO)
+  set(RUST_BUILD_PROFILE "${RUST_BUILD_PROFILE}-lto")
+endif()
+
+set(RUST_TARGET_DIRNAME "${RUST_BUILD_PROFILE}")
+if(RUST_BUILD_PROFILE STREQUAL "dev")
+  set(RUST_TARGET_DIRNAME "debug")
+endif()
+
+set(RUST_LIB_PATH "${CARGO_OUTPUT_DIR}/${RUST_TARGET_DIRNAME}/librustvim_lib.a")
+
+add_custom_command(
+  OUTPUT "${RUST_LIB_PATH}"
+  WORKING_DIRECTORY "${RUST_WORKSPACE_DIR}/src/nvim/rustvim_lib"
+  COMMAND cargo build --profile "${RUST_BUILD_PROFILE}" --target-dir "${CARGO_OUTPUT_DIR}"
+  COMMENT "Building Rust library with Cargo..."
+)
+add_custom_target(build_rust ALL
+  DEPENDS "${RUST_LIB_PATH}"
+)
+set_target_properties(main_lib PROPERTIES
+  LINK_DEPENDS "${RUST_LIB_PATH}"
+)
+add_dependencies(main_lib build_rust)
+target_link_libraries(main_lib INTERFACE "${RUST_LIB_PATH}")
+
 target_sources(nlua0 PUBLIC ${NLUA0_SOURCES})
 
 if(STATIC_BUILD)

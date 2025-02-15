@@ -1,0 +1,10 @@
+[package]
+name = "rustvim_lib"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rust_os = { path = "../rust_os" }
+
+[lib]
+crate-type = ["staticlib"]

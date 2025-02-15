@@ -1,0 +1,20 @@
+[workspace]
+resolver = "2"
+
+members = [
+  "src/nvim/rust_os",
+  "src/nvim/rustvim_lib",
+]
+
+[profile.release-lto]
+inherits = "release"
+lto = true
+
+[profile.strip-release]
+inherits = "release"
+lto = true
+
+[profile.strip-release-lto]
+inherits = "release"
+lto = true
+strip = "symbols"
