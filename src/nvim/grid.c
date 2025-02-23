@@ -41,7 +41,7 @@
 // temporary buffer for rendering a single screenline, so it can be
 // compared with previous contents to calculate smallest delta.
 // Per-cell attributes
-static size_t linebuf_size = 0;
+size_t linebuf_size = 0;
 
 // Used to cache glyphs which doesn't fit an a sizeof(schar_T) length UTF-8 string.
 // Then it instead stores an index into glyph_cache.keys[] which is a flat char array.
@@ -838,7 +838,7 @@ void grid_put_linebuf(ScreenGrid *grid, int row, int coloff, int col, int endcol
   }
 }
 
-void grid_alloc(ScreenGrid *grid, int rows, int columns, bool copy, bool valid)
+static void grid_alloc1(ScreenGrid *grid, int rows, int columns, bool copy, bool valid)
 {
   int new_row;
   ScreenGrid ngrid = *grid;

@@ -790,8 +790,13 @@ endif()
 
 set(RUST_LIB_PATH "${CARGO_OUTPUT_DIR}/${RUST_TARGET_DIRNAME}/librustvim_lib.a")
 
+file(GLOB_RECURSE RUST_SOURCES
+  "${CMAKE_CURRENT_SOURCE_DIR}/*.rs"
+)
+
 add_custom_command(
   OUTPUT "${RUST_LIB_PATH}"
+  DEPENDS ${RUST_SOURCES}
   WORKING_DIRECTORY "${RUST_WORKSPACE_DIR}/src/nvim/rustvim_lib"
   COMMAND cargo build --profile "${RUST_BUILD_PROFILE}" --target-dir "${CARGO_OUTPUT_DIR}"
   COMMENT "Building Rust library with Cargo..."

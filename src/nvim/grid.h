@@ -36,6 +36,10 @@ enum {
   SLF_INC_VCOL  = 4,
 };
 
+extern void grid_alloc(ScreenGrid *grid, int rows, int columns, bool copy, bool valid);
+extern void alloc_initial_line_buffer(void);
+extern void init_default_grid(void);
+
 /// Put a ASCII character in a screen cell.
 ///
 /// If `x` is a compile time constant, schar_from_ascii(x) will also be.
