@@ -240,35 +240,7 @@ impl ScreenGrid {
         copy: bool,
         line_buffer: &mut LineBuffer,
     ) -> Self {
-        let old_num_cells = grid.rows as usize * grid.cols as usize;
-        let old_grid = ScreenGrid {
-            handle: grid.handle,
-            chars: unsafe { Vec::from_raw_parts(grid.chars, old_num_cells, old_num_cells) },
-            attrs: unsafe { Vec::from_raw_parts(grid.attrs, old_num_cells, old_num_cells) },
-            vcols: unsafe { Vec::from_raw_parts(grid.vcols, old_num_cells, old_num_cells) },
-            line_offset: unsafe {
-                Vec::from_raw_parts(grid.line_offset, grid.rows as usize, grid.rows as usize)
-            },
-            dirty_col: grid.dirty_col,
-            //dirty_col: unsafe { Vec::from_raw_parts(grid.dirty_col, 0, old_num_cells) },
-            rows: grid.rows,
-            cols: grid.cols,
-            valid: cbool(grid.valid),
-            throttled: cbool(grid.throttled),
-            row_offset: grid.row_offset,
-            col_offset: grid.col_offset,
-            target: grid.target,
-            //view: todo!(),
-            blending: cbool(grid.blending),
-            mouse_enabled: cbool(grid.mouse_enabled),
-            zindex: grid.zindex,
-            comp_row: grid.comp_row,
-            comp_col: grid.comp_col,
-            comp_width: grid.comp_width,
-            comp_height: grid.comp_height,
-            comp_index: grid.comp_index,
-            comp_disabled: cbool(grid.comp_disabled),
-        };
+        let old_grid: ScreenGrid = (&*grid).into();
 
         Self::from_grid(&old_grid, rows, cols, valid, copy, line_buffer)
     }
@@ -444,6 +416,40 @@ pub struct CScreenGrid {
     comp_disabled: libc::boolean_t,
 }
 
+impl From<&CScreenGrid> for ScreenGrid {
+    fn from(cgrid: &CScreenGrid) -> Self {
+        let num_cells = cgrid.rows as usize * cgrid.cols as usize;
+        ScreenGrid {
+            handle: cgrid.handle,
+            chars: unsafe { Vec::from_raw_parts(cgrid.chars, num_cells, num_cells) },
+            attrs: unsafe { Vec::from_raw_parts(cgrid.attrs, num_cells, num_cells) },
+            vcols: unsafe { Vec::from_raw_parts(cgrid.vcols, num_cells, num_cells) },
+            line_offset: unsafe {
+                Vec::from_raw_parts(cgrid.line_offset, cgrid.rows as usize, cgrid.rows as usize)
+            },
+            dirty_col: cgrid.dirty_col,
+            //dirty_col: unsafe { Vec::from_raw_parts(cgrid.dirty_col, 0, old_num_cells) },
+            rows: cgrid.rows,
+            cols: cgrid.cols,
+            valid: cbool(cgrid.valid),
+            throttled: cbool(cgrid.throttled),
+            row_offset: cgrid.row_offset,
+            col_offset: cgrid.col_offset,
+            target: cgrid.target,
+            //view: todo!(),
+            blending: cbool(cgrid.blending),
+            mouse_enabled: cbool(cgrid.mouse_enabled),
+            zindex: cgrid.zindex,
+            comp_row: cgrid.comp_row,
+            comp_col: cgrid.comp_col,
+            comp_width: cgrid.comp_width,
+            comp_height: cgrid.comp_height,
+            comp_index: cgrid.comp_index,
+            comp_disabled: cbool(cgrid.comp_disabled),
+        }
+    }
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn alloc_initial_line_buffer() {
     let _ = CLineBufferRef::new().alloc(unsafe { Columns as usize });
@@ -483,6 +489,13 @@ pub extern "C" fn grid_alloc(
         let g = ScreenGrid::from_cgrid(&*grid, rows, cols, cbool(valid), cbool(copy), &mut lb);
         *grid = g.to_cgrid();
         lb.to_cline_buffer_ref();
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn grid_free(grid: *mut CScreenGrid) {
+    unsafe {
+        let _: ScreenGrid = (&*grid).into();
     }
 }
 

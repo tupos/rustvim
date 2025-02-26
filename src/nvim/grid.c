@@ -895,7 +895,7 @@ static void grid_alloc1(ScreenGrid *grid, int rows, int columns, bool copy, bool
   }
 }
 
-void grid_free(ScreenGrid *grid)
+static void grid_free1(ScreenGrid *grid)
 {
   xfree(grid->chars);
   xfree(grid->attrs);
