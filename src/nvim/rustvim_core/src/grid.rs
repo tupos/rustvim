@@ -44,7 +44,7 @@ unsafe extern "C" {
 ///  -2: open a fold
 ///  -3: close a fold
 ///
-/// line_offset[n] is the offset from chars[], attrs[] and vcols[] for the start
+/// line_offset\[n\] is the offset from chars[], attrs[] and vcols[] for the start
 /// of line 'n'. These offsets are in general not linear, as full screen scrolling
 /// is implemented by rotating the offsets in the line_offset array.
 #[derive(Debug, Clone)]
@@ -496,6 +496,22 @@ pub extern "C" fn grid_alloc(
 pub extern "C" fn grid_free(grid: *mut CScreenGrid) {
     unsafe {
         let _: ScreenGrid = (&*grid).into();
+    }
+}
+
+/// clear a line in the grid starting at `offset` until `width` characters
+/// are cleared. `valid` is used to fill attributes. See `ScreenGrid::attrs_fill`
+#[unsafe(no_mangle)]
+pub extern "C" fn grid_clear_line(
+    grid: *mut CScreenGrid,
+    offset: libc::size_t,
+    width: libc::c_int,
+    valid: libc::boolean_t,
+) {
+    unsafe {
+        let mut g: ScreenGrid = (&*grid).into();
+        g.clear_line(offset, width as usize, cbool(valid));
+        *grid = g.to_cgrid();
     }
 }
 

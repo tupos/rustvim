@@ -38,6 +38,8 @@ enum {
 
 extern void grid_alloc(ScreenGrid *grid, int rows, int columns, bool copy, bool valid);
 extern void grid_free(ScreenGrid *grid);
+extern void grid_clear_line(ScreenGrid *grid, size_t off, int width, bool valid);
+
 extern void alloc_initial_line_buffer(void);
 extern void init_default_grid(void);
 
