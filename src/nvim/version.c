@@ -45,7 +45,7 @@
   "." STR(NVIM_VERSION_MINOR) "." STR(NVIM_VERSION_PATCH) \
   NVIM_VERSION_PRERELEASE
 #endif
-#define NVIM_VERSION_LONG "NVIM " NVIM_VERSION_MEDIUM  // NOLINT(bugprone-suspicious-missing-comma)
+#define NVIM_VERSION_LONG "RUSTVIM " NVIM_VERSION_MEDIUM  // NOLINT(bugprone-suspicious-missing-comma)
 
 char *Versions[] = { "8.1", "8.2", "9.0", "9.1", "9.2" };
 char *longVersion = NVIM_VERSION_LONG;
@@ -4059,11 +4059,11 @@ void intro_message(bool colon)
     "",
     N_(NVIM_VERSION_LONG),
     "────────────────────────────────────────────",
-    N_("Nvim is open source and freely distributable"),
-    "https://neovim.io/#chat",
+    N_("Rustvim is open source and freely distributable"),
+    "https://rustvim.org",
     "────────────────────────────────────────────",
     N_("type  :help nvim<Enter>     if you are new! "),
-    N_("type  :checkhealth<Enter>   to optimize Nvim"),
+    N_("type  :checkhealth<Enter>   to optimize Rvim"),
     N_("type  :q<Enter>             to exit         "),
     N_("type  :help<Enter>          for help        "),
     "────────────────────────────────────────────",
