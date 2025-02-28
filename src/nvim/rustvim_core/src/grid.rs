@@ -481,6 +481,10 @@ pub extern "C" fn grid_alloc(
 pub extern "C" fn grid_free(grid: *mut CScreenGrid) {
     unsafe {
         let _: ScreenGrid = (&*grid).into();
+        (*grid).chars = std::ptr::null_mut();
+        (*grid).attrs = std::ptr::null_mut();
+        (*grid).vcols = std::ptr::null_mut();
+        (*grid).line_offset = std::ptr::null_mut();
     }
 }
 
