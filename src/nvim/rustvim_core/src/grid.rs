@@ -9,8 +9,8 @@ type VimDirtyColT = libc::c_int;
 unsafe extern "C" {
     static mut Rows: libc::c_int;
     static mut Columns: libc::c_int;
-    static mut default_grid: CScreenGrid;
 
+    static mut default_grid: CScreenGrid;
     static mut msg_grid: CScreenGrid;
     static mut msg_grid_adj: CScreenGrid;
 
@@ -215,20 +215,20 @@ impl ScreenGrid {
             //dirty_col: self.dirty_col.leak().as_mut_ptr(),
             rows: self.rows,
             cols: self.cols,
-            valid: self.valid as libc::boolean_t,
-            throttled: self.throttled as libc::boolean_t,
+            valid: self.valid,
+            throttled: self.throttled,
             row_offset: self.row_offset,
             col_offset: self.col_offset,
             target: self.target,
-            blending: self.blending as libc::boolean_t,
-            mouse_enabled: self.mouse_enabled as libc::boolean_t,
+            blending: self.blending,
+            mouse_enabled: self.mouse_enabled,
             zindex: self.zindex,
             comp_row: self.comp_row,
             comp_col: self.comp_col,
             comp_width: self.comp_width,
             comp_height: self.comp_height,
             comp_index: self.comp_index,
-            comp_disabled: self.comp_disabled as libc::boolean_t,
+            comp_disabled: self.comp_disabled,
         }
     }
 
@@ -258,14 +258,6 @@ impl ScreenGrid {
         } else {
             -1
         }
-    }
-}
-
-fn cbool(x: libc::boolean_t) -> bool {
-    if x != 0 {
-        true
-    } else {
-        false
     }
 }
 
@@ -391,17 +383,17 @@ pub struct CScreenGrid {
     rows: libc::c_int,
     cols: libc::c_int,
 
-    valid: libc::boolean_t,
+    valid: bool,
 
-    throttled: libc::boolean_t,
+    throttled: bool,
 
     row_offset: libc::c_int,
     col_offset: libc::c_int,
     target: *mut CScreenGrid,
 
-    blending: libc::boolean_t,
+    blending: bool,
 
-    mouse_enabled: libc::boolean_t,
+    mouse_enabled: bool,
 
     zindex: libc::c_int,
 
@@ -413,7 +405,7 @@ pub struct CScreenGrid {
 
     comp_index: libc::size_t,
 
-    comp_disabled: libc::boolean_t,
+    comp_disabled: bool,
 }
 
 impl From<&CScreenGrid> for ScreenGrid {
@@ -431,21 +423,21 @@ impl From<&CScreenGrid> for ScreenGrid {
             //dirty_col: unsafe { Vec::from_raw_parts(cgrid.dirty_col, 0, old_num_cells) },
             rows: cgrid.rows,
             cols: cgrid.cols,
-            valid: cbool(cgrid.valid),
-            throttled: cbool(cgrid.throttled),
+            valid: cgrid.valid,
+            throttled: cgrid.throttled,
             row_offset: cgrid.row_offset,
             col_offset: cgrid.col_offset,
             target: cgrid.target,
             //view: todo!(),
-            blending: cbool(cgrid.blending),
-            mouse_enabled: cbool(cgrid.mouse_enabled),
+            blending: cgrid.blending,
+            mouse_enabled: cgrid.mouse_enabled,
             zindex: cgrid.zindex,
             comp_row: cgrid.comp_row,
             comp_col: cgrid.comp_col,
             comp_width: cgrid.comp_width,
             comp_height: cgrid.comp_height,
             comp_index: cgrid.comp_index,
-            comp_disabled: cbool(cgrid.comp_disabled),
+            comp_disabled: cgrid.comp_disabled,
         }
     }
 }
@@ -480,13 +472,13 @@ pub extern "C" fn grid_alloc(
     grid: *mut CScreenGrid,
     rows: libc::c_int,
     cols: libc::c_int,
-    copy: libc::boolean_t,
-    valid: libc::boolean_t,
+    copy: bool,
+    valid: bool,
 ) {
     unsafe {
         let clb = CLineBufferRef::new();
         let mut lb = LineBuffer::from_cline_buffer_ref(&clb);
-        let g = ScreenGrid::from_cgrid(&*grid, rows, cols, cbool(valid), cbool(copy), &mut lb);
+        let g = ScreenGrid::from_cgrid(&*grid, rows, cols, valid, copy, &mut lb);
         *grid = g.to_cgrid();
         lb.to_cline_buffer_ref();
     }
@@ -506,11 +498,11 @@ pub extern "C" fn grid_clear_line(
     grid: *mut CScreenGrid,
     offset: libc::size_t,
     width: libc::c_int,
-    valid: libc::boolean_t,
+    valid: bool,
 ) {
     unsafe {
         let mut g: ScreenGrid = (&*grid).into();
-        g.clear_line(offset, width as usize, cbool(valid));
+        g.clear_line(offset, width as usize, valid);
         *grid = g.to_cgrid();
     }
 }
