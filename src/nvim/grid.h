@@ -41,7 +41,6 @@ extern void grid_free(ScreenGrid *grid);
 extern void grid_clear_line(ScreenGrid *grid, size_t off, int width, bool valid);
 
 extern void alloc_initial_line_buffer(void);
-extern void init_default_grid(void);
 
 /// Put a ASCII character in a screen cell.
 ///

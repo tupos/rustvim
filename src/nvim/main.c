@@ -402,7 +402,6 @@ int main(int argc, char **argv)
   assert(p_ch >= 0 && Rows >= p_ch && Rows - p_ch <= INT_MAX);
   cmdline_row = Rows - (int)p_ch;
   msg_row = cmdline_row;
-  init_default_grid();
   alloc_initial_line_buffer();
   default_grid_alloc();  // allocate screen buffers
   set_init_2(headless_mode);

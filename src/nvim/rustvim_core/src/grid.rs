@@ -409,17 +409,29 @@ pub struct CScreenGrid {
     comp_disabled: bool,
 }
 
+macro_rules! init_ptr {
+    ($p:expr, $cap:expr) => {
+        if $p.is_null() {
+            Vec::with_capacity($cap)
+        } else {
+            unsafe { Vec::from_raw_parts($p, $cap, $cap) }
+        }
+    };
+}
+
 impl From<&CScreenGrid> for ScreenGrid {
     fn from(cgrid: &CScreenGrid) -> Self {
         let num_cells = cgrid.rows as usize * cgrid.cols as usize;
+        let chars = init_ptr!(cgrid.chars, num_cells);
+        let attrs = init_ptr!(cgrid.attrs, num_cells);
+        let vcols = init_ptr!(cgrid.vcols, num_cells);
+        let line_offset = init_ptr!(cgrid.line_offset, cgrid.rows as usize);
         ScreenGrid {
             handle: cgrid.handle,
-            chars: unsafe { Vec::from_raw_parts(cgrid.chars, num_cells, num_cells) },
-            attrs: unsafe { Vec::from_raw_parts(cgrid.attrs, num_cells, num_cells) },
-            vcols: unsafe { Vec::from_raw_parts(cgrid.vcols, num_cells, num_cells) },
-            line_offset: unsafe {
-                Vec::from_raw_parts(cgrid.line_offset, cgrid.rows as usize, cgrid.rows as usize)
-            },
+            chars,
+            attrs,
+            vcols,
+            line_offset,
             dirty_col: cgrid.dirty_col,
             //dirty_col: unsafe { Vec::from_raw_parts(cgrid.dirty_col, 0, old_num_cells) },
             rows: cgrid.rows,
@@ -446,31 +458,6 @@ impl From<&CScreenGrid> for ScreenGrid {
 #[unsafe(no_mangle)]
 pub extern "C" fn alloc_initial_line_buffer() {
     let _ = CLineBufferRef::new().alloc(unsafe { Columns as usize });
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn init_default_grid() {
-    unsafe {
-        default_grid.chars = Vec::new().leak().as_mut_ptr();
-        default_grid.attrs = Vec::new().leak().as_mut_ptr();
-        default_grid.vcols = Vec::new().leak().as_mut_ptr();
-        default_grid.line_offset = Vec::new().leak().as_mut_ptr();
-
-        msg_grid.chars = Vec::new().leak().as_mut_ptr();
-        msg_grid.attrs = Vec::new().leak().as_mut_ptr();
-        msg_grid.vcols = Vec::new().leak().as_mut_ptr();
-        msg_grid.line_offset = Vec::new().leak().as_mut_ptr();
-
-        msg_grid_adj.chars = Vec::new().leak().as_mut_ptr();
-        msg_grid_adj.attrs = Vec::new().leak().as_mut_ptr();
-        msg_grid_adj.vcols = Vec::new().leak().as_mut_ptr();
-        msg_grid_adj.line_offset = Vec::new().leak().as_mut_ptr();
-
-        pum_grid.chars = Vec::new().leak().as_mut_ptr();
-        pum_grid.attrs = Vec::new().leak().as_mut_ptr();
-        pum_grid.vcols = Vec::new().leak().as_mut_ptr();
-        pum_grid.line_offset = Vec::new().leak().as_mut_ptr();
-    }
 }
 
 #[unsafe(no_mangle)]
