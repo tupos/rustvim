@@ -409,6 +409,14 @@ pub struct CScreenGrid {
     comp_disabled: bool,
 }
 
+#[repr(C)]
+#[derive(Debug)]
+pub struct CGridView {
+    target: *mut CScreenGrid,
+    row_offset: libc::c_int,
+    col_offset: libc::c_int,
+}
+
 macro_rules! init_ptr {
     ($p:expr, $cap:expr) => {
         if $p.is_null() {
@@ -501,6 +509,32 @@ pub extern "C" fn grid_clear_line(
         let mut g: ScreenGrid = (&*grid).into();
         g.clear_line(offset, width as usize, valid);
         *grid = g.to_cgrid();
+    }
+}
+
+/// Determine if dedicated window grid should be used or the default_grid
+///
+/// If UI did not request multigrid support, draw all windows on the
+/// default_grid.
+///
+/// NB: this function can only been used with window grids in a context where
+/// win_grid_alloc already has been called!
+///
+/// If the default_grid is used, adjust window relative positions to global
+/// screen positions.
+#[unsafe(no_mangle)]
+pub extern "C" fn grid_adjust(
+    grid: *const CGridView,
+    row_offset: *mut libc::c_int,
+    col_offset: *mut libc::c_int,
+) -> *mut CScreenGrid {
+    unsafe {
+        assert!(!grid.is_null(), "view grid is nullptr");
+
+        *row_offset += (*grid).row_offset;
+        *col_offset += (*grid).col_offset;
+
+        return (*grid).target;
     }
 }
 

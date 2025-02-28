@@ -52,23 +52,6 @@ size_t linebuf_size = 0;
 // The maximum byte size of a glyph is MAX_SCHAR_SIZE (including the final NUL).
 static Set(glyph) glyph_cache = SET_INIT;
 
-/// Determine if dedicated window grid should be used or the default_grid
-///
-/// If UI did not request multigrid support, draw all windows on the
-/// default_grid.
-///
-/// NB: this function can only been used with window grids in a context where
-/// win_grid_alloc already has been called!
-///
-/// If the default_grid is used, adjust window relative positions to global
-/// screen positions.
-ScreenGrid *grid_adjust(GridView *grid, int *row_off, int *col_off)
-{
-  *row_off += grid->row_offset;
-  *col_off += grid->col_offset;
-  return grid->target;
-}
-
 schar_T schar_from_str(const char *str)
 {
   if (str == NULL) {

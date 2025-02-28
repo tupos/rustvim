@@ -39,6 +39,7 @@ enum {
 extern void grid_alloc(ScreenGrid *grid, int rows, int columns, bool copy, bool valid);
 extern void grid_free(ScreenGrid *grid);
 extern void grid_clear_line(ScreenGrid *grid, size_t off, int width, bool valid);
+extern ScreenGrid *grid_adjust(GridView *grid, int *row_off, int *col_off);
 
 extern void alloc_initial_line_buffer(void);
 
