@@ -289,11 +289,6 @@ next:
   }
 }
 
-void grid_invalidate(ScreenGrid *grid)
-{
-  memset(grid->attrs, -1, sizeof(sattr_T) * (size_t)grid->rows * (size_t)grid->cols);
-}
-
 static bool grid_invalid_row(ScreenGrid *grid, int row)
 {
   return grid->attrs[grid->line_offset[row]] < 0;

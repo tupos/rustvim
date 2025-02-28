@@ -260,6 +260,10 @@ impl ScreenGrid {
             -1
         }
     }
+
+    fn invalidate(&mut self) {
+        self.attrs.fill(-1);
+    }
 }
 
 #[derive(Debug)]
@@ -535,6 +539,15 @@ pub extern "C" fn grid_adjust(
         *col_offset += (*grid).col_offset;
 
         return (*grid).target;
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn grid_invalidate(grid: *mut CScreenGrid) {
+    unsafe {
+        let mut g: ScreenGrid = (&*grid).into();
+        g.invalidate();
+        *grid = g.to_cgrid();
     }
 }
 
