@@ -13,6 +13,7 @@ unsafe extern "C" {
     static mut default_grid: CScreenGrid;
     static mut msg_grid: CScreenGrid;
     static mut msg_grid_adj: CScreenGrid;
+    static mut pum_grid: CScreenGrid;
 
     static mut linebuf_char: *mut VimSCharT;
     static mut linebuf_attr: *mut VimSAttrT;
@@ -464,6 +465,11 @@ pub extern "C" fn init_default_grid() {
         msg_grid_adj.attrs = Vec::new().leak().as_mut_ptr();
         msg_grid_adj.vcols = Vec::new().leak().as_mut_ptr();
         msg_grid_adj.line_offset = Vec::new().leak().as_mut_ptr();
+
+        pum_grid.chars = Vec::new().leak().as_mut_ptr();
+        pum_grid.attrs = Vec::new().leak().as_mut_ptr();
+        pum_grid.vcols = Vec::new().leak().as_mut_ptr();
+        pum_grid.line_offset = Vec::new().leak().as_mut_ptr();
     }
 }
 
