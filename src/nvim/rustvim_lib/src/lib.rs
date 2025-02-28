@@ -1,1 +1,1 @@
-pub use rustvim_core::grid::grid_alloc;
+pub use rustvim_core::grid::*;
