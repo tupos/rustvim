@@ -43,127 +43,11 @@
 // Per-cell attributes
 size_t linebuf_size = 0;
 
-// Used to cache glyphs which doesn't fit an a sizeof(schar_T) length UTF-8 string.
-// Then it instead stores an index into glyph_cache.keys[] which is a flat char array.
-// The hash part is used by schar_from_buf() to quickly lookup glyphs which already
-// has been interned. schar_get() should used to convert a schar_T value
-// back to a string buffer.
-//
-// The maximum byte size of a glyph is MAX_SCHAR_SIZE (including the final NUL).
-static Set(glyph) glyph_cache = SET_INIT;
-
-schar_T schar_from_str(const char *str)
-{
-  if (str == NULL) {
-    return 0;
-  }
-  return schar_from_buf(str, strlen(str));
-}
-
-/// @param buf need not be NUL terminated, but may not contain embedded NULs.
-///
-/// caller must ensure len < MAX_SCHAR_SIZE (not =, as NUL needs a byte)
-schar_T schar_from_buf(const char *buf, size_t len)
-{
-  assert(len < MAX_SCHAR_SIZE);
-  if (len <= 4) {
-    schar_T sc = 0;
-    memcpy((char *)&sc, buf, len);
-    return sc;
-  } else {
-    String str = { .data = (char *)buf, .size = len };
-
-    MHPutStatus status;
-    uint32_t idx = set_put_idx(glyph, &glyph_cache, str, &status);
-    assert(idx < 0xFFFFFF);
-#ifdef ORDER_BIG_ENDIAN
-    return idx + ((uint32_t)0xFF << 24);
-#else
-    return 0xFF + (idx << 8);
-#endif
-  }
-}
-
-/// Check if cache is full, and if it is, clear it.
-///
-/// This should normally only be called in update_screen()
-///
-/// @return true if cache was clered, and all your screen buffers now are hosed
-/// and you need to use UPD_CLEAR
-bool schar_cache_clear_if_full(void)
-{
-  // note: critical max is really (1<<24)-1. This gives us some marginal
-  // until next time update_screen() is called
-  if (glyph_cache.h.n_keys > (1<<21)) {
-    schar_cache_clear();
-    return true;
-  }
-  return false;
-}
-
-void schar_cache_clear(void)
-{
-  decor_check_invalid_glyphs();
-  set_clear(glyph, &glyph_cache);
-
-  // for char options we have stored the original strings. Regenerate
-  // the parsed schar_T values with the new clean cache.
-  // This must not return an error as cell widths have not changed.
-  if (check_chars_options()) {
-    abort();
-  }
-}
-
-bool schar_high(schar_T sc)
-{
-#ifdef ORDER_BIG_ENDIAN
-  return ((sc & 0xFF000000) == 0xFF000000);
-#else
-  return ((sc & 0xFF) == 0xFF);
-#endif
-}
-
 #ifdef ORDER_BIG_ENDIAN
 # define schar_idx(sc) (sc & (0x00FFFFFF))
 #else
 # define schar_idx(sc) (sc >> 8)
 #endif
-
-/// sets final NUL
-size_t schar_get(char *buf_out, schar_T sc)
-{
-  size_t len = schar_get_adv(&buf_out, sc);
-  *buf_out = NUL;
-  return len;
-}
-
-/// advance buf_out. do NOT set final NUL
-size_t schar_get_adv(char **buf_out, schar_T sc)
-{
-  size_t len;
-  if (schar_high(sc)) {
-    uint32_t idx = schar_idx(sc);
-    assert(idx < glyph_cache.h.n_keys);
-    len = strlen(&glyph_cache.keys[idx]);
-    memcpy(*buf_out, &glyph_cache.keys[idx], len);
-  } else {
-    len = strnlen((char *)&sc, 4);
-    memcpy(*buf_out, (char *)&sc, len);
-  }
-  *buf_out += len;
-  return len;
-}
-
-size_t schar_len(schar_T sc)
-{
-  if (schar_high(sc)) {
-    uint32_t idx = schar_idx(sc);
-    assert(idx < glyph_cache.h.n_keys);
-    return strlen(&glyph_cache.keys[idx]);
-  } else {
-    return strnlen((char *)&sc, 4);
-  }
-}
 
 int schar_cells(schar_T sc)
 {
@@ -183,13 +67,6 @@ int schar_cells(schar_T sc)
   return utf_ptr2cells(sc_buf);
 }
 
-/// gets first raw UTF-8 byte of an schar
-static char schar_get_first_byte(schar_T sc)
-{
-  assert(!(schar_high(sc) && schar_idx(sc) >= glyph_cache.h.n_keys));
-  return schar_high(sc) ? glyph_cache.keys[schar_idx(sc)] : *(char *)&sc;
-}
-
 int schar_get_first_codepoint(schar_T sc)
 {
   char sc_buf[MAX_SCHAR_SIZE];
@@ -205,12 +82,6 @@ char schar_get_ascii(schar_T sc)
 #else
   return (sc < 0x80) ? (char)sc : NUL;
 #endif
-}
-
-static bool schar_in_arabic_block(schar_T sc)
-{
-  char first_byte = schar_get_first_byte(sc);
-  return ((uint8_t)first_byte & 0xFE) == 0xD8;
 }
 
 /// Get the first two codepoints of an schar, or NUL when not available

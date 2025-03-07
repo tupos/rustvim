@@ -41,6 +41,15 @@ extern void grid_free(ScreenGrid *grid);
 extern void grid_clear_line(ScreenGrid *grid, size_t off, int width, bool valid);
 extern ScreenGrid *grid_adjust(GridView *grid, int *row_off, int *col_off);
 extern void grid_invalidate(ScreenGrid *grid);
+extern schar_T schar_from_str(const char *str);
+extern schar_T schar_from_buf(const char *buf, size_t len);
+extern bool schar_cache_clear_if_full(void);
+extern void schar_cache_clear(void);
+extern bool schar_high(schar_T sc);
+extern size_t schar_get(char *buf_out, schar_T sc);
+extern size_t schar_get_adv(char **buf_out, schar_T sc);
+extern size_t schar_len(schar_T sc);
+extern bool schar_in_arabic_block(schar_T sc);
 
 extern void alloc_initial_line_buffer(void);
 

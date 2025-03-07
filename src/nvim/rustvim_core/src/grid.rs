@@ -1,10 +1,24 @@
 // vim: sw=4
+use std::{borrow::Borrow, collections::BTreeMap, rc::Rc};
+
+/// if data[0] is 0xFF, then data[1..4] is a 24-bit index (in machine endianness)
+/// otherwise it must be a UTF-8 string of length maximum 4 (no NUL when n=4)
 type VimSCharT = u32;
 type VimSAttrT = i32;
 type VimColNrT = i32;
+
+/// must be at least as big as the biggest of schar_T, sattr_T, colnr_T
 type VimSScratchT = i32;
 type VimHandleT = libc::c_int;
 type VimDirtyColT = libc::c_int;
+
+/// Includes final NUL. MAX_MCO is no longer used, but at least 4*(MAX_MCO+1)+1=29
+/// ensures we can fit all composed chars which did fit before.
+static MAX_SCHAR_SIZE: usize = 32;
+
+static NULL_TERMINATOR: u8 = '\0' as u8;
+
+static mut GLYPH_MAPPING: GlyphMapping = GlyphMapping::new();
 
 unsafe extern "C" {
     static mut Rows: libc::c_int;
@@ -20,6 +34,9 @@ unsafe extern "C" {
     static mut linebuf_vcol: *mut VimColNrT;
     static mut linebuf_scratch: *mut VimSScratchT;
     static mut linebuf_size: libc::size_t;
+
+    fn decor_check_invalid_glyphs();
+    fn check_chars_options() -> bool;
 }
 
 /// ScreenGrid represents a resizable rectuangular grid displayed by UI clients.
@@ -375,6 +392,77 @@ pub fn schar_from_ascii(c: char) -> VimSCharT {
     (c as u32).to_le()
 }
 
+/// Takes schar and either inserts it into a glyph_map if it is a "indexed" schar or just converts
+/// bytes into schar if its size <= 4. Returns either the index to the bytes in the glyph map or
+/// the schar constructed from bytes.
+fn schar_from_bytes(buf: &[u8], glyph_map: &mut GlyphMapping) -> VimSCharT {
+    assert!(buf.len() < MAX_SCHAR_SIZE);
+    if buf.len() <= 4 {
+        let mut ret = [0; 4];
+        ret[..buf.len()].copy_from_slice(buf);
+        if cfg!(target_endian = "big") {
+            VimSCharT::from_be_bytes(ret)
+        } else {
+            VimSCharT::from_le_bytes(ret)
+        }
+    } else {
+        glyph_map.insert(buf)
+    }
+}
+
+/// Takes schar and either returns bytes from the glyph_map or returns bytes from the schar. The
+/// former situation happens when schar is the "indexed" one. Does not set the final
+/// NULL_TERMINATOR in the buffer.
+fn schar_to_bytes(sc: VimSCharT, glyph_map: &GlyphMapping) -> GlyphBuff {
+    if GlyphMapping::is_glyph_mapping_schart(sc) {
+        glyph_map
+            .get_bytes(sc)
+            .map(|gb| gb.clone())
+            .unwrap_or(GlyphBuff::new(0, [0; MAX_SCHAR_SIZE]))
+    } else {
+        let b = sc.to_le_bytes();
+        let pos = b
+            .iter()
+            .enumerate()
+            .find_map(|(pos, el)| if *el == 0 { Some(pos) } else { None })
+            .unwrap_or(4) as usize;
+        let mut ret = [0; MAX_SCHAR_SIZE];
+        ret[..pos].copy_from_slice(&b[..pos]);
+        GlyphBuff::new(pos as u8, ret)
+    }
+}
+
+/// Sets NULL_TERMINATOR
+fn schar_to_null_term_bytes(sc: VimSCharT, glyph_map: &GlyphMapping) -> GlyphBuff {
+    let mut glyph_buff = schar_to_bytes(sc, glyph_map);
+    glyph_buff.len += 1;
+    assert!((glyph_buff.len as usize) < MAX_SCHAR_SIZE);
+    glyph_buff.buff[glyph_buff.len as usize] = NULL_TERMINATOR;
+    glyph_buff
+}
+
+/// Returns the length of the schar.
+fn schar_len_impl(sc: VimSCharT, glyph_map: &GlyphMapping) -> usize {
+    if GlyphMapping::is_glyph_mapping_schart(sc) {
+        glyph_map.get_len(sc).unwrap_or(0)
+    } else {
+        sc.to_le_bytes()
+            .iter()
+            .enumerate()
+            .find_map(|(pos, el)| if *el == 0 { Some(pos) } else { None })
+            .unwrap_or(4) as usize
+    }
+}
+
+fn schar_in_arabic_block_impl(sc: VimSCharT, glyph_map: &GlyphMapping) -> bool {
+    let first_byte = if GlyphMapping::is_glyph_mapping_schart(sc) {
+        glyph_map.get_bytes(sc).map(|gb| gb.buff[0]).unwrap_or(0)
+    } else {
+        sc.to_le_bytes()[0]
+    };
+    first_byte & 0xFE == 0xD8
+}
+
 #[repr(C)]
 #[derive(Debug)]
 pub struct CScreenGrid {
@@ -467,6 +555,133 @@ impl From<&CScreenGrid> for ScreenGrid {
     }
 }
 
+/// Glyph buffer to store bytes for the cell value of the `ScreenGrid`.
+#[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord)]
+struct GlyphBuff {
+    len: u8,
+    buff: [u8; MAX_SCHAR_SIZE],
+}
+
+impl GlyphBuff {
+    /// Constructs a new empty `GlyphBuff`
+    fn new(len: u8, buff: [u8; MAX_SCHAR_SIZE]) -> Self {
+        Self { len, buff }
+    }
+}
+
+/// Used as a dictionary for glyphs which do not fit a sizeof(VimSCharT)
+/// length UTF-8 string. For example this includes so called zalgo text or
+/// some other characters that are larger than the standard unicode 4 bytes.
+///
+/// The maximum byte size of a glyph is MAX_SCHAR_SIZE (including the final NUL).
+///
+// original vim comment
+// Used to cache glyphs which doesn't fit an a sizeof(schar_T) length UTF-8 string.
+// Then it instead stores an index into glyph_cache.keys[] which is a flat char array.
+// The hash part is used by schar_from_buf() to quickly lookup glyphs which already
+// has been interned. schar_get() should used to convert a schar_T value
+// back to a string buffer.
+//
+// The maximum byte size of a glyph is MAX_SCHAR_SIZE (including the final NUL).
+struct GlyphMapping {
+    /// Stores mapping of `VimSCharT` to the bytes. The key type is composed
+    /// of (in machine endianness) 4 bytes where the first byte is 0xFF and the
+    /// subsequent 3 bytes are used as a key in glyph cache.
+    /// This is possible as an escape char 0xFF is an invalid UTF-8.
+    dict: BTreeMap<VimSCharT, Rc<GlyphBuff>>,
+    /// The map is used to quickly search the key for insertion into the
+    /// glyph cache.
+    index: BTreeMap<Rc<GlyphBuff>, VimSCharT>,
+    /// Is used to determine the next mapping when a new glyph is inserted.
+    /// It is a counter that is incremented by an insertion into the dict.
+    next_free: VimSCharT,
+}
+
+impl GlyphMapping {
+    /// Constructs a new empty `GlyphMapping`
+    const fn new() -> Self {
+        Self {
+            dict: BTreeMap::new(),
+            index: BTreeMap::new(),
+            next_free: Self::to_schart(0),
+        }
+    }
+    /// Converts 3 bytes index into the 4 bytes schart value
+    const fn to_schart(idx: VimSCharT) -> VimSCharT {
+        if cfg!(target_endian = "big") {
+            idx + (0xFF << 24)
+        } else {
+            0xFF + (idx << 8)
+        }
+    }
+    /// Increments a 3 byte index stored in `next_free` and return a 4 byte
+    /// schart with the 0xFF byte set.
+    const fn get_next_free(&self) -> VimSCharT {
+        let mut idx = Self::extract_index(self.next_free);
+        idx += 1;
+        Self::to_schart(idx)
+    }
+    /// Extracts a 3 bytes index from the schart which is stored as data[1..3(including)]
+    const fn extract_index(val: VimSCharT) -> VimSCharT {
+        if cfg!(target_endian = "big") {
+            val & 0x00FFFFFF
+        } else {
+            val >> 8
+        }
+    }
+    /// Determines if the given schart is used as a mapping into glyph cache
+    /// or it is a normal UTF-8 character.
+    fn is_glyph_mapping_schart(c: VimSCharT) -> bool {
+        c.to_le_bytes()[0] == 0xFF
+    }
+    /// Inserts into the cache. Returns the mapping of `VimSCharT` to bytes,
+    /// that are used in the grid to draw an actual content of the cell.
+    fn insert(&mut self, val: &[u8]) -> VimSCharT {
+        assert!(val.len() < MAX_SCHAR_SIZE);
+
+        let mut arr = [0; MAX_SCHAR_SIZE];
+        arr[..val.len()].copy_from_slice(val);
+        let k: Rc<GlyphBuff> = Rc::new(GlyphBuff::new(val.len() as u8, arr));
+        if let Some(idx) = self.index.get(&k) {
+            return *idx;
+        }
+
+        let new_mapping = self.next_free;
+        assert!(new_mapping < 0xFFFFFFFF);
+        self.dict.insert(new_mapping, k.clone());
+        self.index.insert(k, new_mapping);
+        self.next_free = self.get_next_free();
+        new_mapping
+    }
+    /// Returns the bytes from the mapping schart -> bytes
+    fn get_bytes(&self, c: VimSCharT) -> Option<&GlyphBuff> {
+        self.dict.get(&c).map(|glyph_buff| glyph_buff.borrow())
+    }
+    /// Returns the length of the bytes from the mapping schart -> bytes
+    fn get_len(&self, c: VimSCharT) -> Option<usize> {
+        self.dict.get(&c).map(|glyph_buff| glyph_buff.len as usize)
+    }
+    /// Clears mapping if the mapping is full. Empties `dict`, `index` and
+    /// resets the `next_free`
+    fn clear_if_full(&mut self) {
+        if self.is_full() {
+            return;
+        }
+        self.clear();
+    }
+    /// Checks if the mapping is full. Technically the mapping is full when
+    /// we stored 2**24 - 1 values. However we check for 2**21
+    fn is_full(&self) -> bool {
+        Self::extract_index(self.next_free) >= (1 << 21)
+    }
+    /// Clears the contents of the mapping
+    fn clear(&mut self) {
+        self.dict.clear();
+        self.index.clear();
+        self.next_free = Self::to_schart(0);
+    }
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn alloc_initial_line_buffer() {
     let _ = CLineBufferRef::new().alloc(unsafe { Columns as usize });
@@ -516,6 +731,106 @@ pub extern "C" fn grid_clear_line(
     }
 }
 
+/// @param buf need not be NUL terminated, but may not contain embedded NULs.
+///
+/// caller must ensure len < MAX_SCHAR_SIZE (not =, as NUL needs a byte)
+#[unsafe(no_mangle)]
+pub extern "C" fn schar_from_buf(buf: *const libc::c_char, len: libc::size_t) -> VimSCharT {
+    assert!(len < MAX_SCHAR_SIZE);
+    let buf = buf as *const u8;
+    let s = if buf.is_null() {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(buf, len) }
+    };
+    unsafe {
+        let p = &raw mut GLYPH_MAPPING;
+        schar_from_bytes(s, &mut *p)
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn schar_from_str(buf: *const libc::c_char) -> VimSCharT {
+    // note: critical max is really (1<<24)-1. This gives us some marginal
+    // until next time update_screen() is called
+    if buf.is_null() {
+        return 0;
+    }
+    let len = unsafe { libc::strlen(buf) };
+    schar_from_buf(buf, len)
+}
+
+/// Check if cache is full, and if it is, clear it.
+///
+/// This should normally only be called in update_screen()
+///
+/// @return true if cache was clered, and all your screen buffers now are hosed
+/// and you need to use UPD_CLEAR
+#[unsafe(no_mangle)]
+pub extern "C" fn schar_cache_clear_if_full() -> bool {
+    unsafe {
+        let gm = &mut *&raw mut GLYPH_MAPPING;
+        if gm.is_full() {
+            schar_cache_clear();
+            return true;
+        }
+        false
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn schar_cache_clear() {
+    unsafe {
+        decor_check_invalid_glyphs();
+        let gm = &mut *&raw mut GLYPH_MAPPING;
+        gm.clear();
+        if check_chars_options() {
+            panic!("Erroc checking chars options");
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn schar_high(sc: VimSCharT) -> bool {
+    GlyphMapping::is_glyph_mapping_schart(sc)
+}
+
+/// advance buf_out. do NOT set final NUL
+#[unsafe(no_mangle)]
+pub extern "C" fn schar_get_adv(buf_out: *mut *mut libc::c_char, sc: VimSCharT) -> libc::size_t {
+    let gm = unsafe { &mut *&raw mut GLYPH_MAPPING };
+    let gb = schar_to_bytes(sc, gm);
+    let len = gb.len as usize;
+    let slice = unsafe { std::slice::from_raw_parts_mut(*buf_out as *mut u8, len) };
+    slice.copy_from_slice(&gb.buff[..len]);
+    unsafe {
+        *buf_out = (*buf_out).add(len);
+    }
+    len
+}
+
+/// sets final NUL
+#[unsafe(no_mangle)]
+pub extern "C" fn schar_get(mut buf_out: *mut libc::c_char, sc: VimSCharT) -> libc::size_t {
+    unsafe {
+        let len = schar_get_adv(&raw mut buf_out, sc);
+        *buf_out = NULL_TERMINATOR as libc::c_char;
+        len
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn schar_len(sc: VimSCharT) -> libc::size_t {
+    let gm = unsafe { &mut *&raw mut GLYPH_MAPPING };
+    schar_len_impl(sc, &gm)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn schar_in_arabic_block(sc: VimSCharT) -> bool {
+    let gm = unsafe { &mut *&raw mut GLYPH_MAPPING };
+    schar_in_arabic_block_impl(sc, gm)
+}
+
 /// Determine if dedicated window grid should be used or the default_grid
 ///
 /// If UI did not request multigrid support, draw all windows on the
@@ -556,5 +871,118 @@ mod tests {
     use super::*;
 
     #[test]
-    fn it_works() {}
+    fn glyph_mapping_extract_index() {
+        let val = 0x0A0B0C0D;
+        if cfg!(target_endian = "big") {
+            assert_eq!(GlyphMapping::extract_index(val), 0x000B0C0D);
+        } else {
+            assert_eq!(GlyphMapping::extract_index(val), 0x000A0B0C);
+        }
+    }
+    #[test]
+    fn glyph_mapping_to_schart() {
+        let val = 0xAE;
+        if cfg!(target_endian = "big") {
+            assert_eq!(GlyphMapping::to_schart(val), 0xFF0000AE);
+        } else {
+            assert_eq!(GlyphMapping::to_schart(val), 0xAEFF);
+        }
+    }
+    #[test]
+    fn glyph_mapping_get_next_free() {
+        let gc = GlyphMapping::new();
+        if cfg!(target_endian = "big") {
+            assert_eq!(gc.get_next_free(), 0xFF000001);
+        } else {
+            assert_eq!(gc.get_next_free(), 0x01FF);
+        }
+    }
+    #[test]
+    fn glyph_mapping_insert() {
+        let mut gm = GlyphMapping::new();
+        let val: usize = 0xCFA2ADA4F0;
+        if cfg!(target_endian = "big") {
+            let bytes = val.to_be_bytes();
+            let mapping = gm.insert(&bytes);
+            assert!(gm.dict.contains_key(&mapping));
+            assert_eq!(gm.get_next_free(), 0xFF000002);
+            let mapping1 = gm.insert(&bytes);
+            assert_eq!(mapping, mapping1);
+            assert_eq!(gm.dict.len(), 1);
+            assert_eq!(gm.index.len(), 1);
+        } else {
+            let bytes = val.to_le_bytes();
+            let mapping = gm.insert(&bytes);
+            assert!(gm.dict.contains_key(&mapping));
+            assert_eq!(gm.get_next_free(), 0x02FF);
+            let mapping1 = gm.insert(&bytes);
+            assert_eq!(mapping, mapping1);
+            assert_eq!(gm.dict.len(), 1);
+            assert_eq!(gm.index.len(), 1);
+        }
+    }
+    #[test]
+    fn glyph_mapping_is_full() {
+        let mut gm = GlyphMapping::new();
+        assert_eq!(gm.is_full(), false);
+        gm.next_free = VimSCharT::from_le_bytes([0xFF, 0x00, 0x00, 0x20]);
+        assert_eq!(gm.is_full(), true);
+    }
+    #[test]
+    fn schar_from_bytes() {
+        let mut gm = GlyphMapping::new();
+        let test_cases = [
+            (vec![0x41], [0x41, 0, 0, 0]),
+            (
+                vec![0x73, 0xcc, 0xb8, 0xcc, 0x89, 0xcc, 0xbe],
+                [0xFF, 0, 0, 0],
+            ),
+            (
+                vec![0x73, 0xcc, 0xb8, 0xcc, 0x89, 0xcc, 0xbe],
+                [0xFF, 0, 0, 0],
+            ),
+            (
+                vec![0x73, 0xcc, 0xb8, 0xcc, 0x89, 0xcc, 0xbf],
+                [0xFF, 1, 0, 0],
+            ),
+        ];
+        for (t, e) in &test_cases {
+            assert_eq!(super::schar_from_bytes(t, &mut gm), u32::from_le_bytes(*e));
+        }
+    }
+    #[test]
+    fn schar_to_bytes() {
+        let mut gm = GlyphMapping::new();
+        gm.insert(&[0x73, 0xcc, 0xb8, 0xcc, 0x89, 0xcc, 0xbf]);
+        let set_bytes = |buf: &[u8]| -> [u8; MAX_SCHAR_SIZE] {
+            let mut ret = [0; MAX_SCHAR_SIZE];
+            ret[..buf.len()].copy_from_slice(buf);
+            ret
+        };
+        let test_cases = [
+            ([0x41, 0, 0, 0], GlyphBuff::new(1, set_bytes(&[0x41]))),
+            ([0xFF, 1, 0, 0], GlyphBuff::new(0, set_bytes(&[]))),
+            (
+                [0xFF, 0, 0, 0],
+                GlyphBuff::new(7, set_bytes(&[0x73, 0xcc, 0xb8, 0xcc, 0x89, 0xcc, 0xbf])),
+            ),
+        ];
+        for (t, e) in &test_cases {
+            assert_eq!(super::schar_to_bytes(u32::from_le_bytes(*t), &mut gm), *e);
+        }
+    }
+    #[test]
+    fn schar_len() {
+        let mut gm = GlyphMapping::new();
+        gm.insert(&[0x73, 0xcc, 0xb8, 0xcc, 0x89, 0xcc, 0xbf]);
+        let test_cases = [
+            ([0x41, 0, 0, 0], 1),
+            ([0x41, 0x51, 0x61, 0x71], 4),
+            ([0xFF, 1, 0, 0], 0),
+            ([0xFF, 0, 0, 0], 7),
+        ];
+        for (t, e) in &test_cases {
+            assert_eq!(super::schar_len_impl(u32::from_le_bytes(*t), &mut gm), *e);
+        }
+    }
 }
