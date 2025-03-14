@@ -74,16 +74,6 @@ int schar_get_first_codepoint(schar_T sc)
   return utf_ptr2char(sc_buf);
 }
 
-/// @return ascii char or NUL if not ascii
-char schar_get_ascii(schar_T sc)
-{
-#ifdef ORDER_BIG_ENDIAN
-  return (!(sc & 0x80FFFFFF)) ? *(char *)&sc : NUL;
-#else
-  return (sc < 0x80) ? (char)sc : NUL;
-#endif
-}
-
 /// Get the first two codepoints of an schar, or NUL when not available
 static void schar_get_first_two_codepoints(schar_T sc, int *c0, int *c1)
 {

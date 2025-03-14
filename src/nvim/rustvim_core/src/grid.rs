@@ -831,6 +831,25 @@ pub extern "C" fn schar_in_arabic_block(sc: VimSCharT) -> bool {
     schar_in_arabic_block_impl(sc, gm)
 }
 
+/// @return ascii char or NULL_TERMINATOR if not ascii
+#[unsafe(no_mangle)]
+pub extern "C" fn schar_get_ascii(sc: VimSCharT) -> libc::c_char {
+    let c = if cfg!(target_endian = "big") {
+        if sc & 0x80FFFFFF == 0 {
+            sc.to_be_bytes()[0]
+        } else {
+            NULL_TERMINATOR
+        }
+    } else {
+        if sc < 0x80 {
+            sc as u8
+        } else {
+            NULL_TERMINATOR
+        }
+    };
+    c as libc::c_char
+}
+
 /// Determine if dedicated window grid should be used or the default_grid
 ///
 /// If UI did not request multigrid support, draw all windows on the
