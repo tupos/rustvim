@@ -155,23 +155,6 @@ static bool grid_invalid_row(ScreenGrid *grid, int row)
   return grid->attrs[grid->line_offset[row]] < 0;
 }
 
-/// Get a single character directly from grid.chars
-///
-/// @param[out] attrp  set to the character's attribute (optional)
-schar_T grid_getchar(ScreenGrid *grid, int row, int col, int *attrp)
-{
-  // safety check
-  if (grid->chars == NULL || row >= grid->rows || col >= grid->cols) {
-    return NUL;
-  }
-
-  size_t off = grid->line_offset[row] + (size_t)col;
-  if (attrp != NULL) {
-    *attrp = grid->attrs[off];
-  }
-  return grid->chars[off];
-}
-
 static ScreenGrid *grid_line_grid = NULL;
 static int grid_line_row = -1;
 static int grid_line_coloff = 0;

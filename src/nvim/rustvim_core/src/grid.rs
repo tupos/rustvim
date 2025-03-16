@@ -281,6 +281,18 @@ impl ScreenGrid {
     fn invalidate(&mut self) {
         self.attrs.fill(-1);
     }
+
+    fn is_view(&self) -> bool {
+        !self.target.is_null()
+    }
+
+    fn get_char_and_attr(&self, row: usize, col: usize) -> (VimSCharT, VimSAttrT) {
+        if self.attrs.is_empty() || row >= self.rows as usize || col >= self.cols as usize {
+            return (NULL_TERMINATOR as VimSCharT, 0);
+        }
+        let offset = self.line_offset[row] + col;
+        (self.chars[offset], self.attrs[offset])
+    }
 }
 
 #[derive(Debug)]
@@ -507,6 +519,12 @@ pub struct CGridView {
     target: *mut CScreenGrid,
     row_offset: libc::c_int,
     col_offset: libc::c_int,
+}
+
+impl CScreenGrid {
+    fn is_view(&self) -> bool {
+        !self.target.is_null()
+    }
 }
 
 macro_rules! init_ptr {
@@ -883,6 +901,29 @@ pub extern "C" fn grid_invalidate(grid: *mut CScreenGrid) {
         g.invalidate();
         *grid = g.to_cgrid();
     }
+}
+
+/// Get a single character directly from grid.chars
+///
+/// @param[out] attrp  set to the character's attribute (optional)
+#[unsafe(no_mangle)]
+pub extern "C" fn grid_getchar(
+    grid: *mut CScreenGrid,
+    row: libc::c_int,
+    col: libc::c_int,
+    attrp: *mut libc::c_int,
+) -> VimSCharT {
+    let g: ScreenGrid = unsafe { (&*grid).into() };
+    let (sc, at) = g.get_char_and_attr(row as usize, col as usize);
+    unsafe {
+        *grid = g.to_cgrid();
+    }
+    if !attrp.is_null() {
+        unsafe {
+            *attrp = at;
+        }
+    }
+    sc
 }
 
 #[cfg(test)]
