@@ -90,10 +90,13 @@ pub struct ScreenGrid {
     /// external UI.
     throttled: bool,
 
+    /// TODO(bfredl): maybe physical grids and "views" (i e drawing
+    /// specifications) should be two separate types?
+    /// offsets for the grid relative to another grid. Used for grids
+    /// that are views into another, actually allocated grid 'target'
     row_offset: i32,
     col_offset: i32,
     target: *mut CScreenGrid,
-    //view: Option<GridView>,
     /// whether the compositor should blend the grid with the background grid
     blending: bool,
 
@@ -384,17 +387,6 @@ impl CLineBufferRef {
             lb.to_cline_buffer_ref();
         }
     }
-}
-
-#[derive(Debug, Clone)]
-pub struct GridView {
-    /// TODO(bfredl): maybe physical grids and "views" (i e drawing
-    /// specifications) should be two separate types?
-    /// offsets for the grid relative to another grid. Used for grids
-    /// that are views into another, actually allocated grid 'target'
-    row_offset: i32,
-    col_offset: i32,
-    target: *const ScreenGrid,
 }
 
 pub fn schar_from_ascii(c: char) -> VimSCharT {
