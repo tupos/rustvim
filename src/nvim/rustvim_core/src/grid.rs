@@ -3,9 +3,9 @@ use std::{borrow::Borrow, collections::BTreeMap, rc::Rc};
 
 /// if data[0] is 0xFF, then data[1..4] is a 24-bit index (in machine endianness)
 /// otherwise it must be a UTF-8 string of length maximum 4 (no NUL when n=4)
-type VimSCharT = u32;
-type VimSAttrT = i32;
-type VimColNrT = i32;
+pub type VimSCharT = u32;
+pub type VimSAttrT = i32;
+pub type VimColNrT = i32;
 
 /// must be at least as big as the biggest of schar_T, sattr_T, colnr_T
 type VimSScratchT = i32;
@@ -67,21 +67,20 @@ unsafe extern "C" {
 /// is implemented by rotating the offsets in the line_offset array.
 #[derive(Debug, Clone)]
 pub struct ScreenGrid {
-    handle: VimHandleT,
+    pub handle: VimHandleT,
 
-    chars: Vec<VimSCharT>,
-    attrs: Vec<VimSAttrT>,
-    vcols: Vec<VimColNrT>,
-    line_offset: Vec<usize>,
-
+    pub chars: Vec<VimSCharT>,
+    pub attrs: Vec<VimSAttrT>,
+    pub vcols: Vec<VimColNrT>,
+    pub line_offset: Vec<usize>,
     /// last column that was drawn (not cleared with the default background).
     /// only used when "throttled" is set. Not allocated by grid_alloc!
     //dirty_col: Vec<VimDirtyColT>,
     dirty_col: *mut VimDirtyColT,
 
     /// the size of the allocated grid.
-    rows: i32,
-    cols: i32,
+    pub rows: i32,
+    pub cols: i32,
 
     /// The state of the grid is valid. Otherwise it needs to be redrawn.
     valid: bool,
@@ -225,7 +224,7 @@ impl ScreenGrid {
         self.vcols[range.clone()].copy_from_slice(&src.vcols[src_range.clone()]);
     }
 
-    unsafe fn to_cgrid(self) -> CScreenGrid {
+    pub unsafe fn to_cgrid(self) -> CScreenGrid {
         CScreenGrid {
             handle: self.handle,
             chars: self.chars.leak().as_mut_ptr(),

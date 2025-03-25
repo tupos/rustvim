@@ -57,7 +57,7 @@ static bool ui_ext[kUIExtCount] = { 0 };
 static size_t ui_count = 0;
 static int ui_mode_idx = SHAPE_IDX_N;
 static int cursor_row = 0, cursor_col = 0;
-static bool pending_cursor_update = false;
+bool pending_cursor_update = false;
 static int busy = 0;
 static bool pending_mode_info_update = false;
 static bool pending_mode_update = false;
@@ -68,7 +68,6 @@ bool ui_cb_ext[kUIExtCount];  ///< Internalized UI capabilities.
 
 static bool has_mouse = false;
 static int pending_has_mouse = -1;
-static bool pending_default_colors = false;
 
 #ifdef NVIM_LOG_DEBUG
 static size_t uilog_seen = 0;
@@ -289,25 +288,6 @@ void ui_schedule_refresh(void)
   multiqueue_put(resize_events, ui_refresh_event, NULL);
 }
 
-void ui_default_colors_set(void)
-{
-  // Throttle setting of default colors at startup, so it only happens once
-  // if the user sets the colorscheme in startup.
-  pending_default_colors = true;
-  if (starting == 0) {
-    ui_may_set_default_colors();
-  }
-}
-
-static void ui_may_set_default_colors(void)
-{
-  if (pending_default_colors) {
-    pending_default_colors = false;
-    ui_call_default_colors_set(normal_fg, normal_bg, normal_sp,
-                               cterm_normal_fg_color, cterm_normal_bg_color);
-  }
-}
-
 void ui_busy_start(void)
 {
   if (!(busy++)) {
@@ -462,36 +442,6 @@ void ui_set_ext_option(RemoteUI *ui, UIExtension ext, bool active)
   }
   if (ext == kUITermColors) {
     ui_default_colors_set();
-  }
-}
-
-void ui_line(ScreenGrid *grid, int row, bool invalid_row, int startcol, int endcol, int clearcol,
-             int clearattr, bool wrap)
-{
-  assert(0 <= row && row < grid->rows);
-  LineFlags flags = wrap ? kLineFlagWrap : 0;
-  if (startcol == 0 && invalid_row) {
-    flags |= kLineFlagInvalid;
-  }
-
-  // set default colors now so that that text won't have to be repainted later
-  ui_may_set_default_colors();
-
-  size_t off = grid->line_offset[row] + (size_t)startcol;
-
-  ui_call_raw_line(grid->handle, row, startcol, endcol, clearcol, clearattr,
-                   flags, (const schar_T *)grid->chars + off,
-                   (const sattr_T *)grid->attrs + off);
-
-  // 'writedelay': flush & delay each time.
-  if (p_wd && (rdb_flags & kOptRdbFlagLine)) {
-    // If 'writedelay' is active, set the cursor to indicate what was drawn.
-    ui_call_grid_cursor_goto(grid->handle, row,
-                             MIN(clearcol, (int)grid->cols - 1));
-    ui_call_flush();
-    uint64_t wd = (uint64_t)llabs(p_wd);
-    os_sleep(wd);
-    pending_cursor_update = true;  // restore the cursor later
   }
 }
 

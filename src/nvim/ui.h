@@ -20,3 +20,7 @@ EXTERN Array noargs INIT(= ARRAY_DICT_INIT);
 EXTERN uint32_t ui_event_ns_id INIT( = 0);
 EXTERN MultiQueue *resize_events INIT( = NULL);
 EXTERN bool ui_refresh_cmdheight INIT( = true);
+
+extern bool pending_cursor_update;
+extern void ui_default_colors_set(void);
+extern void ui_line(ScreenGrid *grid, int row, bool invalid_row, int startcol, int endcol, int clearcol, int clearattr, bool wrap);
