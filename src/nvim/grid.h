@@ -52,6 +52,7 @@ extern size_t schar_len(schar_T sc);
 extern bool schar_in_arabic_block(schar_T sc);
 extern char schar_get_ascii(schar_T sc);
 extern schar_T grid_getchar(ScreenGrid *grid, int row, int col, int *attrp);
+extern schar_T schar_from_char(int c);
 
 extern void alloc_initial_line_buffer(void);
 

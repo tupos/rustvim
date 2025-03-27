@@ -981,15 +981,3 @@ win_T *get_win_by_grid_handle(handle_T handle)
   }
   return NULL;
 }
-
-/// Put a unicode character in a screen cell.
-schar_T schar_from_char(int c)
-{
-  schar_T sc = 0;
-  if (c >= 0x200000) {
-    // TODO(bfredl): this must NEVER happen, even if the file contained overlong sequences
-    c = 0xFFFD;
-  }
-  utf_char2bytes(c, (char *)&sc);
-  return sc;
-}

@@ -1,4 +1,7 @@
 // vim: sw=4
+use crate::{
+    mbyte, ui,
+};
 use std::{borrow::Borrow, collections::BTreeMap, rc::Rc};
 
 /// if data[0] is 0xFF, then data[1..4] is a 24-bit index (in machine endianness)
@@ -8,9 +11,9 @@ pub type VimSAttrT = i32;
 pub type VimColNrT = i32;
 
 /// must be at least as big as the biggest of schar_T, sattr_T, colnr_T
-type VimSScratchT = i32;
-type VimHandleT = libc::c_int;
-type VimDirtyColT = libc::c_int;
+pub type VimSScratchT = i32;
+pub type VimHandleT = libc::c_int;
+pub type VimDirtyColT = libc::c_int;
 
 /// Includes final NUL. MAX_MCO is no longer used, but at least 4*(MAX_MCO+1)+1=29
 /// ensures we can fit all composed chars which did fit before.
@@ -915,6 +918,20 @@ pub extern "C" fn grid_getchar(
         }
     }
     sc
+}
+
+/// Put a unicode character in a screen cell.
+#[unsafe(no_mangle)]
+pub extern "C" fn schar_from_char(mut c: libc::c_int) -> VimSCharT {
+    if c >= 0x200000 {
+        // TODO(bfredl): this must NEVER happen, even if the file contained overlong sequences
+        c = 0xFFFD;
+    }
+    let mut bytes = (0 as VimSCharT).to_le_bytes();
+    unsafe {
+        mbyte::utf_char2bytes(c, bytes.as_mut_ptr() as *mut i8);
+    }
+    VimSCharT::from_le_bytes(bytes)
 }
 
 #[cfg(test)]
