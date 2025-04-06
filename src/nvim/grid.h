@@ -54,6 +54,22 @@ extern char schar_get_ascii(schar_T sc);
 extern schar_T grid_getchar(ScreenGrid *grid, int row, int col, int *attrp);
 extern schar_T schar_from_char(int c);
 
+extern void grid_line_start(GridView *view, int row);
+extern void screengrid_line_start(ScreenGrid *grid, int row, int col);
+extern schar_T grid_line_getchar(int col, int *attr);
+extern void grid_line_put_schar(int col, schar_T schar, int attr);
+extern int grid_line_puts(int col, const char *text, int textlen, int attr);
+extern int grid_line_fill(int start_col, int end_col, schar_T sc, int attr);
+extern void grid_line_clear_end(int start_col, int end_col, int bg_attr, int clear_attr);
+extern void grid_line_cursor_goto(int col);
+extern void grid_line_mirror(int width);
+extern void linebuf_mirror(int *firstp, int *lastp, int *clearp, int width);
+extern void grid_line_flush(void);
+extern void grid_line_flush_if_valid_row(void);
+extern void grid_clear(GridView *grid, int start_row, int end_row, int start_col, int end_col, int attr);
+extern void grid_put_linebuf(ScreenGrid *grid, int row, int coloff, int col, int endcol, int clear_width,
+                      int bg_attr, int clear_attr, colnr_T last_vcol, int flags);
+
 extern void alloc_initial_line_buffer(void);
 
 /// Put a ASCII character in a screen cell.

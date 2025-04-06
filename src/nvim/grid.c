@@ -150,6 +150,8 @@ next:
   }
 }
 
+#ifdef VIM_IMPL
+// DONE
 static bool grid_invalid_row(ScreenGrid *grid, int row)
 {
   return grid->attrs[grid->line_offset[row]] < 0;
@@ -166,6 +168,7 @@ static int grid_line_bg_attr = 0;
 static int grid_line_clear_attr = 0;
 static int grid_line_flags = 0;
 
+/// DONE
 /// Start a group of grid_line_puts calls that builds a single grid line.
 ///
 /// Must be matched with a grid_line_flush call before moving to
@@ -203,6 +206,7 @@ void screengrid_line_start(ScreenGrid *grid, int row, int col)
   }
 }
 
+/// DONE
 /// Get present char from current rendered screen line
 ///
 /// This indicates what already is on screen, not the pending render buffer.
@@ -223,6 +227,7 @@ schar_T grid_line_getchar(int col, int *attr)
   }
 }
 
+// DONE
 void grid_line_put_schar(int col, schar_T schar, int attr)
 {
   assert(grid_line_grid);
@@ -311,6 +316,7 @@ int grid_line_puts(int col, const char *text, int textlen, int attr)
   return col - start_col;
 }
 
+// DONE
 int grid_line_fill(int start_col, int end_col, schar_T sc, int attr)
 {
   end_col = MIN(end_col, grid_line_maxcol);
@@ -329,6 +335,7 @@ int grid_line_fill(int start_col, int end_col, schar_T sc, int attr)
   return end_col;
 }
 
+// DONE
 /// @param bg_attr     applies to both the buffered line and the columns to clear
 /// @param clear_attr  applies only to the columns to clear
 void grid_line_clear_end(int start_col, int end_col, int bg_attr, int clear_attr)
@@ -342,12 +349,14 @@ void grid_line_clear_end(int start_col, int end_col, int bg_attr, int clear_attr
   grid_line_clear_attr = clear_attr;
 }
 
+/// DONE
 /// move the cursor to a position in a currently rendered line.
 void grid_line_cursor_goto(int col)
 {
   ui_grid_cursor_goto(grid_line_grid->handle, grid_line_row, col);
 }
 
+// DONE
 void grid_line_mirror(int width)
 {
   grid_line_clear_to = MAX(grid_line_last, grid_line_clear_to);
@@ -358,6 +367,7 @@ void grid_line_mirror(int width)
   grid_line_flags |= SLF_RIGHTLEFT;
 }
 
+// DONE
 void linebuf_mirror(int *firstp, int *lastp, int *clearp, int width)
 {
   int first = *firstp;
@@ -396,6 +406,7 @@ void linebuf_mirror(int *firstp, int *lastp, int *clearp, int width)
   *lastp = width - last;
 }
 
+/// DONE
 /// End a group of grid_line_puts calls and send the screen buffer to the UI layer.
 void grid_line_flush(void)
 {
@@ -412,6 +423,7 @@ void grid_line_flush(void)
                    grid_line_flags);
 }
 
+/// DONE
 /// flush grid line but only if on a valid row
 ///
 /// This is a stopgap until message.c has been refactored to behave
@@ -428,6 +440,7 @@ void grid_line_flush_if_valid_row(void)
   grid_line_flush();
 }
 
+// DONE
 void grid_clear(GridView *grid, int start_row, int end_row, int start_col, int end_col, int attr)
 {
   for (int row = start_row; row < end_row; row++) {
@@ -442,6 +455,7 @@ void grid_clear(GridView *grid, int start_row, int end_row, int start_col, int e
   }
 }
 
+/// DONE
 /// Check whether the given character needs redrawing:
 /// - the (first byte of the) character is different
 /// - the attributes are different
@@ -457,6 +471,7 @@ static int grid_char_needs_redraw(ScreenGrid *grid, int col, size_t off_to, int 
               || rdb_flags & kOptRdbFlagNodelta));
 }
 
+/// DONE -- BUT CHECK IT ONCE AGAIN!!!
 /// Move one buffered line to the window grid, but only the characters that
 /// have actually changed.  Handle insert/delete character.
 ///
@@ -647,6 +662,7 @@ void grid_put_linebuf(ScreenGrid *grid, int row, int coloff, int col, int endcol
     }
   }
 }
+#endif // VIM_IMPL
 
 #ifdef EXITFREE
 /// Doesn't allow reinit, so must only be called by free_all_mem!

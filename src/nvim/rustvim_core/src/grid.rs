@@ -1,5 +1,6 @@
 // vim: sw=4
 use crate::{
+    generated::enums::{RdbFlags, Slf},
     mbyte, ui,
 };
 use std::{borrow::Borrow, collections::BTreeMap, rc::Rc};
@@ -23,9 +24,17 @@ static NULL_TERMINATOR: u8 = '\0' as u8;
 
 static mut GLYPH_MAPPING: GlyphMapping = GlyphMapping::new();
 
+static DEFAULT_GRID_HANDLE: u32 = 1;
+
 unsafe extern "C" {
     static mut Rows: libc::c_int;
     static mut Columns: libc::c_int;
+
+    static mut full_screen: bool;
+    static mut rdb_flags: libc::c_uint;
+
+    static mut p_arshape: libc::c_int;
+    static mut p_tbidi: libc::c_int;
 
     static mut default_grid: CScreenGrid;
     static mut msg_grid: CScreenGrid;
@@ -38,8 +47,12 @@ unsafe extern "C" {
     static mut linebuf_scratch: *mut VimSScratchT;
     static mut linebuf_size: libc::size_t;
 
+    static mut exmode_active: bool;
+
     fn decor_check_invalid_glyphs();
     fn check_chars_options() -> bool;
+    fn line_do_arabic_shape(buf: *mut VimSCharT, cols: libc::c_int);
+    fn hl_combine_attr(char_attr: libc::c_int, prim_attr: libc::c_int) -> libc::c_int;
 }
 
 /// ScreenGrid represents a resizable rectuangular grid displayed by UI clients.
@@ -92,13 +105,6 @@ pub struct ScreenGrid {
     /// external UI.
     throttled: bool,
 
-    /// TODO(bfredl): maybe physical grids and "views" (i e drawing
-    /// specifications) should be two separate types?
-    /// offsets for the grid relative to another grid. Used for grids
-    /// that are views into another, actually allocated grid 'target'
-    row_offset: i32,
-    col_offset: i32,
-    target: *mut CScreenGrid,
     /// whether the compositor should blend the grid with the background grid
     blending: bool,
 
@@ -128,6 +134,9 @@ pub struct ScreenGrid {
     /// compositor should momentarily ignore the grid. Used internally when
     /// moving around grids etc.
     comp_disabled: bool,
+
+    /// need to resend win_float_pos or similar due to comp_index change
+    pending_comp_index_update: bool,
 }
 
 impl ScreenGrid {
@@ -146,10 +155,6 @@ impl ScreenGrid {
             cols,
             valid: false,
             throttled: false,
-            row_offset: 0,
-            col_offset: 0,
-            target: std::ptr::null_mut(),
-            //view: None,
             blending: false,
             mouse_enabled: true,
             zindex: 0,
@@ -159,6 +164,7 @@ impl ScreenGrid {
             comp_height: 0,
             comp_index: 0,
             comp_disabled: false,
+            pending_comp_index_update: true,
         };
         for i in 0..rows {
             let offset = i as usize * cols as usize;
@@ -240,9 +246,6 @@ impl ScreenGrid {
             cols: self.cols,
             valid: self.valid,
             throttled: self.throttled,
-            row_offset: self.row_offset,
-            col_offset: self.col_offset,
-            target: self.target,
             blending: self.blending,
             mouse_enabled: self.mouse_enabled,
             zindex: self.zindex,
@@ -252,6 +255,7 @@ impl ScreenGrid {
             comp_height: self.comp_height,
             comp_index: self.comp_index,
             comp_disabled: self.comp_disabled,
+            pending_comp_index_update: self.pending_comp_index_update,
         }
     }
 
@@ -287,10 +291,6 @@ impl ScreenGrid {
         self.attrs.fill(-1);
     }
 
-    fn is_view(&self) -> bool {
-        !self.target.is_null()
-    }
-
     fn get_char_and_attr(&self, row: usize, col: usize) -> (VimSCharT, VimSAttrT) {
         if self.attrs.is_empty() || row >= self.rows as usize || col >= self.cols as usize {
             return (NULL_TERMINATOR as VimSCharT, 0);
@@ -298,7 +298,273 @@ impl ScreenGrid {
         let offset = self.line_offset[row] + col;
         (self.chars[offset], self.attrs[offset])
     }
-}
+
+    fn is_invalid_row(&self, row: usize) -> bool {
+        self.attrs[self.line_offset[row]] < 0
+    }
+
+    /// Check whether the given character needs redrawing:
+    /// - the (first byte of the) character is different
+    /// - the attributes are different
+    /// - the character is multi-byte and the next byte is different
+    /// - the character is two cells wide and the second cell differs.
+    fn is_char_needs_redraw(&self, col: usize, off_to: usize, cols: i32, lb: &LineBuffer) -> bool {
+        unsafe {
+            cols > 0
+                && ((lb.chars[col] != self.chars[off_to]
+                    || lb.attrs[col] != self.attrs[off_to]
+                    || (cols > 1 && lb.chars[col + 1] != self.chars[off_to + 1]))
+                    || exmode_active
+                    || (rdb_flags & RdbFlags::Nodelta as u32 != 0))
+        }
+    }
+
+    /// Move one buffered line to the window grid, but only the characters that
+    /// have actually changed.  Handle insert/delete character.
+    ///
+    /// @param coloff  gives the first column on the grid for this line.
+    /// @param endcol  gives the columns where valid characters are.
+    /// @param clear_width  see SLF_RIGHTLEFT.
+    /// @param flags  can have bits:
+    /// - SLF_RIGHTLEFT  rightleft text, like a window with 'rightleft' option set:
+    ///   - When false, clear columns "endcol" to "clear_width".
+    ///   - When true, clear columns "col" to "endcol".
+    /// - SLF_WRAP  hint to UI that "row" contains a line wrapped into the next row.
+    /// - SLF_INC_VCOL:
+    ///   - When false, use "last_vcol" for grid->vcols[] of the columns to clear.
+    ///   - When true, use an increasing sequence starting from "last_vcol + 1" for
+    ///     grid->vcols[] of the columns to clear.
+    //     TODO: Make size proper sizes and not i32;
+    //     TODO: this has high cyclomatic complexity and should be rewritten!!!
+    //           as currently it is just a copy paste of the old c impl
+    fn put_line_buffer(
+        &mut self,
+        row: i32,
+        col_offset: i32,
+        mut col: i32,
+        mut endcol: i32,
+        mut clear_width: i32,
+        bg_attr: i32,
+        mut clear_attr: i32,
+        mut last_vcol: VimColNrT,
+        flags: i32,
+        lb: &mut LineBuffer,
+    ) {
+        assert!(0 <= row && row < self.rows);
+        let is_right_left_set = flags & Slf::Rightleft as i32 != 0;
+        let is_inc_vcol_set = flags & Slf::IncVcol as i32 != 0;
+        let is_wrap_set = flags & Slf::Wrap as i32 != 0;
+
+        let mut clear_next = false;
+        if endcol > self.cols {
+            endcol = self.cols;
+        }
+        if row >= self.rows || col_offset >= self.cols {
+            return;
+        }
+        let row = row as usize;
+        let invalid_row = unsafe {
+            self.chars.as_mut_ptr() != default_grid.chars && self.is_invalid_row(row) && col == 0
+        };
+        let offset_to = self.line_offset[row] + col_offset as usize;
+        let max_offset_to = self.line_offset[row] + self.cols as usize;
+
+        // When at the start of the text and overwriting the right half of a
+        // two-cell character in the same grid, truncate that into a '>'.
+        if col > 0 && self.chars[offset_to + col as usize] == 0 {
+            lb.chars[col as usize - 1] = schar_from_ascii('>');
+            lb.attrs[col as usize - 1] = self.attrs[offset_to + col as usize - 1];
+            col -= 1;
+        }
+
+        let mut clear_start = endcol;
+        if is_right_left_set {
+            clear_start = col as i32;
+            col = endcol;
+            endcol = clear_width;
+            clear_width = col as i32;
+        }
+
+        unsafe {
+            if p_arshape != 0 && p_tbidi == 0 && endcol > col {
+                line_do_arabic_shape(lb.chars.as_mut_ptr().add(col as usize), endcol - col);
+            }
+        }
+
+        if bg_attr != 0 {
+            for c in col as usize..endcol as usize {
+                lb.attrs[c] = unsafe { hl_combine_attr(bg_attr, lb.attrs[c]) };
+            }
+        }
+        let mut redraw_next =
+            self.is_char_needs_redraw(col as usize, offset_to + col as usize, endcol - col, lb);
+
+        let mut start_dirty = -1;
+        let mut end_dirty = 0;
+        while col < endcol {
+            // 1: normal char
+            // 2: occupies two display cells
+            let char_cells = if col + 1 < endcol && lb.chars[col as usize + 1] == 0 {
+                2
+            } else {
+                1
+            };
+
+            // Does this character need redraw?
+            let redraw_this = redraw_next;
+            let offset = offset_to + col as usize;
+            redraw_next = self.is_char_needs_redraw(
+                (col + char_cells) as usize,
+                offset + char_cells as usize,
+                endcol - col - char_cells,
+                lb,
+            );
+
+            if redraw_this {
+                if start_dirty == -1 {
+                    start_dirty = col;
+                }
+                end_dirty = col + char_cells;
+
+                // When writing a single-width character over a double-width
+                // character and at the end of the redrawn text, need to clear out
+                // the right half of the old character.
+                // Also required when writing the right half of a double-width
+                // char over the left half of an existing one
+                if col + char_cells == endcol
+                    && (offset + char_cells as usize) < max_offset_to
+                    && self.chars[offset + char_cells as usize] == NULL_TERMINATOR as VimSCharT
+                {
+                    clear_next = true;
+                }
+
+                self.chars[offset] = lb.chars[col as usize];
+                if char_cells == 2 {
+                    self.chars[offset + 1] = lb.chars[col as usize + 1];
+                }
+
+                self.attrs[offset] = lb.attrs[col as usize];
+                // For simplicity set the attributes of second half of a
+                // double-wide character equal to the first half.
+                if char_cells == 2 {
+                    self.attrs[offset + 1] = lb.attrs[col as usize];
+                }
+            }
+
+            self.vcols[offset] = lb.vcols[col as usize];
+            if char_cells == 2 {
+                self.vcols[offset + 1] = lb.vcols[col as usize + 1];
+            }
+
+            col += char_cells;
+        } // while
+
+        if clear_next {
+            // Clear the second half of a double-wide character of which the left
+            // half was overwritten with a single-wide character.
+            self.chars[offset_to + col as usize] = schar_from_ascii(' ');
+            end_dirty += 1;
+        }
+
+        // When clearing the left half of a double-wide char also clear the right half.
+        if (offset_to + clear_width as usize) < max_offset_to
+            && self.chars[offset_to + clear_width as usize] == 0
+        {
+            clear_width += 1;
+        }
+
+        let mut clear_dirty_start = -1;
+        let mut clear_end: i32 = -1;
+        if is_right_left_set {
+            for c in (clear_start as usize..clear_width as usize).rev() {
+                let off = offset_to + c;
+                self.vcols[off] = if is_inc_vcol_set {
+                    last_vcol += 1;
+                    last_vcol
+                } else {
+                    last_vcol
+                }
+            }
+        }
+        clear_attr = unsafe { hl_combine_attr(bg_attr, clear_attr) };
+        // blank out the rest of the line
+        // TODO(bfredl): we could cache winline widths
+        for c in clear_start as usize..clear_width as usize {
+            let off = offset_to + c;
+            if self.chars[off] != schar_from_ascii(' ')
+                || self.attrs[off] != clear_attr
+                || unsafe { rdb_flags & RdbFlags::Nodelta as u32 } != 0
+            {
+                self.chars[off] = schar_from_ascii(' ');
+                self.attrs[off] = clear_attr;
+                if clear_dirty_start == -1 {
+                    clear_dirty_start = c as i32;
+                }
+                clear_end = c as i32 + 1;
+            }
+            if !is_right_left_set {
+                self.vcols[off] = if is_inc_vcol_set {
+                    last_vcol += 1;
+                    last_vcol
+                } else {
+                    last_vcol
+                }
+            }
+        }
+
+        if is_right_left_set && start_dirty != -1 && clear_dirty_start != -1 {
+            if self.throttled || clear_dirty_start >= start_dirty - 5 {
+                // cannot draw now or too small to be worth a separate "clear" event
+                start_dirty = clear_dirty_start;
+            } else {
+                ui::ui_line_r(
+                    self,
+                    row as i32,
+                    invalid_row,
+                    col_offset + clear_dirty_start,
+                    col_offset + clear_dirty_start,
+                    col_offset + clear_end,
+                    clear_attr,
+                    is_wrap_set,
+                );
+            }
+            clear_end = end_dirty;
+        } else {
+            if start_dirty == -1 {
+                // clear only
+                start_dirty = clear_dirty_start;
+                end_dirty = clear_dirty_start;
+            } else if clear_end < end_dirty {
+                // put only
+                clear_end = end_dirty;
+            } else {
+                end_dirty = endcol;
+            }
+        }
+        if clear_end > start_dirty {
+            if !self.throttled {
+                ui::ui_line_r(
+                    self,
+                    row as i32,
+                    invalid_row,
+                    col_offset + start_dirty,
+                    col_offset + end_dirty,
+                    col_offset + clear_end,
+                    clear_attr,
+                    is_wrap_set,
+                );
+            } else if !self.dirty_col.is_null() {
+                // TODO(bfredl): really get rid of the extra pseudo terminal in message.c
+                // by using a linebuf_char copy for "throttled message line"
+                unsafe {
+                    if clear_end > *self.dirty_col.add(row) {
+                        *self.dirty_col.add(row) = clear_end;
+                    }
+                }
+            }
+        }
+    }
+} // impl
 
 #[derive(Debug)]
 pub struct LineBuffer {
@@ -355,8 +621,78 @@ impl LineBuffer {
         }
         clb
     }
-}
 
+    fn invalidate_chars_and_attrs(&mut self) {
+        self.chars.fill(0xFF);
+        self.attrs.fill(0xFF);
+    }
+
+    fn fill(
+        &mut self,
+        range: std::ops::Range<usize>,
+        sc: VimSCharT,
+        attr: VimSAttrT,
+        vcol: VimColNrT,
+    ) {
+        self.chars[range.clone()].fill(sc);
+        self.attrs[range.clone()].fill(attr);
+        self.vcols[range.clone()].fill(vcol);
+    }
+    fn mirror_arr<T: Copy, U: Copy>(
+        arr: &mut [T],
+        scratch: &mut [U],
+        first: usize,
+        last: usize,
+        width: usize,
+    ) {
+        let scratch = unsafe {
+            std::slice::from_raw_parts_mut(scratch.as_mut_ptr() as *mut T, scratch.len())
+        };
+        let copy = &mut scratch[first..last];
+        copy.copy_from_slice(&arr[first..last]);
+        let len = last - first;
+        arr[width - len..width]
+            .iter_mut()
+            .rev()
+            .zip(copy.iter())
+            .for_each(|(dest, src)| *dest = *src);
+    }
+    fn mirror_schars(&mut self, first: usize, last: usize, width: usize) {
+        let scratch = unsafe {
+            std::slice::from_raw_parts_mut(
+                self.scratch.as_mut_ptr() as *mut VimSCharT,
+                self.scratch.len(),
+            )
+        };
+        scratch[first..last].copy_from_slice(&self.chars[first..last]);
+        let mirror = width - 1;
+        let mut col = first;
+        while col < last {
+            let rev = mirror - col;
+            if col + 1 < last && scratch[col + 1] == 0 {
+                self.chars[rev - 1] = scratch[col];
+                self.chars[rev] = 0;
+                col += 1;
+            } else {
+                self.chars[rev] = scratch[col];
+            }
+            col += 1;
+        }
+    }
+    fn mirror(&mut self, first: usize, last: usize, width: usize) {
+        assert!(
+            first <= last && last <= width && last - first <= width,
+            "first={}, last={}, max_col={}",
+            first,
+            last,
+            width
+        );
+        self.mirror_schars(first, last, width);
+        Self::mirror_arr(&mut self.attrs, &mut self.scratch, first, last, width);
+        Self::mirror_arr(&mut self.vcols, &mut self.scratch, first, last, width);
+    }
+}
+//                                                                  abcdef           fedcba
 #[derive(Debug)]
 pub struct CLineBufferRef {
     chars: *mut *mut VimSCharT,
@@ -391,6 +727,524 @@ impl CLineBufferRef {
     }
 }
 
+struct LineGrid {
+    grid: *mut CScreenGrid,
+    row: i32,
+    col_offset: i32,
+    max_col: i32,
+    first: i32,
+    last: i32,
+    clear_to: i32,
+    bg_attr: i32,
+    clear_attr: i32,
+    flags: i32,
+}
+
+static mut LINE_GRID: LineGrid = LineGrid::new();
+
+impl LineGrid {
+    const fn new() -> Self {
+        LineGrid {
+            grid: std::ptr::null_mut(),
+            row: -1,
+            col_offset: 0,
+            max_col: 0,
+            first: i32::max_value(),
+            last: 0,
+            clear_to: 0,
+            bg_attr: 0,
+            clear_attr: 0,
+            flags: 0,
+        }
+    }
+    /// Start a group of grid_line_puts calls that builds a single grid line.
+    ///
+    /// Must be matched with a grid_line_flush call before moving to
+    /// another line.
+    fn start(&mut self, view: *mut CGridView, mut row: i32, line_buf: &mut LineBuffer) {
+        let mut col = 0;
+        let grid = grid_adjust(view, &mut row, &mut col);
+        self.screengrid_line_start(grid, row, col, line_buf);
+    }
+    fn screengrid_line_start(
+        &mut self,
+        grid: *mut CScreenGrid,
+        row: i32,
+        col: i32,
+        line_buf: &mut LineBuffer,
+    ) {
+        self.max_col = unsafe { (*grid).cols };
+        assert!(self.grid.is_null());
+        self.grid = grid;
+        self.row = row;
+        self.col_offset = col;
+        self.first = line_buf.size as i32;
+        self.max_col = std::cmp::min(self.max_col, unsafe { (*self.grid).cols } - self.col_offset);
+        self.last = 0;
+        self.clear_to = 0;
+        self.bg_attr = 0;
+        self.clear_attr = 0;
+        self.flags = 0;
+
+        assert!(self.max_col <= line_buf.size as i32);
+
+        unsafe {
+            if full_screen && (rdb_flags & RdbFlags::Invalid as u32 != 0) {
+                // Current batch must not depend on previous contents of linebuf_char.
+                // Set invalid values which will cause assertion failures later if they are used.
+                line_buf.invalidate_chars_and_attrs();
+            }
+        }
+    }
+    /// Get present char from current rendered screen line
+    ///
+    /// This indicates what already is on screen, not the pending render buffer.
+    ///
+    /// @return char or space if out of bounds
+    fn get_schar_and_attr(&self, mut col: i32) -> (VimSCharT, VimSAttrT) {
+        if col < self.max_col {
+            col += self.col_offset;
+            let grid: ScreenGrid = unsafe { (&*self.grid).into() };
+            let offset = grid.line_offset[self.row as usize] + col as usize;
+            let sc = grid.chars[offset];
+            let attr = grid.attrs[offset];
+            unsafe {
+                *self.grid = grid.to_cgrid();
+            }
+            (sc, attr)
+        } else {
+            // TODO check what shall we return for attr in this case
+            (schar_from_ascii(' '), -1)
+        }
+    }
+    fn put_schar_and_attr(&mut self, col: i32, sc: VimSCharT, attr: VimSAttrT) {
+        assert!(!self.grid.is_null());
+        if col >= self.max_col {
+            return;
+        }
+        let mut grid: ScreenGrid = unsafe { (&*self.grid).into() };
+        grid.chars[col as usize] = sc;
+        grid.attrs[col as usize] = attr;
+        self.first = std::cmp::min(self.first, col);
+        // TODO(bfredl): Y U NO DOUBLEWIDTH?
+        self.last = std::cmp::max(self.last, col + 1);
+        grid.vcols[col as usize] = -1;
+        unsafe {
+            *self.grid = grid.to_cgrid();
+        }
+    }
+    /// Put string "text" at "col" position relative to the grid line from the
+    /// recent grid_line_start() call.
+    ///
+    /// @param textlen length of string or -1 to use strlen(text)
+    /// Note: only outputs within one row!
+    ///
+    /// @return number of grid cells used
+    fn puts(&mut self, mut col: i32, text: &[u8], attr: VimSAttrT, lb: &mut LineBuffer) -> usize {
+        assert!(!self.grid.is_null());
+        let start_col = col;
+        let mut it = text.iter().enumerate();
+        while let Some((i, c)) = it.next() {
+            if col >= self.max_col || i >= text.len() || *c == NULL_TERMINATOR {
+                break;
+            }
+            let p = text[i..].as_ptr() as *const i8;
+            let max_len = (text.len() - i) as i32;
+            let mut mbyte_blen = unsafe { mbyte::utfc_ptr2len_len(p, max_len) };
+            if mbyte_blen > max_len {
+                mbyte_blen = 1;
+            }
+            let mut first_c = 0;
+            let mut schar = unsafe { mbyte::utfc_ptrlen2schar(p, mbyte_blen, &mut first_c) };
+            let mut mbyte_cells = unsafe { mbyte::utf_ptr2cells_len(p, mbyte_blen) };
+            if mbyte_cells > 2 || schar == 0 {
+                mbyte_cells = 1;
+                schar = schar_from_char(0xFFFD);
+            }
+
+            if col + mbyte_cells > self.max_col {
+                // Only 1 cell left, but character requires 2 cells:
+                // display a '>' in the last column to avoid wrapping.
+                schar = schar_from_ascii('>');
+                mbyte_cells = 1;
+            }
+
+            // When at the start of the text and overwriting the right half of a
+            // two-cell character in the same grid, truncate that into a '>'.
+            if i == 0 && col > self.first && col < self.last && lb.chars[col as usize] == 0 {
+                lb.chars[col as usize - 1] = schar_from_ascii('>');
+            }
+
+            let ucol = col as usize;
+            lb.chars[ucol] = schar;
+            lb.attrs[ucol] = attr;
+            lb.vcols[ucol] = -1;
+            if mbyte_cells == 2 {
+                lb.chars[ucol + 1] = 0;
+                lb.attrs[ucol + 1] = attr;
+                lb.vcols[ucol + 1] = -1;
+            }
+            col += mbyte_cells;
+            for _ in 0..mbyte_blen - 1 {
+                it.next();
+            }
+        }
+        if col > start_col {
+            self.first = std::cmp::min(self.first, start_col);
+            self.last = std::cmp::max(self.last, col);
+        }
+        (col - start_col) as usize
+    }
+    fn fill(
+        &mut self,
+        start_col: i32,
+        end_col: i32,
+        sc: VimSCharT,
+        attr: VimSAttrT,
+        line_buf: &mut LineBuffer,
+    ) -> i32 {
+        let end_col = std::cmp::min(end_col, self.max_col);
+        if start_col >= end_col {
+            return end_col;
+        }
+        let start = start_col as usize;
+        let end = end_col as usize;
+        line_buf.fill(start..end, sc, attr, -1);
+
+        self.first = std::cmp::min(self.first, start_col);
+        self.last = std::cmp::max(self.last, end_col);
+
+        end_col
+    }
+    /// bg_attr     applies to both the buffered line and the columns to clear
+    /// clear_attr  applies only to the columns to clear
+    fn clear_end(
+        &mut self,
+        start_col: i32,
+        end_col: i32,
+        bg_attr: VimSAttrT,
+        clear_attr: VimSAttrT,
+    ) {
+        if self.first > start_col {
+            self.first = start_col;
+            self.last = start_col;
+        }
+        self.clear_to = end_col;
+        self.bg_attr = bg_attr;
+        self.clear_attr = clear_attr;
+    }
+    /// move the cursor to a position in a currently rendered line.
+    fn cursor_goto(&self, col: i32) {
+        unsafe {
+            ui::ui_grid_cursor_goto((*self.grid).handle, self.row, col);
+        }
+    }
+    fn mirror(&mut self, width: i32, lb: &mut LineBuffer) {
+        self.clear_to = std::cmp::max(self.last, self.clear_to);
+        if self.first >= self.clear_to {
+            return;
+        }
+
+        lb.mirror(self.first as usize, self.last as usize, width as usize);
+
+        let first = self.first;
+        let last = self.last;
+
+        self.first = width - self.clear_to;
+        self.clear_to = width - first;
+        self.last = width - last;
+
+        self.flags |= Slf::Rightleft as i32;
+    }
+    /// End a group of grid_line_puts calls and send the screen buffer to the UI layer.
+    fn flush(&mut self, lb: &mut LineBuffer) {
+        let grid = self.grid;
+        self.grid = std::ptr::null_mut();
+        self.clear_to = std::cmp::max(self.last, self.clear_to);
+        assert!(self.clear_to <= self.max_col);
+        if self.first >= self.clear_to {
+            return;
+        }
+        let mut g: ScreenGrid = unsafe { (&*grid).into() };
+        g.put_line_buffer(
+            self.row,
+            self.col_offset,
+            self.first,
+            self.last,
+            self.clear_to,
+            self.bg_attr,
+            self.clear_attr,
+            -1,
+            self.flags,
+            lb,
+        );
+        unsafe {
+            *grid = g.to_cgrid();
+        }
+    }
+    /// flush grid line but only if on a valid row
+    ///
+    /// This is a stopgap until message.c has been refactored to behave
+    fn flush_if_valid_row(&mut self, lb: &mut LineBuffer) {
+        if self.row < 0 || self.row >= unsafe { (*self.grid).rows } {
+            if (unsafe { rdb_flags } & RdbFlags::Invalid as u32) != 0 {
+                panic!("rdb_flags & RdbFlags::Invalid != 0");
+            } else {
+                self.grid = std::ptr::null_mut();
+                return;
+            }
+        }
+        self.flush(lb);
+    }
+}
+
+/// Start a group of grid_line_puts calls that builds a single grid line.
+///
+/// Must be matched with a grid_line_flush call before moving to
+/// another line.
+#[unsafe(no_mangle)]
+pub extern "C" fn grid_line_start(view: *mut CGridView, row: libc::c_int) {
+    unsafe {
+        let clb = CLineBufferRef::new();
+        let mut lb = LineBuffer::from_cline_buffer_ref(&clb);
+
+        LINE_GRID.start(view, row, &mut lb);
+
+        lb.to_cline_buffer_ref();
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn screengrid_line_start(
+    grid: *mut CScreenGrid,
+    row: libc::c_int,
+    col: libc::c_int,
+) {
+    unsafe {
+        let clb = CLineBufferRef::new();
+        let mut lb = LineBuffer::from_cline_buffer_ref(&clb);
+
+        LINE_GRID.screengrid_line_start(grid, row, col, &mut lb);
+
+        lb.to_cline_buffer_ref();
+    }
+}
+
+/// Get present char from current rendered screen line
+///
+/// This indicates what already is on screen, not the pending render buffer.
+///
+/// @return char or space if out of bounds
+#[unsafe(no_mangle)]
+pub extern "C" fn grid_line_getchar(col: libc::c_int, attr: *mut VimSAttrT) -> VimSCharT {
+    let (sc, a) = unsafe { LINE_GRID.get_schar_and_attr(col) };
+    if !attr.is_null() {
+        unsafe {
+            *attr = a;
+        }
+    }
+    sc
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn grid_line_put_schar(col: libc::c_int, schar: VimSCharT, attr: VimSAttrT) {
+    unsafe {
+        LINE_GRID.put_schar_and_attr(col, schar, attr);
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn grid_line_puts(
+    col: libc::c_int,
+    text: *const libc::c_char,
+    text_len: libc::c_int,
+    attr: VimSAttrT,
+) -> libc::c_int {
+    let clb = CLineBufferRef::new();
+    let mut lb = unsafe { LineBuffer::from_cline_buffer_ref(&clb) };
+    let len = if text_len == -1 {
+        unsafe { libc::strlen(text) }
+    } else {
+        text_len as usize
+    };
+    let num_cells = unsafe {
+        LINE_GRID.puts(
+            col,
+            std::slice::from_raw_parts(text as *const u8, len),
+            attr,
+            &mut lb,
+        )
+    };
+    unsafe {
+        lb.to_cline_buffer_ref();
+    }
+    num_cells as i32
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn grid_line_fill(
+    start_col: libc::c_int,
+    end_col: libc::c_int,
+    sc: VimSCharT,
+    attr: libc::c_int,
+) -> libc::c_int {
+    unsafe {
+        let clb = CLineBufferRef::new();
+        let mut lb = LineBuffer::from_cline_buffer_ref(&clb);
+
+        let ret = LINE_GRID.fill(start_col, end_col, sc, attr, &mut lb);
+
+        lb.to_cline_buffer_ref();
+
+        ret
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn grid_line_clear_end(
+    start_col: libc::c_int,
+    end_col: libc::c_int,
+    bg_attr: VimSAttrT,
+    clear_attr: VimSAttrT,
+) {
+    unsafe {
+        LINE_GRID.clear_end(start_col, end_col, bg_attr, clear_attr);
+    }
+}
+
+/// move the cursor to a position in a currently rendered line.
+#[unsafe(no_mangle)]
+pub extern "C" fn grid_line_cursor_goto(col: libc::c_int) {
+    unsafe {
+        LINE_GRID.cursor_goto(col);
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn grid_line_mirror(width: libc::c_int) {
+    unsafe {
+        let clb = CLineBufferRef::new();
+        let mut lb = LineBuffer::from_cline_buffer_ref(&clb);
+
+        LINE_GRID.mirror(width, &mut lb);
+
+        lb.to_cline_buffer_ref();
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn linebuf_mirror(
+    pfirst: *mut libc::c_int,
+    plast: *mut libc::c_int,
+    pclear: *mut libc::c_int,
+    width: libc::c_int,
+) {
+    unsafe {
+        let clb = CLineBufferRef::new();
+        let mut lb = LineBuffer::from_cline_buffer_ref(&clb);
+        lb.mirror(*pfirst as usize, *plast as usize, width as usize);
+        lb.to_cline_buffer_ref();
+
+        let first = *pfirst;
+        let last = *plast;
+
+        *pfirst = width - *pclear;
+        *pclear = width - first;
+        *plast = width - last;
+    }
+}
+
+/// End a group of grid_line_puts calls and send the screen buffer to the UI layer.
+#[unsafe(no_mangle)]
+pub extern "C" fn grid_line_flush() {
+    unsafe {
+        let clb = CLineBufferRef::new();
+        let mut lb = LineBuffer::from_cline_buffer_ref(&clb);
+
+        LINE_GRID.flush(&mut lb);
+
+        lb.to_cline_buffer_ref();
+    }
+}
+
+/// flush grid line but only if on a valid row
+///
+/// This is a stopgap until message.c has been refactored to behave
+#[unsafe(no_mangle)]
+pub extern "C" fn grid_line_flush_if_valid_row() {
+    unsafe {
+        let clb = CLineBufferRef::new();
+        let mut lb = LineBuffer::from_cline_buffer_ref(&clb);
+
+        LINE_GRID.flush_if_valid_row(&mut lb);
+
+        lb.to_cline_buffer_ref();
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn grid_put_linebuf(
+    grid: *mut CScreenGrid,
+    row: libc::c_int,
+    col_offset: libc::c_int,
+    col: libc::c_int,
+    end_col: libc::c_int,
+    clear_width: libc::c_int,
+    bg_attr: libc::c_int,
+    clear_attr: libc::c_int,
+    last_vcol: VimColNrT,
+    flags: libc::c_int,
+) {
+    let clb = CLineBufferRef::new();
+    let mut lb = unsafe { LineBuffer::from_cline_buffer_ref(&clb) };
+    let mut g: ScreenGrid = unsafe { (&*grid).into() };
+    g.put_line_buffer(
+        row,
+        col_offset,
+        col,
+        end_col,
+        clear_width,
+        bg_attr,
+        clear_attr,
+        last_vcol,
+        flags,
+        &mut lb,
+    );
+    unsafe {
+        *grid = g.to_cgrid();
+        lb.to_cline_buffer_ref();
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn grid_clear(
+    view: *mut CGridView,
+    start_row: libc::c_int,
+    end_row: libc::c_int,
+    start_col: libc::c_int,
+    mut end_col: libc::c_int,
+    attr: libc::c_int,
+) {
+    let clb = CLineBufferRef::new();
+    let mut lb = unsafe { LineBuffer::from_cline_buffer_ref(&clb) };
+    for row in start_row..end_row {
+        unsafe {
+            LINE_GRID.start(view, row, &mut lb);
+            end_col = std::cmp::min(end_col, LINE_GRID.max_col);
+            if LINE_GRID.row >= (*LINE_GRID.grid).rows || start_col >= end_col {
+                LINE_GRID.grid = std::ptr::null_mut();
+                return;
+            }
+            LINE_GRID.clear_end(start_col, end_col, attr, 0);
+            LINE_GRID.flush(&mut lb);
+        }
+    }
+    unsafe {
+        lb.to_cline_buffer_ref();
+    }
+}
+
+/// Converts ascii char to `VimSCharT`
 pub fn schar_from_ascii(c: char) -> VimSCharT {
     if cfg!(target_endian = "big") {
         return (c as u32).to_be();
@@ -486,10 +1340,6 @@ pub struct CScreenGrid {
 
     throttled: bool,
 
-    row_offset: libc::c_int,
-    col_offset: libc::c_int,
-    target: *mut CScreenGrid,
-
     blending: bool,
 
     mouse_enabled: bool,
@@ -505,6 +1355,8 @@ pub struct CScreenGrid {
     comp_index: libc::size_t,
 
     comp_disabled: bool,
+
+    pending_comp_index_update: bool,
 }
 
 #[repr(C)]
@@ -513,12 +1365,6 @@ pub struct CGridView {
     target: *mut CScreenGrid,
     row_offset: libc::c_int,
     col_offset: libc::c_int,
-}
-
-impl CScreenGrid {
-    fn is_view(&self) -> bool {
-        !self.target.is_null()
-    }
 }
 
 macro_rules! init_ptr {
@@ -550,10 +1396,6 @@ impl From<&CScreenGrid> for ScreenGrid {
             cols: cgrid.cols,
             valid: cgrid.valid,
             throttled: cgrid.throttled,
-            row_offset: cgrid.row_offset,
-            col_offset: cgrid.col_offset,
-            target: cgrid.target,
-            //view: todo!(),
             blending: cgrid.blending,
             mouse_enabled: cgrid.mouse_enabled,
             zindex: cgrid.zindex,
@@ -563,6 +1405,7 @@ impl From<&CScreenGrid> for ScreenGrid {
             comp_height: cgrid.comp_height,
             comp_index: cgrid.comp_index,
             comp_disabled: cgrid.comp_disabled,
+            pending_comp_index_update: cgrid.pending_comp_index_update,
         }
     }
 }
@@ -1051,6 +1894,62 @@ mod tests {
         ];
         for (t, e) in &test_cases {
             assert_eq!(super::schar_len_impl(u32::from_le_bytes(*t), &mut gm), *e);
+        }
+    }
+    #[link(name = "nvim")]
+    unsafe extern "C" {
+        fn linebuf_mirror(
+            firstp: *mut libc::c_int,
+            lastp: *mut libc::c_int,
+            clearp: *mut libc::c_int,
+            maxcol: libc::c_int,
+        );
+        fn utf_ptr2cells(p_in: *const libc::c_char) -> libc::c_int;
+    }
+    #[test]
+    fn line_buffer_mirror() {
+        let mut lb = LineBuffer::new(8);
+        lb.chars = vec![1, 0, 2, 3, 0, 4, 5, 0];
+        lb.attrs = vec![1, 2, 3, 4, 5, 6, 7, 8];
+        lb.vcols = vec![0; 8];
+        lb.scratch = vec![0; 8];
+        println!("chars: {:?}", lb.chars);
+        println!("attrs: {:?}", lb.attrs);
+
+        let first = 0;
+        let last = 8;
+        let max_col = 8;
+
+        lb.mirror(first, last, max_col);
+
+        println!("chars: {:?}", lb.chars);
+        println!("attrs: {:?}", lb.attrs);
+    }
+    #[test]
+    fn test2() {
+        unsafe {
+            alloc_initial_line_buffer();
+            let clb = CLineBufferRef::new();
+            let mut lb = LineBuffer::from_cline_buffer_ref(&clb);
+            lb.realloc(8);
+            lb.chars = vec![1, 0, 2, 3, 0, 4, 5, 0];
+            lb.attrs = vec![1, 2, 3, 4, 5, 6, 7, 8];
+            println!("chars: {:?}", lb.chars);
+            println!("attrs: {:?}", lb.attrs);
+            lb.to_cline_buffer_ref();
+
+            let mut first = 0;
+            let mut last = 8;
+            let mut clear = 0;
+            let max_col = 8;
+
+            linebuf_mirror(&raw mut first, &raw mut last, &raw mut clear, max_col);
+
+            let clb = CLineBufferRef::new();
+            let lb = LineBuffer::from_cline_buffer_ref(&clb);
+            println!("chars: {:?}", lb.chars);
+            println!("attrs: {:?}", lb.attrs);
+            lb.to_cline_buffer_ref();
         }
     }
 }

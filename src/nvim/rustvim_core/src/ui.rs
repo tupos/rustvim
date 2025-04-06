@@ -1,7 +1,7 @@
 use crate::{
     defines::{Integer, OptInt},
     generated::enums::RdbFlags,
-    grid::{CScreenGrid, ScreenGrid, VimSAttrT, VimSCharT},
+    grid::{CScreenGrid, ScreenGrid, VimHandleT, VimSAttrT, VimSCharT},
 };
 
 // TODO: move to highlight
@@ -41,6 +41,7 @@ unsafe extern "C" {
     );
     fn ui_call_grid_cursor_goto(grid: Integer, row: Integer, col: Integer);
     fn ui_call_flush();
+    pub fn ui_grid_cursor_goto(grid_handle: VimHandleT, new_row: libc::c_int, new_col: libc::c_int);
     fn os_sleep(ms: u64);
 }
 
