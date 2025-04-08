@@ -634,9 +634,11 @@ impl LineBuffer {
         attr: VimSAttrT,
         vcol: VimColNrT,
     ) {
-        self.chars[range.clone()].fill(sc);
-        self.attrs[range.clone()].fill(attr);
-        self.vcols[range.clone()].fill(vcol);
+        for i in range {
+            self.chars[i] = sc;
+            self.attrs[i] = attr;
+            self.vcols[i] = vcol;
+        }
     }
     fn mirror_arr<T: Copy, U: Copy>(
         arr: &mut [T],
