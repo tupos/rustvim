@@ -817,21 +817,23 @@ impl LineGrid {
             (schar_from_ascii(' '), -1)
         }
     }
-    fn put_schar_and_attr(&mut self, col: i32, sc: VimSCharT, attr: VimSAttrT) {
+    fn put_schar_and_attr(
+        &mut self,
+        col: i32,
+        sc: VimSCharT,
+        attr: VimSAttrT,
+        lb: &mut LineBuffer,
+    ) {
         assert!(!self.grid.is_null());
         if col >= self.max_col {
             return;
         }
-        let mut grid: ScreenGrid = unsafe { (&*self.grid).into() };
-        grid.chars[col as usize] = sc;
-        grid.attrs[col as usize] = attr;
+        lb.chars[col as usize] = sc;
+        lb.attrs[col as usize] = attr;
         self.first = std::cmp::min(self.first, col);
         // TODO(bfredl): Y U NO DOUBLEWIDTH?
         self.last = std::cmp::max(self.last, col + 1);
-        grid.vcols[col as usize] = -1;
-        unsafe {
-            *self.grid = grid.to_cgrid();
-        }
+        lb.vcols[col as usize] = -1;
     }
     /// Put string "text" at "col" position relative to the grid line from the
     /// recent grid_line_start() call.
@@ -1048,8 +1050,11 @@ pub extern "C" fn grid_line_getchar(col: libc::c_int, attr: *mut VimSAttrT) -> V
 
 #[unsafe(no_mangle)]
 pub extern "C" fn grid_line_put_schar(col: libc::c_int, schar: VimSCharT, attr: VimSAttrT) {
+    let clb = CLineBufferRef::new();
     unsafe {
-        LINE_GRID.put_schar_and_attr(col, schar, attr);
+        let mut lb = LineBuffer::from_cline_buffer_ref(&clb);
+        LINE_GRID.put_schar_and_attr(col, schar, attr, &mut lb);
+        lb.to_cline_buffer_ref();
     }
 }
 
