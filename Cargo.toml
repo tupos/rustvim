@@ -10,15 +10,24 @@ members = [
 [workspace.dependencies]
 libc = "0.2"
 
+[profile.release-debinfo]
+inherits = "release"
+debug = true
+lto = false
+
+[profile.release-debinfo-lto]
+inherits = "release-debinfo"
+lto = true
+
 [profile.release-lto]
 inherits = "release"
 lto = true
 
 [profile.strip-release]
 inherits = "release"
-lto = true
+lto = false
+strip = "symbols"
 
 [profile.strip-release-lto]
-inherits = "release"
+inherits = "strip-release"
 lto = true
-strip = "symbols"
