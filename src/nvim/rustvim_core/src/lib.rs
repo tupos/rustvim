@@ -5,5 +5,6 @@ pub mod eval;
 pub mod generated;
 pub mod grid;
 pub mod mbyte;
+pub mod option;
 pub mod pos;
 pub mod ui;
