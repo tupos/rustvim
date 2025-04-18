@@ -1,7 +1,9 @@
 #![allow(dead_code)]
 #![allow(static_mut_refs)]
 pub mod defines;
+pub mod eval;
 pub mod generated;
 pub mod grid;
 pub mod mbyte;
+pub mod pos;
 pub mod ui;
