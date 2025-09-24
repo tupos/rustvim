@@ -70,6 +70,7 @@ extern void grid_clear(GridView *grid, int start_row, int end_row, int start_col
 extern void grid_put_linebuf(ScreenGrid *grid, int row, int coloff, int col, int endcol, int clear_width,
                       int bg_attr, int clear_attr, colnr_T last_vcol, int flags);
 
+extern void grid_assign_handle(ScreenGrid *grid);
 extern void alloc_initial_line_buffer(void);
 
 /// Put a ASCII character in a screen cell.

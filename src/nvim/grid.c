@@ -43,6 +43,8 @@
 // Per-cell attributes
 size_t linebuf_size = 0;
 
+int last_grid_handle = DEFAULT_GRID_HANDLE;
+
 #ifdef ORDER_BIG_ENDIAN
 # define schar_idx(sc) (sc & (0x00FFFFFF))
 #else
@@ -741,17 +743,6 @@ void win_grid_alloc(win_T *wp)
     ui_call_grid_resize(grid_allocated->handle,
                         grid_allocated->cols, grid_allocated->rows);
     ui_check_cursor_grid(grid_allocated->handle);
-  }
-}
-
-/// assign a handle to the grid. The grid need not be allocated.
-void grid_assign_handle(ScreenGrid *grid)
-{
-  static int last_grid_handle = DEFAULT_GRID_HANDLE;
-
-  // only assign a grid handle if not already
-  if (grid->handle == 0) {
-    grid->handle = ++last_grid_handle;
   }
 }
 

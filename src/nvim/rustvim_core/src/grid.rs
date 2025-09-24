@@ -41,6 +41,8 @@ unsafe extern "C" {
     static mut msg_grid_adj: CScreenGrid;
     static mut pum_grid: CScreenGrid;
 
+    static mut last_grid_handle: libc::c_int;
+
     static mut linebuf_char: *mut VimSCharT;
     static mut linebuf_attr: *mut VimSAttrT;
     static mut linebuf_vcol: *mut VimColNrT;
@@ -563,6 +565,15 @@ impl ScreenGrid {
                 }
             }
         }
+    }
+
+    /// assign a handle to the grid
+    fn assign_handle(&mut self, handle: VimHandleT) -> Option<VimHandleT> {
+        if self.handle == 0 {
+            self.handle = handle + 1;
+            return Some(self.handle);
+        }
+        None
     }
 } // impl
 
@@ -1782,6 +1793,21 @@ pub extern "C" fn schar_from_char(mut c: libc::c_int) -> VimSCharT {
         mbyte::utf_char2bytes(c, bytes.as_mut_ptr() as *mut i8);
     }
     VimSCharT::from_le_bytes(bytes)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn grid_assign_handle(grid: *mut CScreenGrid) {
+    let mut g: ScreenGrid = unsafe { (&*grid).into() };
+
+    unsafe {
+        if let Some(lh) = g.assign_handle(last_grid_handle) {
+            last_grid_handle = lh;
+        }
+    }
+
+    unsafe {
+        *grid = g.to_cgrid();
+    }
 }
 
 #[cfg(test)]
