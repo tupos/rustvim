@@ -575,6 +575,143 @@ impl ScreenGrid {
         }
         None
     }
+
+    fn line_copy(&mut self, to: usize, from: usize, col: usize, width: usize) {
+        let offset_to = self.line_offset[to] + col;
+        let offset_from = self.line_offset[from] + col;
+        let range = offset_from..(offset_from + width);
+        self.chars.copy_within(range.clone(), offset_to);
+        self.attrs.copy_within(range.clone(), offset_to);
+        self.vcols.copy_within(range.clone(), offset_to);
+    }
+
+    /// insert lines on the screen and move the existing lines down
+    /// 'line_count' is the number of lines to be inserted.
+    /// 'end' is the line after the scrolled part. Normally it is Rows.
+    /// 'col' is the column from with we start inserting.
+    ///
+    /// 'row', 'col' and 'end' are relative to the start of the region.
+    fn ins_lines(&mut self, row: i32, line_count: i32, end: i32, col: i32, width: i32) {
+        if line_count <= 0 {
+            return;
+        }
+
+        let mut j;
+        let mut temp;
+        for i in 0..line_count {
+            j = end - 1 - i;
+            assert!(j >= 0, "j is less than 0: end={}, i={}", end, i);
+
+            if self.cols != width {
+                loop {
+                    j -= line_count;
+                    if j < row {
+                        break;
+                    }
+                    self.line_copy(
+                        (j + line_count) as usize,
+                        j as usize,
+                        col as usize,
+                        width as usize,
+                    );
+                }
+                j += line_count;
+                self.clear_line(
+                    self.line_offset[j as usize] + col as usize,
+                    width as usize,
+                    false,
+                );
+            } else {
+                temp = self.line_offset[j as usize];
+                loop {
+                    j -= line_count;
+                    if j < row {
+                        break;
+                    }
+                    self.line_offset[(j + line_count) as usize] = self.line_offset[j as usize];
+                }
+                self.line_offset[(j + line_count) as usize] = temp;
+                self.clear_line(temp, self.cols as usize, false);
+            }
+        }
+        if !self.throttled {
+            unsafe {
+                ui::ui_call_grid_scroll(
+                    self.handle as i64,
+                    row as i64,
+                    end as i64,
+                    col as i64,
+                    (col + width) as i64,
+                    -line_count as i64,
+                    0,
+                );
+            }
+        }
+    }
+
+    /// delete lines on the screen and move lines up.
+    /// 'end' is the line after the scrolled part. Normally it is Rows.
+    /// When scrolling region used 'off' is the offset from the top for the region.
+    /// 'row' and 'end' are relative to the start of the region.
+    fn del_lines(&mut self, row: i32, line_count: i32, end: i32, col: i32, width: i32) {
+        if line_count <= 0 {
+            return;
+        }
+
+        let mut j;
+        let mut temp;
+        for i in 0..line_count {
+            j = row + i;
+            assert!(j >= 0, "j is less than 0: row={}, i={}", row, i);
+
+            if self.cols != width {
+                // need to copy part of a line
+                loop {
+                    j += line_count;
+                    if j > end - 1 {
+                        break;
+                    }
+                    self.line_copy(
+                        (j - line_count) as usize,
+                        j as usize,
+                        col as usize,
+                        width as usize,
+                    );
+                }
+                j -= line_count;
+                self.clear_line(
+                    self.line_offset[j as usize] + col as usize,
+                    width as usize,
+                    false,
+                );
+            } else {
+                // whole width, moving the line pointers is faster
+                temp = self.line_offset[j as usize];
+                loop {
+                    j += line_count;
+                    if j > end - 1 {
+                        break;
+                    }
+                    self.line_offset[(j - line_count) as usize] = self.line_offset[j as usize];
+                }
+                self.line_offset[(j - line_count) as usize] = temp;
+                self.clear_line(temp, self.cols as usize, false);
+            }
+        }
+        if !self.throttled {
+            unsafe {
+                ui::ui_call_grid_scroll(
+                    self.handle as i64,
+                    row as i64,
+                    end as i64,
+                    col as i64,
+                    (col + width) as i64,
+                    line_count as i64,
+                    0,
+                );
+            }
+        }
+    }
 } // impl
 
 #[derive(Debug)]
@@ -1804,6 +1941,42 @@ pub extern "C" fn grid_assign_handle(grid: *mut CScreenGrid) {
             last_grid_handle = lh;
         }
     }
+
+    unsafe {
+        *grid = g.to_cgrid();
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn grid_ins_lines(
+    grid: *mut CScreenGrid,
+    row: libc::c_int,
+    line_count: libc::c_int,
+    end: libc::c_int,
+    col: libc::c_int,
+    width: libc::c_int,
+) {
+    let mut g: ScreenGrid = unsafe { (&*grid).into() };
+
+    g.ins_lines(row, line_count, end, col, width);
+
+    unsafe {
+        *grid = g.to_cgrid();
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn grid_del_lines(
+    grid: *mut CScreenGrid,
+    row: libc::c_int,
+    line_count: libc::c_int,
+    end: libc::c_int,
+    col: libc::c_int,
+    width: libc::c_int,
+) {
+    let mut g: ScreenGrid = unsafe { (&*grid).into() };
+
+    g.del_lines(row, line_count, end, col, width);
 
     unsafe {
         *grid = g.to_cgrid();

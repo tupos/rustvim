@@ -71,6 +71,10 @@ extern void grid_put_linebuf(ScreenGrid *grid, int row, int coloff, int col, int
                       int bg_attr, int clear_attr, colnr_T last_vcol, int flags);
 
 extern void grid_assign_handle(ScreenGrid *grid);
+
+extern void grid_ins_lines(ScreenGrid *grid, int row, int line_count, int end, int col, int width);
+extern void grid_del_lines(ScreenGrid *grid, int row, int line_count, int end, int col, int width);
+
 extern void alloc_initial_line_buffer(void);
 
 /// Put a ASCII character in a screen cell.
