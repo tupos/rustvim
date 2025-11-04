@@ -3,6 +3,7 @@
 pub mod defines;
 pub mod eval;
 pub mod generated;
+pub mod globals;
 pub mod grid;
 pub mod mbyte;
 pub mod option;

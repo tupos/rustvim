@@ -1,7 +1,7 @@
 // vim: sw=4
 use crate::{
     generated::enums::{RdbFlags, Slf},
-    mbyte, ui,
+    globals, mbyte, ui,
 };
 use std::{borrow::Borrow, collections::BTreeMap, rc::Rc};
 
@@ -27,9 +27,6 @@ static mut GLYPH_MAPPING: GlyphMapping = GlyphMapping::new();
 static DEFAULT_GRID_HANDLE: u32 = 1;
 
 unsafe extern "C" {
-    static mut Rows: libc::c_int;
-    static mut Columns: libc::c_int;
-
     static mut full_screen: bool;
     static mut rdb_flags: libc::c_uint;
 
@@ -1694,7 +1691,7 @@ impl GlyphMapping {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn alloc_initial_line_buffer() {
-    let _ = CLineBufferRef::new().alloc(unsafe { Columns as usize });
+    let _ = CLineBufferRef::new().alloc(unsafe { globals::Columns as usize });
 }
 
 #[unsafe(no_mangle)]
