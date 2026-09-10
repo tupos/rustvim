@@ -13,5 +13,5 @@ unsafe extern "C" {
         len: libc::c_int,
         firstc: *mut libc::c_int,
     ) -> VimSCharT;
-    pub fn utf_char2bytes(c: libc::c_int, buf: *const libc::c_char) -> libc::c_int;
+    pub fn utf_char2bytes(c: libc::c_int, buf: *mut libc::c_char) -> libc::c_int;
 }

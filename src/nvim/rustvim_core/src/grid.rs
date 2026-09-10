@@ -46,8 +46,6 @@ unsafe extern "C" {
     static mut linebuf_scratch: *mut VimSScratchT;
     static mut linebuf_size: libc::size_t;
 
-    static mut exmode_active: bool;
-
     fn decor_check_invalid_glyphs();
     fn check_chars_options() -> bool;
     fn line_do_arabic_shape(buf: *mut VimSCharT, cols: libc::c_int);
@@ -312,8 +310,9 @@ impl ScreenGrid {
             cols > 0
                 && ((lb.chars[col] != self.chars[off_to]
                     || lb.attrs[col] != self.attrs[off_to]
-                    || (cols > 1 && lb.chars[col + 1] != self.chars[off_to + 1]))
-                    || exmode_active
+                    || (cols > 1
+                        && lb.chars[col + 1] == 0
+                        && lb.chars[col + 1] != self.chars[off_to + 1]))
                     || (rdb_flags & RdbFlags::Nodelta as u32 != 0))
         }
     }
@@ -997,7 +996,7 @@ impl LineGrid {
             if col >= self.max_col || i >= text.len() || *c == NULL_TERMINATOR {
                 break;
             }
-            let p = text[i..].as_ptr() as *const i8;
+            let p = text[i..].as_ptr().cast::<libc::c_char>();
             let max_len = (text.len() - i) as i32;
             let mut mbyte_blen = unsafe { mbyte::utfc_ptr2len_len(p, max_len) };
             if mbyte_blen > max_len {
@@ -1924,7 +1923,7 @@ pub extern "C" fn schar_from_char(mut c: libc::c_int) -> VimSCharT {
     }
     let mut bytes = (0 as VimSCharT).to_le_bytes();
     unsafe {
-        mbyte::utf_char2bytes(c, bytes.as_mut_ptr() as *mut i8);
+        mbyte::utf_char2bytes(c, bytes.as_mut_ptr().cast::<libc::c_char>());
     }
     VimSCharT::from_le_bytes(bytes)
 }
