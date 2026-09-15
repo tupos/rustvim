@@ -770,6 +770,12 @@ endif()
 
 set(RUST_WORKSPACE_DIR "${PROJECT_SOURCE_DIR}")
 set(CARGO_OUTPUT_DIR ${PROJECT_BINARY_DIR}/rust_target)
+set(RUST_TARGET "$ENV{CARGO_BUILD_TARGET}" CACHE STRING
+  "Cargo target triple; required for cross-compilation")
+
+if(CMAKE_CROSSCOMPILING AND NOT RUST_TARGET)
+  message(FATAL_ERROR "RUST_TARGET must be set to a Cargo target triple when cross-compiling")
+endif()
 
 set(RUST_BUILD_PROFILE "release")
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
@@ -790,8 +796,15 @@ if(RUST_BUILD_PROFILE STREQUAL "dev")
   set(RUST_TARGET_DIRNAME "debug")
 endif()
 
+set(RUST_TARGET_ARGS)
+set(RUST_TARGET_OUTPUT_DIR "${CARGO_OUTPUT_DIR}")
+if(RUST_TARGET)
+  list(APPEND RUST_TARGET_ARGS --target "${RUST_TARGET}")
+  set(RUST_TARGET_OUTPUT_DIR "${RUST_TARGET_OUTPUT_DIR}/${RUST_TARGET}")
+endif()
+
 set(RUST_LIB_PATH
-  "${CARGO_OUTPUT_DIR}/${RUST_TARGET_DIRNAME}/${CMAKE_STATIC_LIBRARY_PREFIX}rustvim_lib${CMAKE_STATIC_LIBRARY_SUFFIX}")
+  "${RUST_TARGET_OUTPUT_DIR}/${RUST_TARGET_DIRNAME}/${CMAKE_STATIC_LIBRARY_PREFIX}rustvim_lib${CMAKE_STATIC_LIBRARY_SUFFIX}")
 
 file(GLOB_RECURSE RUST_SOURCES
   "${CMAKE_CURRENT_SOURCE_DIR}/*.rs"
@@ -801,7 +814,7 @@ add_custom_command(
   OUTPUT "${RUST_LIB_PATH}"
   DEPENDS ${RUST_SOURCES}
   WORKING_DIRECTORY "${RUST_WORKSPACE_DIR}/src/nvim/rustvim_lib"
-  COMMAND cargo build --profile "${RUST_BUILD_PROFILE}" --target-dir "${CARGO_OUTPUT_DIR}"
+  COMMAND cargo build --profile "${RUST_BUILD_PROFILE}" ${RUST_TARGET_ARGS} --target-dir "${CARGO_OUTPUT_DIR}"
   COMMENT "Building Rust library with Cargo..."
 )
 add_custom_target(build_rust ALL
