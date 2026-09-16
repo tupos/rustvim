@@ -777,18 +777,31 @@ if(CMAKE_CROSSCOMPILING AND NOT RUST_TARGET)
   message(FATAL_ERROR "RUST_TARGET must be set to a Cargo target triple when cross-compiling")
 endif()
 
-set(RUST_BUILD_PROFILE "release")
-if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-  set(RUST_BUILD_PROFILE "dev")
-elseif(CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
-  set(RUST_BUILD_PROFILE "release-debinfo")
-elseif(CMAKE_BUILD_TYPE STREQUAL "MinSizeRel")
-  set(RUST_BUILD_PROFILE "strip-release")
+set(RUST_RELEASE_PROFILE "release")
+set(RUST_RELWITHDEBINFO_PROFILE "release-debinfo")
+set(RUST_MINSIZEREL_PROFILE "strip-release")
+if(ENABLE_LTO)
+  string(APPEND RUST_RELEASE_PROFILE "-lto")
+  string(APPEND RUST_RELWITHDEBINFO_PROFILE "-lto")
+  string(APPEND RUST_MINSIZEREL_PROFILE "-lto")
 endif()
 
-set(RUST_RELEASE_PROFILES "release;strip-release;release-debinfo")
-if(RUST_BUILD_PROFILE IN_LIST RUST_RELEASE_PROFILES AND ENABLE_LTO)
-  set(RUST_BUILD_PROFILE "${RUST_BUILD_PROFILE}-lto")
+if(isMultiConfig)
+  set(RUST_BUILD_PROFILE "${RUST_RELEASE_PROFILE}")
+  set(RUST_BUILD_PROFILE
+    "$<IF:$<CONFIG:MinSizeRel>,${RUST_MINSIZEREL_PROFILE},${RUST_BUILD_PROFILE}>")
+  set(RUST_BUILD_PROFILE
+    "$<IF:$<CONFIG:RelWithDebInfo>,${RUST_RELWITHDEBINFO_PROFILE},${RUST_BUILD_PROFILE}>")
+  set(RUST_BUILD_PROFILE "$<IF:$<CONFIG:Debug>,dev,${RUST_BUILD_PROFILE}>")
+else()
+  set(RUST_BUILD_PROFILE "${RUST_RELEASE_PROFILE}")
+  if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    set(RUST_BUILD_PROFILE "dev")
+  elseif(CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
+    set(RUST_BUILD_PROFILE "${RUST_RELWITHDEBINFO_PROFILE}")
+  elseif(CMAKE_BUILD_TYPE STREQUAL "MinSizeRel")
+    set(RUST_BUILD_PROFILE "${RUST_MINSIZEREL_PROFILE}")
+  endif()
 endif()
 
 set(RUST_TARGET_DIRNAME "${RUST_BUILD_PROFILE}")
@@ -803,28 +816,66 @@ if(RUST_TARGET)
   set(RUST_TARGET_OUTPUT_DIR "${RUST_TARGET_OUTPUT_DIR}/${RUST_TARGET}")
 endif()
 
-set(RUST_LIB_PATH
-  "${RUST_TARGET_OUTPUT_DIR}/${RUST_TARGET_DIRNAME}/${CMAKE_STATIC_LIBRARY_PREFIX}rustvim_lib${CMAKE_STATIC_LIBRARY_SUFFIX}")
-
 file(GLOB_RECURSE RUST_SOURCES
   "${CMAKE_CURRENT_SOURCE_DIR}/*.rs"
 )
 
-add_custom_command(
-  OUTPUT "${RUST_LIB_PATH}"
-  DEPENDS ${RUST_SOURCES}
-  WORKING_DIRECTORY "${RUST_WORKSPACE_DIR}/src/nvim/rustvim_lib"
-  COMMAND cargo build --profile "${RUST_BUILD_PROFILE}" ${RUST_TARGET_ARGS} --target-dir "${CARGO_OUTPUT_DIR}"
-  COMMENT "Building Rust library with Cargo..."
-)
-add_custom_target(build_rust ALL
-  DEPENDS "${RUST_LIB_PATH}"
-)
-set_target_properties(main_lib PROPERTIES
-  LINK_DEPENDS "${RUST_LIB_PATH}"
-)
+set(RUST_LIB_NAME
+  "${CMAKE_STATIC_LIBRARY_PREFIX}rustvim_lib${CMAKE_STATIC_LIBRARY_SUFFIX}")
+
+if(isMultiConfig)
+  set(RUST_DEBUG_LIB_PATH "${RUST_TARGET_OUTPUT_DIR}/debug/${RUST_LIB_NAME}")
+  set(RUST_RELEASE_LIB_PATH
+    "${RUST_TARGET_OUTPUT_DIR}/${RUST_RELEASE_PROFILE}/${RUST_LIB_NAME}")
+  set(RUST_RELWITHDEBINFO_LIB_PATH
+    "${RUST_TARGET_OUTPUT_DIR}/${RUST_RELWITHDEBINFO_PROFILE}/${RUST_LIB_NAME}")
+  set(RUST_MINSIZEREL_LIB_PATH
+    "${RUST_TARGET_OUTPUT_DIR}/${RUST_MINSIZEREL_PROFILE}/${RUST_LIB_NAME}")
+
+  add_custom_target(build_rust ALL
+    COMMAND cargo build --profile "${RUST_BUILD_PROFILE}" ${RUST_TARGET_ARGS} --target-dir "${CARGO_OUTPUT_DIR}"
+    BYPRODUCTS
+      "${RUST_DEBUG_LIB_PATH}"
+      "${RUST_RELEASE_LIB_PATH}"
+      "${RUST_RELWITHDEBINFO_LIB_PATH}"
+      "${RUST_MINSIZEREL_LIB_PATH}"
+    WORKING_DIRECTORY "${RUST_WORKSPACE_DIR}/src/nvim/rustvim_lib"
+    COMMENT "Building Rust library with Cargo..."
+    VERBATIM
+  )
+
+  add_library(rustvim_lib STATIC IMPORTED GLOBAL)
+  set_target_properties(rustvim_lib PROPERTIES
+    IMPORTED_CONFIGURATIONS "Debug;Release;RelWithDebInfo;MinSizeRel"
+    IMPORTED_LOCATION "${RUST_RELEASE_LIB_PATH}"
+    IMPORTED_LOCATION_DEBUG "${RUST_DEBUG_LIB_PATH}"
+    IMPORTED_LOCATION_RELEASE "${RUST_RELEASE_LIB_PATH}"
+    IMPORTED_LOCATION_RELWITHDEBINFO "${RUST_RELWITHDEBINFO_LIB_PATH}"
+    IMPORTED_LOCATION_MINSIZEREL "${RUST_MINSIZEREL_LIB_PATH}"
+  )
+  add_dependencies(rustvim_lib build_rust)
+  set_property(TARGET main_lib APPEND PROPERTY
+    INTERFACE_LINK_DEPENDS ${RUST_SOURCES})
+  target_link_libraries(main_lib INTERFACE rustvim_lib)
+else()
+  set(RUST_LIB_PATH "${RUST_TARGET_OUTPUT_DIR}/${RUST_TARGET_DIRNAME}/${RUST_LIB_NAME}")
+  add_custom_command(
+    OUTPUT "${RUST_LIB_PATH}"
+    DEPENDS ${RUST_SOURCES}
+    WORKING_DIRECTORY "${RUST_WORKSPACE_DIR}/src/nvim/rustvim_lib"
+    COMMAND cargo build --profile "${RUST_BUILD_PROFILE}" ${RUST_TARGET_ARGS} --target-dir "${CARGO_OUTPUT_DIR}"
+    COMMENT "Building Rust library with Cargo..."
+  )
+  add_custom_target(build_rust ALL
+    DEPENDS "${RUST_LIB_PATH}"
+  )
+  set_target_properties(main_lib PROPERTIES
+    LINK_DEPENDS "${RUST_LIB_PATH}"
+  )
+  target_link_libraries(main_lib INTERFACE "${RUST_LIB_PATH}")
+endif()
+
 add_dependencies(main_lib build_rust)
-target_link_libraries(main_lib INTERFACE "${RUST_LIB_PATH}")
 
 target_sources(nlua0 PUBLIC ${NLUA0_SOURCES})
 
