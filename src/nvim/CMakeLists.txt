@@ -816,9 +816,17 @@ if(RUST_TARGET)
   set(RUST_TARGET_OUTPUT_DIR "${RUST_TARGET_OUTPUT_DIR}/${RUST_TARGET}")
 endif()
 
-file(GLOB_RECURSE RUST_SOURCES
+file(GLOB_RECURSE RUST_SOURCES CONFIGURE_DEPENDS
   "${CMAKE_CURRENT_SOURCE_DIR}/*.rs"
 )
+file(GLOB_RECURSE RUST_MANIFESTS CONFIGURE_DEPENDS
+  "${CMAKE_CURRENT_SOURCE_DIR}/Cargo.toml"
+)
+list(APPEND RUST_MANIFESTS
+  "${RUST_WORKSPACE_DIR}/Cargo.toml"
+  "${RUST_WORKSPACE_DIR}/Cargo.lock"
+)
+set(RUST_DEPENDENCIES ${RUST_SOURCES} ${RUST_MANIFESTS})
 
 set(RUST_LIB_NAME
   "${CMAKE_STATIC_LIBRARY_PREFIX}rustvim_lib${CMAKE_STATIC_LIBRARY_SUFFIX}")
@@ -839,6 +847,7 @@ if(isMultiConfig)
       "${RUST_RELEASE_LIB_PATH}"
       "${RUST_RELWITHDEBINFO_LIB_PATH}"
       "${RUST_MINSIZEREL_LIB_PATH}"
+    DEPENDS ${RUST_DEPENDENCIES}
     WORKING_DIRECTORY "${RUST_WORKSPACE_DIR}/src/nvim/rustvim_lib"
     COMMENT "Building Rust library with Cargo..."
     VERBATIM
@@ -855,13 +864,13 @@ if(isMultiConfig)
   )
   add_dependencies(rustvim_lib build_rust)
   set_property(TARGET main_lib APPEND PROPERTY
-    INTERFACE_LINK_DEPENDS ${RUST_SOURCES})
+    INTERFACE_LINK_DEPENDS ${RUST_DEPENDENCIES})
   target_link_libraries(main_lib INTERFACE rustvim_lib)
 else()
   set(RUST_LIB_PATH "${RUST_TARGET_OUTPUT_DIR}/${RUST_TARGET_DIRNAME}/${RUST_LIB_NAME}")
   add_custom_command(
     OUTPUT "${RUST_LIB_PATH}"
-    DEPENDS ${RUST_SOURCES}
+    DEPENDS ${RUST_DEPENDENCIES}
     WORKING_DIRECTORY "${RUST_WORKSPACE_DIR}/src/nvim/rustvim_lib"
     COMMAND cargo build --profile "${RUST_BUILD_PROFILE}" ${RUST_TARGET_ARGS} --target-dir "${CARGO_OUTPUT_DIR}"
     COMMENT "Building Rust library with Cargo..."
