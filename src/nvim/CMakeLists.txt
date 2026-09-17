@@ -842,7 +842,7 @@ if(isMultiConfig)
     "${RUST_TARGET_OUTPUT_DIR}/${RUST_MINSIZEREL_PROFILE}/${RUST_LIB_NAME}")
 
   add_custom_target(build_rust ALL
-    COMMAND ${CARGO_PRG} build --profile "${RUST_BUILD_PROFILE}" ${RUST_TARGET_ARGS} --target-dir "${CARGO_OUTPUT_DIR}"
+    COMMAND ${CARGO_PRG} build --locked --profile "${RUST_BUILD_PROFILE}" ${RUST_TARGET_ARGS} --target-dir "${CARGO_OUTPUT_DIR}"
     BYPRODUCTS
       "${RUST_DEBUG_LIB_PATH}"
       "${RUST_RELEASE_LIB_PATH}"
@@ -873,7 +873,7 @@ else()
     OUTPUT "${RUST_LIB_PATH}"
     DEPENDS ${RUST_DEPENDENCIES}
     WORKING_DIRECTORY "${RUST_WORKSPACE_DIR}/src/nvim/rustvim_lib"
-    COMMAND ${CARGO_PRG} build --profile "${RUST_BUILD_PROFILE}" ${RUST_TARGET_ARGS} --target-dir "${CARGO_OUTPUT_DIR}"
+    COMMAND ${CARGO_PRG} build --locked --profile "${RUST_BUILD_PROFILE}" ${RUST_TARGET_ARGS} --target-dir "${CARGO_OUTPUT_DIR}"
     COMMENT "Building Rust library with Cargo..."
   )
   add_custom_target(build_rust ALL
