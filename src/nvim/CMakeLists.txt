@@ -997,6 +997,24 @@ set_target_properties(
 target_compile_definitions(libnvim PRIVATE MAKE_LIB)
 target_link_libraries(libnvim PRIVATE main_lib PUBLIC libuv)
 
+get_filename_component(UTF8PROC_LIBRARY_DIR "${UTF8PROC_LIBRARY}" DIRECTORY)
+set(RUST_TEST_FLAGS
+  "-Lnative=$<TARGET_FILE_DIR:libnvim> -Lnative=${UTF8PROC_LIBRARY_DIR}")
+if(NOT MSVC)
+  string(APPEND RUST_TEST_FLAGS " -Clinker=${CMAKE_C_COMPILER}")
+endif()
+
+add_custom_target(rusttest
+  COMMAND ${CMAKE_COMMAND} -E env
+    "RUSTFLAGS=$ENV{RUSTFLAGS} ${RUST_TEST_FLAGS}"
+    ${CARGO_PRG} test --workspace --locked ${RUST_TARGET_ARGS}
+      --target-dir "${CARGO_OUTPUT_DIR}"
+  DEPENDS libnvim
+  WORKING_DIRECTORY "${RUST_WORKSPACE_DIR}"
+  USES_TERMINAL
+  VERBATIM
+)
+
 #-------------------------------------------------------------------------------
 # Lint
 #-------------------------------------------------------------------------------
