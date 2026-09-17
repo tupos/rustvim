@@ -277,11 +277,7 @@ impl ScreenGrid {
     }
 
     fn attrs_fill(valid: bool) -> VimSAttrT {
-        if valid {
-            0
-        } else {
-            -1
-        }
+        if valid { 0 } else { -1 }
     }
 
     fn invalidate(&mut self) {
@@ -1847,11 +1843,7 @@ pub extern "C" fn schar_get_ascii(sc: VimSCharT) -> libc::c_char {
             NULL_TERMINATOR
         }
     } else {
-        if sc < 0x80 {
-            sc as u8
-        } else {
-            NULL_TERMINATOR
-        }
+        if sc < 0x80 { sc as u8 } else { NULL_TERMINATOR }
     };
     c as libc::c_char
 }
