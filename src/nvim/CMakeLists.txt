@@ -768,6 +768,7 @@ if(WIN32)
   target_sources(nvim_bin PRIVATE ${NVIM_RUNTIME_DIR}/windows_icon.rc)
 endif()
 
+find_program(CARGO_PRG cargo REQUIRED)
 set(RUST_WORKSPACE_DIR "${PROJECT_SOURCE_DIR}")
 set(CARGO_OUTPUT_DIR ${PROJECT_BINARY_DIR}/rust_target)
 set(RUST_TARGET "$ENV{CARGO_BUILD_TARGET}" CACHE STRING
@@ -841,7 +842,7 @@ if(isMultiConfig)
     "${RUST_TARGET_OUTPUT_DIR}/${RUST_MINSIZEREL_PROFILE}/${RUST_LIB_NAME}")
 
   add_custom_target(build_rust ALL
-    COMMAND cargo build --profile "${RUST_BUILD_PROFILE}" ${RUST_TARGET_ARGS} --target-dir "${CARGO_OUTPUT_DIR}"
+    COMMAND ${CARGO_PRG} build --profile "${RUST_BUILD_PROFILE}" ${RUST_TARGET_ARGS} --target-dir "${CARGO_OUTPUT_DIR}"
     BYPRODUCTS
       "${RUST_DEBUG_LIB_PATH}"
       "${RUST_RELEASE_LIB_PATH}"
@@ -872,7 +873,7 @@ else()
     OUTPUT "${RUST_LIB_PATH}"
     DEPENDS ${RUST_DEPENDENCIES}
     WORKING_DIRECTORY "${RUST_WORKSPACE_DIR}/src/nvim/rustvim_lib"
-    COMMAND cargo build --profile "${RUST_BUILD_PROFILE}" ${RUST_TARGET_ARGS} --target-dir "${CARGO_OUTPUT_DIR}"
+    COMMAND ${CARGO_PRG} build --profile "${RUST_BUILD_PROFILE}" ${RUST_TARGET_ARGS} --target-dir "${CARGO_OUTPUT_DIR}"
     COMMENT "Building Rust library with Cargo..."
   )
   add_custom_target(build_rust ALL
