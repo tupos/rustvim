@@ -1433,7 +1433,7 @@ fn schar_to_bytes(sc: VimSCharT, glyph_map: &GlyphMapping) -> GlyphBuff {
     if GlyphMapping::is_glyph_mapping_schart(sc) {
         glyph_map
             .get_bytes(sc)
-            .map(|gb| gb.clone())
+            .cloned()
             .unwrap_or(GlyphBuff::new(0, [0; MAX_SCHAR_SIZE]))
     } else {
         let b = sc.to_le_bytes();
