@@ -3,7 +3,12 @@ use crate::{
     generated::enums::{RdbFlags, Slf},
     globals, mbyte, ui,
 };
-use std::{borrow::Borrow, collections::BTreeMap, ffi::CStr, rc::Rc};
+use std::{
+    borrow::{Borrow, Cow},
+    collections::BTreeMap,
+    ffi::CStr,
+    rc::Rc,
+};
 
 /// if data[0] is 0xFF, then data[1..4] is a 24-bit index (in machine endianness)
 /// otherwise it must be a UTF-8 string of length maximum 4 (no NUL when n=4)
@@ -1447,36 +1452,6 @@ fn schar_from_bytes(buf: &[u8], glyph_map: &mut GlyphMapping) -> VimSCharT {
     }
 }
 
-/// Takes schar and either returns bytes from the glyph_map or returns bytes from the schar. The
-/// former situation happens when schar is the "indexed" one. Does not set the final
-/// NULL_TERMINATOR in the buffer.
-fn schar_to_bytes(sc: VimSCharT, glyph_map: &GlyphMapping) -> GlyphBuff {
-    if GlyphMapping::is_glyph_mapping_schart(sc) {
-        glyph_map
-            .get_bytes(sc)
-            .cloned()
-            .unwrap_or(GlyphBuff::new(0, [0; MAX_SCHAR_SIZE]))
-    } else {
-        let b = sc.to_ne_bytes();
-        let pos = b
-            .iter()
-            .enumerate()
-            .find_map(|(pos, el)| if *el == 0 { Some(pos) } else { None })
-            .unwrap_or(4);
-        let mut ret = [0; MAX_SCHAR_SIZE];
-        ret[..pos].copy_from_slice(&b[..pos]);
-        GlyphBuff::new(pos as u8, ret)
-    }
-}
-
-/// Sets NULL_TERMINATOR
-fn schar_to_null_term_bytes(sc: VimSCharT, glyph_map: &GlyphMapping) -> GlyphBuff {
-    let mut glyph_buff = schar_to_bytes(sc, glyph_map);
-    assert!((glyph_buff.len as usize) < MAX_SCHAR_SIZE);
-    glyph_buff.buff[glyph_buff.len as usize] = NULL_TERMINATOR;
-    glyph_buff
-}
-
 fn schar_cells_impl(sc: VimSCharT, glyph_map: &GlyphMapping) -> libc::c_int {
     // Keep the common ASCII case independent of the glyph cache and mbyte code.
     let is_ascii = if cfg!(target_endian = "big") {
@@ -1488,7 +1463,7 @@ fn schar_cells_impl(sc: VimSCharT, glyph_map: &GlyphMapping) -> libc::c_int {
         return 1;
     }
 
-    let glyph = schar_to_null_term_bytes(sc, glyph_map);
+    let glyph = glyph_map.resolve(sc);
     mbyte::utf_ptr2cells(glyph.as_c_str())
 }
 
@@ -1609,9 +1584,20 @@ struct GlyphBuff {
 }
 
 impl GlyphBuff {
-    /// Constructs a new empty `GlyphBuff`
-    fn new(len: u8, buff: [u8; MAX_SCHAR_SIZE]) -> Self {
-        Self { len, buff }
+    fn from_bytes(bytes: &[u8]) -> Self {
+        assert!(bytes.len() < MAX_SCHAR_SIZE);
+        assert!(!bytes.contains(&NULL_TERMINATOR));
+
+        let mut buff = [NULL_TERMINATOR; MAX_SCHAR_SIZE];
+        buff[..bytes.len()].copy_from_slice(bytes);
+        Self {
+            len: bytes.len() as u8,
+            buff,
+        }
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        &self.buff[..self.len as usize]
     }
 
     fn as_c_str(&self) -> &CStr {
@@ -1688,11 +1674,7 @@ impl GlyphMapping {
     /// Inserts into the cache. Returns the mapping of `VimSCharT` to bytes,
     /// that are used in the grid to draw an actual content of the cell.
     fn insert(&mut self, val: &[u8]) -> VimSCharT {
-        assert!(val.len() < MAX_SCHAR_SIZE);
-
-        let mut arr = [0; MAX_SCHAR_SIZE];
-        arr[..val.len()].copy_from_slice(val);
-        let k: Rc<GlyphBuff> = Rc::new(GlyphBuff::new(val.len() as u8, arr));
+        let k = Rc::new(GlyphBuff::from_bytes(val));
         if let Some(idx) = self.index.get(&k) {
             return *idx;
         }
@@ -1708,6 +1690,24 @@ impl GlyphMapping {
     fn get_bytes(&self, c: VimSCharT) -> Option<&GlyphBuff> {
         self.dict.get(&c).map(|glyph_buff| glyph_buff.borrow())
     }
+
+    /// Resolves an inline screen character or a glyph-cache index to its
+    /// NUL-terminated byte representation.
+    fn resolve(&self, c: VimSCharT) -> Cow<'_, GlyphBuff> {
+        if Self::is_glyph_mapping_schart(c) {
+            self.get_bytes(c)
+                .map(Cow::Borrowed)
+                .unwrap_or_else(|| Cow::Owned(GlyphBuff::from_bytes(&[])))
+        } else {
+            let bytes = c.to_ne_bytes();
+            let len = bytes
+                .iter()
+                .position(|byte| *byte == NULL_TERMINATOR)
+                .unwrap_or(bytes.len());
+            Cow::Owned(GlyphBuff::from_bytes(&bytes[..len]))
+        }
+    }
+
     /// Returns the length of the bytes from the mapping schart -> bytes
     fn get_len(&self, c: VimSCharT) -> Option<usize> {
         self.dict.get(&c).map(|glyph_buff| glyph_buff.len as usize)
@@ -1876,10 +1876,11 @@ pub unsafe extern "C" fn schar_get_adv(
     sc: VimSCharT,
 ) -> libc::size_t {
     let gm = unsafe { &mut GLYPH_MAPPING };
-    let gb = schar_to_bytes(sc, gm);
-    let len = gb.len as usize;
+    let glyph = gm.resolve(sc);
+    let bytes = glyph.as_bytes();
+    let len = bytes.len();
     let slice = unsafe { std::slice::from_raw_parts_mut((*buf_out).cast::<u8>(), len) };
-    slice.copy_from_slice(&gb.buff[..len]);
+    slice.copy_from_slice(bytes);
     unsafe {
         *buf_out = (*buf_out).add(len);
     }
@@ -2125,26 +2126,17 @@ mod tests {
     #[test]
     fn glyph_mapping_insert() {
         let mut gm = GlyphMapping::new();
-        let val: usize = 0xCFA2ADA4F0;
-        if cfg!(target_endian = "big") {
-            let bytes = val.to_be_bytes();
-            let mapping = gm.insert(&bytes);
-            assert!(gm.dict.contains_key(&mapping));
-            assert_eq!(gm.get_next_free(), 0xFF000002);
-            let mapping1 = gm.insert(&bytes);
-            assert_eq!(mapping, mapping1);
-            assert_eq!(gm.dict.len(), 1);
-            assert_eq!(gm.index.len(), 1);
-        } else {
-            let bytes = val.to_le_bytes();
-            let mapping = gm.insert(&bytes);
-            assert!(gm.dict.contains_key(&mapping));
-            assert_eq!(gm.get_next_free(), 0x02FF);
-            let mapping1 = gm.insert(&bytes);
-            assert_eq!(mapping, mapping1);
-            assert_eq!(gm.dict.len(), 1);
-            assert_eq!(gm.index.len(), 1);
-        }
+        let bytes = [0x73, 0xcc, 0xb8, 0xcc, 0x89, 0xcc, 0xbf];
+
+        let mapping = gm.insert(&bytes);
+        assert!(gm.dict.contains_key(&mapping));
+        assert_eq!(mapping, GlyphMapping::to_schart(0));
+        assert_eq!(gm.next_free, GlyphMapping::to_schart(1));
+
+        let existing_mapping = gm.insert(&bytes);
+        assert_eq!(mapping, existing_mapping);
+        assert_eq!(gm.dict.len(), 1);
+        assert_eq!(gm.index.len(), 1);
     }
     #[test]
     fn glyph_mapping_is_full() {
@@ -2176,41 +2168,36 @@ mod tests {
         }
     }
     #[test]
-    fn schar_to_bytes() {
+    fn glyph_mapping_resolve() {
         let mut gm = GlyphMapping::new();
         gm.insert(&[0x73, 0xcc, 0xb8, 0xcc, 0x89, 0xcc, 0xbf]);
-        let set_bytes = |buf: &[u8]| -> [u8; MAX_SCHAR_SIZE] {
-            let mut ret = [0; MAX_SCHAR_SIZE];
-            ret[..buf.len()].copy_from_slice(buf);
-            ret
-        };
         let test_cases = [
-            ([0x41, 0, 0, 0], GlyphBuff::new(1, set_bytes(&[0x41]))),
-            ([0xFF, 1, 0, 0], GlyphBuff::new(0, set_bytes(&[]))),
+            ([0x41, 0, 0, 0], GlyphBuff::from_bytes(&[0x41])),
+            ([0xFF, 1, 0, 0], GlyphBuff::from_bytes(&[])),
             (
                 [0xFF, 0, 0, 0],
-                GlyphBuff::new(7, set_bytes(&[0x73, 0xcc, 0xb8, 0xcc, 0x89, 0xcc, 0xbf])),
+                GlyphBuff::from_bytes(&[0x73, 0xcc, 0xb8, 0xcc, 0x89, 0xcc, 0xbf]),
             ),
         ];
         for (t, e) in &test_cases {
-            assert_eq!(super::schar_to_bytes(u32::from_ne_bytes(*t), &gm), *e);
+            assert_eq!(gm.resolve(u32::from_ne_bytes(*t)).as_ref(), e);
         }
     }
+
     #[test]
-    fn schar_to_null_term_bytes() {
+    fn glyph_buffer_views() {
         let mut gm = GlyphMapping::new();
 
         let two_byte_schar = super::schar_from_bytes("é".as_bytes(), &mut gm);
-        let two_byte_glyph = super::schar_to_null_term_bytes(two_byte_schar, &gm);
-        assert_eq!(two_byte_glyph.len, 2);
-        assert_eq!(&two_byte_glyph.buff[..3], &[0xc3, 0xa9, NULL_TERMINATOR]);
+        let two_byte_glyph = gm.resolve(two_byte_schar);
+        assert_eq!(two_byte_glyph.as_bytes(), "é".as_bytes());
+        assert_eq!(two_byte_glyph.as_c_str().to_bytes(), "é".as_bytes());
 
         let max_bytes = [b'a'; MAX_SCHAR_SIZE - 1];
         let max_schar = super::schar_from_bytes(&max_bytes, &mut gm);
-        let max_glyph = super::schar_to_null_term_bytes(max_schar, &gm);
-        assert_eq!(max_glyph.len as usize, max_bytes.len());
-        assert_eq!(&max_glyph.buff[..max_bytes.len()], &max_bytes);
-        assert_eq!(max_glyph.buff[max_bytes.len()], NULL_TERMINATOR);
+        let max_glyph = gm.resolve(max_schar);
+        assert_eq!(max_glyph.as_bytes(), max_bytes);
+        assert_eq!(max_glyph.as_c_str().to_bytes(), max_bytes);
     }
 
     #[test]
