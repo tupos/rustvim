@@ -1466,7 +1466,7 @@ fn schar_len_impl(sc: VimSCharT, glyph_map: &GlyphMapping) -> usize {
             .iter()
             .enumerate()
             .find_map(|(pos, el)| if *el == 0 { Some(pos) } else { None })
-            .unwrap_or(4) as usize
+            .unwrap_or(4)
     }
 }
 
