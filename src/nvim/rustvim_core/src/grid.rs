@@ -1475,7 +1475,7 @@ pub extern "C" fn grid_clear(
             if LINE_GRID.row >= (*LINE_GRID.grid).rows || start_col >= end_col {
                 LINE_GRID.grid = std::ptr::null_mut();
                 LINE_GRID.active = false;
-                return;
+                break;
             }
             LINE_GRID.clear_end(start_col, end_col, attr, 0);
             LINE_GRID.flush(&mut lb);
