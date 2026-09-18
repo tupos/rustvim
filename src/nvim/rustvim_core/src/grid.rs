@@ -382,7 +382,7 @@ impl ScreenGrid {
 
         let mut clear_start = endcol;
         if is_right_left_set {
-            clear_start = col as i32;
+            clear_start = col;
             col = endcol;
             endcol = clear_width;
             clear_width = col as i32;
