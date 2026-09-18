@@ -51,13 +51,6 @@ int last_grid_handle = DEFAULT_GRID_HANDLE;
 # define schar_idx(sc) (sc >> 8)
 #endif
 
-int schar_get_first_codepoint(schar_T sc)
-{
-  char sc_buf[MAX_SCHAR_SIZE];
-  schar_get(sc_buf, sc);
-  return utf_ptr2char(sc_buf);
-}
-
 /// Get the first two codepoints of an schar, or NUL when not available
 static void schar_get_first_two_codepoints(schar_T sc, int *c0, int *c1)
 {

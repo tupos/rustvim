@@ -47,6 +47,7 @@ extern bool schar_cache_clear_if_full(void);
 extern void schar_cache_clear(void);
 extern bool schar_high(schar_T sc);
 extern size_t schar_get(char *buf_out, schar_T sc);
+extern int schar_get_first_codepoint(schar_T sc);
 extern size_t schar_get_adv(char **buf_out, schar_T sc);
 extern size_t schar_len(schar_T sc);
 extern bool schar_in_arabic_block(schar_T sc);

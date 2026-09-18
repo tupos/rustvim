@@ -1467,6 +1467,11 @@ fn schar_cells_impl(sc: VimSCharT, glyph_map: &GlyphMapping) -> libc::c_int {
     mbyte::utf_ptr2cells(glyph.as_c_str())
 }
 
+fn schar_get_first_codepoint_impl(sc: VimSCharT, glyph_map: &GlyphMapping) -> libc::c_int {
+    let glyph = glyph_map.resolve(sc);
+    mbyte::utf_ptr2char(glyph.as_c_str())
+}
+
 /// Returns the length of the schar.
 fn schar_len_impl(sc: VimSCharT, glyph_map: &GlyphMapping) -> usize {
     if GlyphMapping::is_glyph_mapping_schart(sc) {
@@ -1915,6 +1920,19 @@ pub unsafe extern "C" fn schar_cells(sc: VimSCharT) -> libc::c_int {
     schar_cells_impl(sc, glyph_map)
 }
 
+/// # Safety
+///
+/// Must be called on Neovim's main thread while the global glyph mapping is
+/// not being mutated.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn schar_get_first_codepoint(sc: VimSCharT) -> libc::c_int {
+    // SAFETY: The caller guarantees exclusive main-thread access to Neovim's
+    // global screen state. This function borrows the mapping only for the
+    // duration of this call and does not mutate it.
+    let glyph_map = unsafe { &GLYPH_MAPPING };
+    schar_get_first_codepoint_impl(sc, glyph_map)
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn schar_len(sc: VimSCharT) -> libc::size_t {
     let gm = unsafe { &mut GLYPH_MAPPING };
@@ -2205,6 +2223,27 @@ mod tests {
         let mut gm = GlyphMapping::new();
         let sc = super::schar_from_bytes(b"A", &mut gm);
         assert_eq!(super::schar_cells_impl(sc, &gm), 1);
+    }
+
+    #[test]
+    fn schar_get_first_codepoint() {
+        let mut gm = GlyphMapping::new();
+        let test_cases: &[(&[u8], libc::c_int)] = &[
+            (b"", 0),
+            (b"A", 0x41),
+            ("é".as_bytes(), 0xe9),
+            ("界".as_bytes(), 0x754c),
+            ("界\u{301}".as_bytes(), 0x754c),
+            (&[0xc2, 0x7f], 0xc2),
+        ];
+
+        for &(bytes, expected_codepoint) in test_cases {
+            let sc = super::schar_from_bytes(bytes, &mut gm);
+            assert_eq!(
+                super::schar_get_first_codepoint_impl(sc, &gm),
+                expected_codepoint
+            );
+        }
     }
 
     #[test]
