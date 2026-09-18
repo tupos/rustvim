@@ -271,7 +271,7 @@ impl ScreenGrid {
         copy: bool,
         line_buffer: &mut LineBuffer,
     ) -> Self {
-        let old_grid: ScreenGrid = (&*grid).into();
+        let old_grid: ScreenGrid = grid.into();
 
         Self::from_grid(&old_grid, rows, cols, valid, copy, line_buffer)
     }
