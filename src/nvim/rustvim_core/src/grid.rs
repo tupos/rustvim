@@ -1879,7 +1879,7 @@ pub extern "C" fn grid_adjust(
         *row_offset += (*grid).row_offset;
         *col_offset += (*grid).col_offset;
 
-        return (*grid).target;
+        (*grid).target
     }
 }
 
