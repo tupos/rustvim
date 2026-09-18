@@ -1441,7 +1441,7 @@ fn schar_to_bytes(sc: VimSCharT, glyph_map: &GlyphMapping) -> GlyphBuff {
             .iter()
             .enumerate()
             .find_map(|(pos, el)| if *el == 0 { Some(pos) } else { None })
-            .unwrap_or(4) as usize;
+            .unwrap_or(4);
         let mut ret = [0; MAX_SCHAR_SIZE];
         ret[..pos].copy_from_slice(&b[..pos]);
         GlyphBuff::new(pos as u8, ret)
