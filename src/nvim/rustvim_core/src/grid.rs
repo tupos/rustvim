@@ -230,6 +230,13 @@ impl ScreenGrid {
         self.vcols[range.clone()].copy_from_slice(&src.vcols[src_range.clone()]);
     }
 
+    /// # Safety
+    ///
+    /// The returned `CScreenGrid` becomes the unique owner of the `chars`,
+    /// `attrs`, `vcols`, and `line_offset` allocations. The caller must not
+    /// duplicate or independently free those pointers, must access them only
+    /// within the lengths described by `rows` and `cols`, and must reconstruct
+    /// at most one `ScreenGrid` from them.
     pub unsafe fn to_cgrid(self) -> CScreenGrid {
         CScreenGrid {
             handle: self.handle,
