@@ -201,7 +201,7 @@ impl ScreenGrid {
             // (used when resizing the window at the "--more--" prompt or when
             // executing an external command, for the GUI).
             if copy {
-                new_grid.copy_grid_content_from_old_grid(&grid, i);
+                new_grid.copy_grid_content_from_old_grid(grid, i);
             }
         }
 
