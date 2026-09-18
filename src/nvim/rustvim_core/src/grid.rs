@@ -897,8 +897,10 @@ impl CLineBufferRef {
     }
 }
 
-struct LineGrid {
-    grid: *mut CScreenGrid,
+/// Grid-independent state for one buffered line operation.
+///
+/// This type contains no C pointers and performs all line-buffer bookkeeping.
+struct LineState {
     row: i32,
     col_offset: i32,
     max_col: i32,
@@ -911,12 +913,9 @@ struct LineGrid {
     active: bool,
 }
 
-static mut LINE_GRID: LineGrid = LineGrid::new();
-
-impl LineGrid {
+impl LineState {
     const fn new() -> Self {
-        LineGrid {
-            grid: std::ptr::null_mut(),
+        Self {
             row: -1,
             col_offset: 0,
             max_col: 0,
@@ -928,40 +927,6 @@ impl LineGrid {
             flags: 0,
             active: false,
         }
-    }
-
-    /// Start a group of grid_line_puts calls that builds a single grid line.
-    ///
-    /// Must be matched with a grid_line_flush call before moving to
-    /// another line.
-    fn start(&mut self, view: *mut CGridView, mut row: i32, line_buf: &mut LineBuffer) {
-        let mut col = 0;
-        let grid = unsafe { grid_adjust(view, &mut row, &mut col) };
-        self.screengrid_line_start(grid, row, col, line_buf);
-    }
-    fn screengrid_line_start(
-        &mut self,
-        grid: *mut CScreenGrid,
-        row: i32,
-        col: i32,
-        line_buf: &mut LineBuffer,
-    ) {
-        let cols = unsafe { (*grid).cols };
-        assert!(self.grid.is_null());
-        self.start_line(cols, row, col, line_buf);
-        self.grid = grid;
-    }
-
-    /// Starts buffering a line belonging to an owned Rust grid.
-    fn screen_grid_line_start(
-        &mut self,
-        grid: &ScreenGrid,
-        row: i32,
-        col: i32,
-        line_buf: &mut LineBuffer,
-    ) {
-        assert!(self.grid.is_null());
-        self.start_line(grid.cols, row, col, line_buf);
     }
 
     /// Initializes the grid-independent state for a buffered line.
@@ -993,16 +958,12 @@ impl LineGrid {
     /// This indicates what already is on screen, not the pending render buffer.
     ///
     /// @return char or space if out of bounds
-    fn get_schar_and_attr(&self, mut col: i32) -> (VimSCharT, VimSAttrT) {
+    fn get_schar_and_attr(&self, grid: &ScreenGrid, mut col: i32) -> (VimSCharT, VimSAttrT) {
         if col < self.max_col {
             col += self.col_offset;
-            let grid: ScreenGrid = unsafe { (&*self.grid).into() };
             let offset = grid.line_offset[self.row as usize] + col as usize;
             let sc = grid.chars[offset];
             let attr = grid.attrs[offset];
-            unsafe {
-                *self.grid = grid.to_cgrid();
-            }
             (sc, attr)
         } else {
             // TODO check what shall we return for attr in this case
@@ -1127,12 +1088,6 @@ impl LineGrid {
         self.bg_attr = bg_attr;
         self.clear_attr = clear_attr;
     }
-    /// move the cursor to a position in a currently rendered line.
-    fn cursor_goto(&self, col: i32) {
-        unsafe {
-            ui::ui_grid_cursor_goto((*self.grid).handle, self.row, col);
-        }
-    }
     fn mirror(&mut self, width: i32, lb: &mut LineBuffer) {
         self.clear_to = std::cmp::max(self.last, self.clear_to);
         if self.first >= self.clear_to {
@@ -1174,44 +1129,245 @@ impl LineGrid {
             lb,
         );
     }
+}
+
+/// Safe line renderer for a Rust-owned screen grid.
+///
+/// The exclusive grid reference remains valid for the renderer's lifetime, so
+/// its implementation never needs to retain or dereference a raw grid pointer.
+struct LineGrid<'grid> {
+    grid: &'grid mut ScreenGrid,
+    state: LineState,
+}
+
+impl<'grid> LineGrid<'grid> {
+    /// Creates an inactive renderer over an exclusively borrowed grid.
+    fn new(grid: &'grid mut ScreenGrid) -> Self {
+        Self {
+            grid,
+            state: LineState::new(),
+        }
+    }
+
+    /// Returns the number of rows in the borrowed grid.
+    fn rows(&self) -> i32 {
+        self.grid.rows
+    }
+
+    /// Returns the number of columns in the borrowed grid.
+    fn cols(&self) -> i32 {
+        self.grid.cols
+    }
+
+    /// Starts buffering a line belonging to the borrowed Rust grid.
+    fn screen_grid_line_start(&mut self, row: i32, col: i32, line_buf: &mut LineBuffer) {
+        self.state.start_line(self.grid.cols, row, col, line_buf);
+    }
+
+    /// Places one character and its attributes in the buffered line.
+    fn put_schar_and_attr(
+        &mut self,
+        col: i32,
+        sc: VimSCharT,
+        attr: VimSAttrT,
+        line_buf: &mut LineBuffer,
+    ) {
+        self.state.put_schar_and_attr(col, sc, attr, line_buf);
+    }
+
+    /// Places text in the buffered line and returns its occupied cell count.
+    fn puts(&mut self, col: i32, text: &[u8], attr: VimSAttrT, line_buf: &mut LineBuffer) -> usize {
+        self.state.puts(col, text, attr, line_buf)
+    }
+
+    /// Ends the current line operation and sends it to the UI layer.
+    fn flush_screen_grid(&mut self, line_buf: &mut LineBuffer) {
+        if self.state.finish_line() {
+            self.state.write_line(&mut *self.grid, line_buf);
+        }
+    }
+}
+
+/// Adapter for the legacy C API, whose line operation spans several calls.
+///
+/// C cannot retain a Rust borrow between those calls, so this adapter stores
+/// the target as a non-null raw pointer. All implementation state remains in
+/// `LineState`; raw-grid access is confined to this adapter.
+struct CLineGrid {
+    target: Option<std::ptr::NonNull<CScreenGrid>>,
+    state: LineState,
+}
+
+static mut LINE_GRID: CLineGrid = CLineGrid::new();
+
+impl CLineGrid {
+    const fn new() -> Self {
+        Self {
+            target: None,
+            state: LineState::new(),
+        }
+    }
+
+    /// Returns the active C grid.
+    fn target(&self) -> std::ptr::NonNull<CScreenGrid> {
+        self.target.expect("line operation has no target grid")
+    }
+
+    /// Start a group of grid_line_puts calls that builds a single grid line.
+    ///
+    /// Must be matched with a grid_line_flush call before moving to another
+    /// line.
+    ///
+    /// # Safety
+    ///
+    /// `view` must point to a valid `CGridView` and its target grid must remain
+    /// valid until the matching flush.
+    unsafe fn start(&mut self, view: *mut CGridView, mut row: i32, line_buf: &mut LineBuffer) {
+        let mut col = 0;
+        // SAFETY: The caller guarantees that `view` and its target are valid.
+        let grid = unsafe { grid_adjust(view, &mut row, &mut col) };
+        // SAFETY: `grid_adjust` returned the valid target owned by `view`.
+        unsafe {
+            self.screengrid_line_start(grid, row, col, line_buf);
+        }
+    }
+
+    /// Starts a line operation on a C-owned screen grid.
+    ///
+    /// # Safety
+    ///
+    /// `grid` must point to a valid, exclusively accessible `CScreenGrid` and
+    /// remain valid until the matching flush.
+    unsafe fn screengrid_line_start(
+        &mut self,
+        grid: *mut CScreenGrid,
+        row: i32,
+        col: i32,
+        line_buf: &mut LineBuffer,
+    ) {
+        let target = std::ptr::NonNull::new(grid).expect("screen grid is nullptr");
+        assert!(self.target.is_none());
+        // SAFETY: The caller guarantees that `target` points to a valid grid.
+        let cols = unsafe { target.as_ref().cols };
+        self.state.start_line(cols, row, col, line_buf);
+        self.target = Some(target);
+    }
+
+    /// Reads a cell from the active C-owned screen grid.
+    fn get_schar_and_attr(&mut self, col: i32) -> (VimSCharT, VimSAttrT) {
+        let target = self.target();
+        // SAFETY: An active operation uniquely owns the target grid buffers.
+        let grid: ScreenGrid = unsafe { target.as_ref().into() };
+        let result = self.state.get_schar_and_attr(&grid, col);
+        // SAFETY: This returns the buffers to the same C grid exactly once.
+        unsafe {
+            *target.as_ptr() = grid.to_cgrid();
+        }
+        result
+    }
+
+    fn put_schar_and_attr(
+        &mut self,
+        col: i32,
+        sc: VimSCharT,
+        attr: VimSAttrT,
+        line_buf: &mut LineBuffer,
+    ) {
+        self.state.put_schar_and_attr(col, sc, attr, line_buf);
+    }
+
+    fn puts(&mut self, col: i32, text: &[u8], attr: VimSAttrT, line_buf: &mut LineBuffer) -> usize {
+        self.state.puts(col, text, attr, line_buf)
+    }
+
+    fn fill(
+        &mut self,
+        start_col: i32,
+        end_col: i32,
+        sc: VimSCharT,
+        attr: VimSAttrT,
+        line_buf: &mut LineBuffer,
+    ) -> i32 {
+        self.state.fill(start_col, end_col, sc, attr, line_buf)
+    }
+
+    fn clear_end(
+        &mut self,
+        start_col: i32,
+        end_col: i32,
+        bg_attr: VimSAttrT,
+        clear_attr: VimSAttrT,
+    ) {
+        self.state
+            .clear_end(start_col, end_col, bg_attr, clear_attr);
+    }
+
+    /// Moves the cursor within the currently rendered line.
+    fn cursor_goto(&self, col: i32) {
+        let target = self.target();
+        // SAFETY: The active target remains valid until the matching flush.
+        unsafe {
+            ui::ui_grid_cursor_goto(target.as_ref().handle, self.state.row, col);
+        }
+    }
+
+    fn mirror(&mut self, width: i32, line_buf: &mut LineBuffer) {
+        self.state.mirror(width, line_buf);
+    }
 
     /// Ends a C-facing line operation and sends it to the UI layer.
-    fn flush(&mut self, lb: &mut LineBuffer) {
-        let grid = self.grid;
-        self.grid = std::ptr::null_mut();
-        if !self.finish_line() {
+    fn flush(&mut self, line_buf: &mut LineBuffer) {
+        let target = self
+            .target
+            .take()
+            .expect("line operation has no target grid");
+        if !self.state.finish_line() {
             return;
         }
 
-        let mut g: ScreenGrid = unsafe { (&*grid).into() };
-        self.write_line(&mut g, lb);
+        // SAFETY: The active operation uniquely owns the target grid buffers.
+        let mut grid: ScreenGrid = unsafe { target.as_ref().into() };
+        self.state.write_line(&mut grid, line_buf);
+        // SAFETY: This returns the buffers to the same C grid exactly once.
         unsafe {
-            *grid = g.to_cgrid();
+            *target.as_ptr() = grid.to_cgrid();
         }
     }
 
-    /// Ends a Rust-owned line operation and sends it to the UI layer.
-    fn flush_screen_grid(&mut self, grid: &mut ScreenGrid, lb: &mut LineBuffer) {
-        assert!(self.grid.is_null());
-        if self.finish_line() {
-            self.write_line(grid, lb);
-        }
-    }
-
-    /// flush grid line but only if on a valid row
+    /// Flushes the current line only if its row belongs to the target grid.
     ///
     /// This is a stopgap until message.c has been refactored to behave
-    fn flush_if_valid_row(&mut self, lb: &mut LineBuffer) {
-        if self.row < 0 || self.row >= unsafe { (*self.grid).rows } {
+    fn flush_if_valid_row(&mut self, line_buf: &mut LineBuffer) {
+        let target = self.target();
+        // SAFETY: The active target remains valid until the matching flush.
+        let rows = unsafe { target.as_ref().rows };
+        if self.state.row < 0 || self.state.row >= rows {
             if (unsafe { rdb_flags } & RdbFlags::Invalid as u32) != 0 {
                 panic!("rdb_flags & RdbFlags::Invalid != 0");
             } else {
-                self.grid = std::ptr::null_mut();
-                self.active = false;
+                self.cancel();
                 return;
             }
         }
-        self.flush(lb);
+        self.flush(line_buf);
+    }
+
+    /// Returns the last usable column for the active line.
+    fn max_col(&self) -> i32 {
+        self.state.max_col
+    }
+
+    /// Reports whether the active row reaches or exceeds the target grid.
+    fn row_reaches_grid_end(&self) -> bool {
+        let target = self.target();
+        // SAFETY: The active target remains valid until the matching flush.
+        self.state.row >= unsafe { target.as_ref().rows }
+    }
+
+    /// Discards the active operation without writing its buffered contents.
+    fn cancel(&mut self) {
+        self.target = None;
+        self.state.active = false;
     }
 }
 
@@ -1219,8 +1375,13 @@ impl LineGrid {
 ///
 /// Must be matched with a grid_line_flush call before moving to
 /// another line.
+///
+/// # Safety
+///
+/// `view` must point to a valid `CGridView`. Its target grid must remain valid
+/// until the matching `grid_line_flush` call.
 #[unsafe(no_mangle)]
-pub extern "C" fn grid_line_start(view: *mut CGridView, row: libc::c_int) {
+pub unsafe extern "C" fn grid_line_start(view: *mut CGridView, row: libc::c_int) {
     unsafe {
         let clb = CLineBufferRef::new();
         let mut lb = LineBuffer::from_cline_buffer_ref(&clb);
@@ -1231,8 +1392,14 @@ pub extern "C" fn grid_line_start(view: *mut CGridView, row: libc::c_int) {
     }
 }
 
+/// Starts a buffered line operation on a screen grid.
+///
+/// # Safety
+///
+/// `grid` must point to a valid, exclusively accessible `CScreenGrid` and
+/// remain valid until the matching `grid_line_flush` call.
 #[unsafe(no_mangle)]
-pub extern "C" fn screengrid_line_start(
+pub unsafe extern "C" fn screengrid_line_start(
     grid: *mut CScreenGrid,
     row: libc::c_int,
     col: libc::c_int,
@@ -1457,8 +1624,14 @@ pub unsafe extern "C" fn grid_put_linebuf(
     }
 }
 
+/// Clears a rectangular region of a grid view.
+///
+/// # Safety
+///
+/// `view` must point to a valid `CGridView` whose target grid remains valid
+/// and exclusively accessible for the duration of this call.
 #[unsafe(no_mangle)]
-pub extern "C" fn grid_clear(
+pub unsafe extern "C" fn grid_clear(
     view: *mut CGridView,
     start_row: libc::c_int,
     end_row: libc::c_int,
@@ -1471,10 +1644,9 @@ pub extern "C" fn grid_clear(
     for row in start_row..end_row {
         unsafe {
             LINE_GRID.start(view, row, &mut lb);
-            end_col = std::cmp::min(end_col, LINE_GRID.max_col);
-            if LINE_GRID.row >= (*LINE_GRID.grid).rows || start_col >= end_col {
-                LINE_GRID.grid = std::ptr::null_mut();
-                LINE_GRID.active = false;
+            end_col = std::cmp::min(end_col, LINE_GRID.max_col());
+            if LINE_GRID.row_reaches_grid_end() || start_col >= end_col {
+                LINE_GRID.cancel();
                 break;
             }
             LINE_GRID.clear_end(start_col, end_col, attr, 0);
@@ -1535,8 +1707,7 @@ pub unsafe extern "C" fn grid_draw_border_impl(
     let mut line_buffer = unsafe { LineBuffer::from_cline_buffer_ref(&clb) };
     {
         let mut canvas = BorderCanvas {
-            grid: &mut rust_grid,
-            line_grid: LineGrid::new(),
+            line_grid: LineGrid::new(&mut rust_grid),
             line_buffer: &mut line_buffer,
         };
         border.draw(&mut canvas);
@@ -2145,26 +2316,25 @@ impl Border {
 
 /// Safe drawing facade over the stateful line-grid renderer.
 struct BorderCanvas<'a> {
-    grid: &'a mut ScreenGrid,
-    line_grid: LineGrid,
+    line_grid: LineGrid<'a>,
     line_buffer: &'a mut LineBuffer,
 }
 
 impl BorderCanvas<'_> {
     /// Returns the number of grid rows available to the border.
     fn rows(&self) -> libc::c_int {
-        self.grid.rows
+        self.line_grid.rows()
     }
 
     /// Returns the number of grid columns available to the border.
     fn cols(&self) -> libc::c_int {
-        self.grid.cols
+        self.line_grid.cols()
     }
 
     /// Starts buffering updates for one absolute grid row.
     fn start_line(&mut self, row: libc::c_int) {
         self.line_grid
-            .screen_grid_line_start(&*self.grid, row, 0, self.line_buffer);
+            .screen_grid_line_start(row, 0, self.line_buffer);
     }
 
     /// Places one border cell in the current buffered row.
@@ -2184,8 +2354,7 @@ impl BorderCanvas<'_> {
 
     /// Commits the current buffered row to the grid.
     fn flush(&mut self) {
-        self.line_grid
-            .flush_screen_grid(&mut *self.grid, self.line_buffer);
+        self.line_grid.flush_screen_grid(self.line_buffer);
     }
 }
 
