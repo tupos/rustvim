@@ -2038,9 +2038,9 @@ mod tests {
     #[test]
     fn glyph_mapping_is_full() {
         let mut gm = GlyphMapping::new();
-        assert_eq!(gm.is_full(), false);
+        assert!(!gm.is_full());
         gm.next_free = VimSCharT::from_le_bytes([0xFF, 0x00, 0x00, 0x20]);
-        assert_eq!(gm.is_full(), true);
+        assert!(gm.is_full());
     }
     #[test]
     fn schar_from_bytes() {
@@ -2082,7 +2082,7 @@ mod tests {
             ),
         ];
         for (t, e) in &test_cases {
-            assert_eq!(super::schar_to_bytes(u32::from_le_bytes(*t), &mut gm), *e);
+            assert_eq!(super::schar_to_bytes(u32::from_le_bytes(*t), &gm), *e);
         }
     }
     #[test]
@@ -2096,7 +2096,7 @@ mod tests {
             ([0xFF, 0, 0, 0], 7),
         ];
         for (t, e) in &test_cases {
-            assert_eq!(super::schar_len_impl(u32::from_le_bytes(*t), &mut gm), *e);
+            assert_eq!(super::schar_len_impl(u32::from_le_bytes(*t), &gm), *e);
         }
     }
     #[link(name = "nvim")]
