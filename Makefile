@@ -104,6 +104,9 @@ nvim: build/.ran-cmake deps
 libnvim: build/.ran-cmake deps
 	$(CMAKE) --build build --target libnvim
 
+rvim_libs: build/.ran-cmake deps
+	$(CMAKE) --build build --target build_rvim_libs
+
 cmake:
 	$(TOUCH) CMakeLists.txt
 	$(MAKE) build/.ran-cmake
@@ -193,4 +196,4 @@ appimage:
 appimage-%:
 	bash scripts/genappimage.sh $*
 
-.PHONY: test clean distclean nvim libnvim cmake deps install appimage checkprefix benchmark $(FORMAT) $(LINT) $(TEST)
+.PHONY: test clean distclean nvim libnvim rvim_libs cmake deps install appimage checkprefix benchmark $(FORMAT) $(LINT) $(TEST)

@@ -829,8 +829,14 @@ list(APPEND RUST_MANIFESTS
 )
 set(RUST_DEPENDENCIES ${RUST_SOURCES} ${RUST_MANIFESTS})
 
+set(RUST_CARGO_ENV
+  "RUSTVIM_BUILD_DIR=${PROJECT_BINARY_DIR}"
+  "RUSTVIM_CMAKE_BUILD=1"
+  "RUSTVIM_CMAKE_CONFIG=$<CONFIG>")
+
 set(RUST_LIB_NAME
   "${CMAKE_STATIC_LIBRARY_PREFIX}rustvim_lib${CMAKE_STATIC_LIBRARY_SUFFIX}")
+add_library(rustvim_lib STATIC IMPORTED GLOBAL)
 
 if(isMultiConfig)
   set(RUST_DEBUG_LIB_PATH "${RUST_TARGET_OUTPUT_DIR}/debug/${RUST_LIB_NAME}")
@@ -842,7 +848,9 @@ if(isMultiConfig)
     "${RUST_TARGET_OUTPUT_DIR}/${RUST_MINSIZEREL_PROFILE}/${RUST_LIB_NAME}")
 
   add_custom_target(build_rust ALL
-    COMMAND ${CARGO_PRG} build --locked --profile "${RUST_BUILD_PROFILE}" ${RUST_TARGET_ARGS} --target-dir "${CARGO_OUTPUT_DIR}"
+    COMMAND ${CMAKE_COMMAND} -E env ${RUST_CARGO_ENV}
+      ${CARGO_PRG} build --locked --profile "${RUST_BUILD_PROFILE}"
+        ${RUST_TARGET_ARGS} --target-dir "${CARGO_OUTPUT_DIR}"
     BYPRODUCTS
       "${RUST_DEBUG_LIB_PATH}"
       "${RUST_RELEASE_LIB_PATH}"
@@ -854,7 +862,6 @@ if(isMultiConfig)
     VERBATIM
   )
 
-  add_library(rustvim_lib STATIC IMPORTED GLOBAL)
   set_target_properties(rustvim_lib PROPERTIES
     IMPORTED_CONFIGURATIONS "Debug;Release;RelWithDebInfo;MinSizeRel"
     IMPORTED_LOCATION "${RUST_RELEASE_LIB_PATH}"
@@ -863,29 +870,30 @@ if(isMultiConfig)
     IMPORTED_LOCATION_RELWITHDEBINFO "${RUST_RELWITHDEBINFO_LIB_PATH}"
     IMPORTED_LOCATION_MINSIZEREL "${RUST_MINSIZEREL_LIB_PATH}"
   )
-  add_dependencies(rustvim_lib build_rust)
-  set_property(TARGET main_lib APPEND PROPERTY
-    INTERFACE_LINK_DEPENDS ${RUST_DEPENDENCIES})
-  target_link_libraries(main_lib INTERFACE rustvim_lib)
 else()
   set(RUST_LIB_PATH "${RUST_TARGET_OUTPUT_DIR}/${RUST_TARGET_DIRNAME}/${RUST_LIB_NAME}")
   add_custom_command(
     OUTPUT "${RUST_LIB_PATH}"
     DEPENDS ${RUST_DEPENDENCIES}
     WORKING_DIRECTORY "${RUST_WORKSPACE_DIR}/src/nvim/rustvim_lib"
-    COMMAND ${CARGO_PRG} build --locked --profile "${RUST_BUILD_PROFILE}" ${RUST_TARGET_ARGS} --target-dir "${CARGO_OUTPUT_DIR}"
+    COMMAND ${CMAKE_COMMAND} -E env ${RUST_CARGO_ENV}
+      ${CARGO_PRG} build --locked --profile "${RUST_BUILD_PROFILE}"
+        ${RUST_TARGET_ARGS} --target-dir "${CARGO_OUTPUT_DIR}"
     COMMENT "Building Rust library with Cargo..."
   )
   add_custom_target(build_rust ALL
     DEPENDS "${RUST_LIB_PATH}"
   )
-  set_target_properties(main_lib PROPERTIES
-    LINK_DEPENDS "${RUST_LIB_PATH}"
+  set_target_properties(rustvim_lib PROPERTIES
+    IMPORTED_LOCATION "${RUST_LIB_PATH}"
   )
-  target_link_libraries(main_lib INTERFACE "${RUST_LIB_PATH}")
 endif()
 
-add_dependencies(main_lib build_rust)
+add_dependencies(rustvim_lib build_rust)
+set_property(TARGET nvim_bin APPEND PROPERTY
+  LINK_DEPENDS ${RUST_DEPENDENCIES})
+target_link_libraries(nvim_bin PRIVATE rustvim_lib)
+add_dependencies(nvim_bin build_rust)
 
 target_sources(nlua0 PUBLIC ${NLUA0_SOURCES})
 
@@ -993,23 +1001,30 @@ set_target_properties(
   libnvim
   PROPERTIES
     OUTPUT_NAME ${LIBNVIM_NAME}
+    POSITION_INDEPENDENT_CODE ON
 )
 target_compile_definitions(libnvim PRIVATE MAKE_LIB)
 target_link_libraries(libnvim PRIVATE main_lib PUBLIC libuv)
 
-get_filename_component(UTF8PROC_LIBRARY_DIR "${UTF8PROC_LIBRARY}" DIRECTORY)
-set(RUST_TEST_FLAGS
-  "-Lnative=$<TARGET_FILE_DIR:libnvim> -Lnative=${UTF8PROC_LIBRARY_DIR}")
+add_library(rvim_libs INTERFACE)
+target_link_libraries(rvim_libs INTERFACE libnvim rustvim_lib)
+add_dependencies(rvim_libs libnvim build_rust)
+
+add_custom_target(build_rvim_libs)
+add_dependencies(build_rvim_libs libnvim build_rust)
+
+set(RUST_TEST_FLAGS "$ENV{RUSTFLAGS}")
 if(NOT MSVC)
   string(APPEND RUST_TEST_FLAGS " -Clinker=${CMAKE_C_COMPILER}")
 endif()
 
 add_custom_target(rusttest
   COMMAND ${CMAKE_COMMAND} -E env
-    "RUSTFLAGS=$ENV{RUSTFLAGS} ${RUST_TEST_FLAGS}"
+    ${RUST_CARGO_ENV}
+    "RUSTFLAGS=${RUST_TEST_FLAGS}"
     ${CARGO_PRG} test --workspace --locked ${RUST_TARGET_ARGS}
       --target-dir "${CARGO_OUTPUT_DIR}"
-  DEPENDS libnvim
+  DEPENDS build_rvim_libs
   WORKING_DIRECTORY "${RUST_WORKSPACE_DIR}"
   USES_TERMINAL
   VERBATIM
