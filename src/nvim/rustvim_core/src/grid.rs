@@ -1457,7 +1457,7 @@ fn schar_to_bytes(sc: VimSCharT, glyph_map: &GlyphMapping) -> GlyphBuff {
             .cloned()
             .unwrap_or(GlyphBuff::new(0, [0; MAX_SCHAR_SIZE]))
     } else {
-        let b = sc.to_le_bytes();
+        let b = sc.to_ne_bytes();
         let pos = b
             .iter()
             .enumerate()
@@ -2161,7 +2161,7 @@ mod tests {
             ),
         ];
         for (t, e) in &test_cases {
-            assert_eq!(super::schar_to_bytes(u32::from_le_bytes(*t), &gm), *e);
+            assert_eq!(super::schar_to_bytes(u32::from_ne_bytes(*t), &gm), *e);
         }
     }
     #[test]
