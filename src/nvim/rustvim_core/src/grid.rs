@@ -3,7 +3,7 @@ use crate::{
     generated::enums::{RdbFlags, Slf},
     globals, mbyte, ui,
 };
-use std::{borrow::Borrow, collections::BTreeMap, rc::Rc};
+use std::{borrow::Borrow, collections::BTreeMap, ffi::CStr, rc::Rc};
 
 /// if data[0] is 0xFF, then data[1..4] is a 24-bit index (in machine endianness)
 /// otherwise it must be a UTF-8 string of length maximum 4 (no NUL when n=4)
@@ -1477,6 +1477,21 @@ fn schar_to_null_term_bytes(sc: VimSCharT, glyph_map: &GlyphMapping) -> GlyphBuf
     glyph_buff
 }
 
+fn schar_cells_impl(sc: VimSCharT, glyph_map: &GlyphMapping) -> libc::c_int {
+    // Keep the common ASCII case independent of the glyph cache and mbyte code.
+    let is_ascii = if cfg!(target_endian = "big") {
+        sc & 0x80ff_ffff == 0
+    } else {
+        sc < 0x80
+    };
+    if is_ascii {
+        return 1;
+    }
+
+    let glyph = schar_to_null_term_bytes(sc, glyph_map);
+    mbyte::utf_ptr2cells(glyph.as_c_str())
+}
+
 /// Returns the length of the schar.
 fn schar_len_impl(sc: VimSCharT, glyph_map: &GlyphMapping) -> usize {
     if GlyphMapping::is_glyph_mapping_schart(sc) {
@@ -1597,6 +1612,11 @@ impl GlyphBuff {
     /// Constructs a new empty `GlyphBuff`
     fn new(len: u8, buff: [u8; MAX_SCHAR_SIZE]) -> Self {
         Self { len, buff }
+    }
+
+    fn as_c_str(&self) -> &CStr {
+        CStr::from_bytes_with_nul(&self.buff[..=self.len as usize])
+            .expect("glyph buffer must contain exactly one trailing NUL")
     }
 }
 
@@ -1879,6 +1899,19 @@ pub unsafe extern "C" fn schar_get(mut buf_out: *mut libc::c_char, sc: VimSCharT
         *buf_out = NULL_TERMINATOR as libc::c_char;
         len
     }
+}
+
+/// # Safety
+///
+/// Must be called on Neovim's main thread while the global glyph mapping is
+/// not being mutated.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn schar_cells(sc: VimSCharT) -> libc::c_int {
+    // SAFETY: The caller guarantees exclusive main-thread access to Neovim's
+    // global screen state. This function borrows the mapping only for the
+    // duration of this call and does not mutate it.
+    let glyph_map = unsafe { &GLYPH_MAPPING };
+    schar_cells_impl(sc, glyph_map)
 }
 
 #[unsafe(no_mangle)]
@@ -2179,6 +2212,14 @@ mod tests {
         assert_eq!(&max_glyph.buff[..max_bytes.len()], &max_bytes);
         assert_eq!(max_glyph.buff[max_bytes.len()], NULL_TERMINATOR);
     }
+
+    #[test]
+    fn schar_cells_ascii_fast_path() {
+        let mut gm = GlyphMapping::new();
+        let sc = super::schar_from_bytes(b"A", &mut gm);
+        assert_eq!(super::schar_cells_impl(sc, &gm), 1);
+    }
+
     #[test]
     fn schar_len() {
         let mut gm = GlyphMapping::new();

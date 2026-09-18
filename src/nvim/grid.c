@@ -51,24 +51,6 @@ int last_grid_handle = DEFAULT_GRID_HANDLE;
 # define schar_idx(sc) (sc >> 8)
 #endif
 
-int schar_cells(schar_T sc)
-{
-  // hot path
-#ifdef ORDER_BIG_ENDIAN
-  if (!(sc & 0x80FFFFFF)) {
-    return 1;
-  }
-#else
-  if (sc < 0x80) {
-    return 1;
-  }
-#endif
-
-  char sc_buf[MAX_SCHAR_SIZE];
-  schar_get(sc_buf, sc);
-  return utf_ptr2cells(sc_buf);
-}
-
 int schar_get_first_codepoint(schar_T sc)
 {
   char sc_buf[MAX_SCHAR_SIZE];

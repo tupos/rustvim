@@ -87,4 +87,44 @@ describe('ffi.cdef', function()
       end)
     )
   end)
+
+  it('can report screen character cell widths', function()
+    if not exec_lua("return pcall(require, 'ffi')") then
+      pending('N/A: missing LuaJIT FFI')
+    end
+
+    eq(
+      { 1, 1, 2, 2, 2, 2 },
+      exec_lua(function()
+        local ffi = require('ffi')
+
+        ffi.cdef [[
+        typedef unsigned int schar_T;
+        schar_T utfc_ptr2schar(const char *p, int *firstc);
+        int schar_cells(schar_T sc);
+      ]]
+
+        local function cells(text)
+          local firstc = ffi.new('int[1]')
+          local sc = ffi.C.utfc_ptr2schar(text, firstc)
+          return ffi.C.schar_cells(sc)
+        end
+
+        local widths = {
+          cells('A'),
+          cells('é'),
+          cells('界'),
+          cells('界́'),
+        }
+
+        vim.o.ambiwidth = 'double'
+        widths[#widths + 1] = cells('·')
+
+        vim.fn.setcellwidths({ { 0x2713, 0x2713, 2 } })
+        widths[#widths + 1] = cells('✓')
+
+        return widths
+      end)
+    )
+  end)
 end)
