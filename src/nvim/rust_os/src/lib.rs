@@ -4,8 +4,6 @@ pub fn hello_from_rust_os() {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn it_works() {}
 }
