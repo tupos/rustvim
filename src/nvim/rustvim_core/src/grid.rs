@@ -385,7 +385,7 @@ impl ScreenGrid {
             clear_start = col;
             col = endcol;
             endcol = clear_width;
-            clear_width = col as i32;
+            clear_width = col;
         }
 
         unsafe {
