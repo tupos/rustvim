@@ -253,10 +253,10 @@ impl ScreenGrid {
     pub unsafe fn to_cgrid(self) -> CScreenGrid {
         CScreenGrid {
             handle: self.handle,
-            chars: self.chars.leak().as_mut_ptr(),
-            attrs: self.attrs.leak().as_mut_ptr(),
-            vcols: self.vcols.leak().as_mut_ptr(),
-            line_offset: self.line_offset.leak().as_mut_ptr(),
+            chars: leak_nonempty_buffer(self.chars),
+            attrs: leak_nonempty_buffer(self.attrs),
+            vcols: leak_nonempty_buffer(self.vcols),
+            line_offset: leak_nonempty_buffer(self.line_offset),
             dirty_col: self.dirty_col,
             //dirty_col: self.dirty_col.leak().as_mut_ptr(),
             rows: self.rows,
@@ -585,7 +585,7 @@ impl ScreenGrid {
         }
     }
 
-    /// assign a handle to the grid
+    /// Assigns the next grid handle when this grid does not yet have one.
     fn assign_handle(&mut self, handle: VimHandleT) -> Option<VimHandleT> {
         if self.handle == 0 {
             self.handle = handle + 1;
@@ -1553,11 +1553,21 @@ pub struct CGridView {
 macro_rules! init_ptr {
     ($p:expr, $cap:expr) => {
         if $p.is_null() {
-            Vec::with_capacity($cap)
+            Vec::new()
         } else {
             unsafe { Vec::from_raw_parts($p, $cap, $cap) }
         }
     };
+}
+
+/// Transfers a populated Rust buffer to C while preserving null as the
+/// representation of an unallocated buffer.
+fn leak_nonempty_buffer<T>(buffer: Vec<T>) -> *mut T {
+    if buffer.is_empty() {
+        std::ptr::null_mut()
+    } else {
+        buffer.leak().as_mut_ptr()
+    }
 }
 
 impl From<&CScreenGrid> for ScreenGrid {
@@ -2332,7 +2342,8 @@ pub extern "C" fn schar_from_char(mut c: libc::c_int) -> VimSCharT {
 /// # Safety
 ///
 /// `grid` must point to a valid, exclusively accessible `CScreenGrid` whose
-/// buffers satisfy the ownership and layout requirements of `ScreenGrid`.
+/// non-null buffers satisfy the ownership and layout requirements of
+/// `ScreenGrid`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn grid_assign_handle(grid: *mut CScreenGrid) {
     let mut g: ScreenGrid = unsafe { (&*grid).into() };
@@ -2395,6 +2406,42 @@ pub unsafe extern "C" fn grid_del_lines(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn assigning_handle_preserves_unallocated_grid_buffers() {
+        let cgrid = CScreenGrid {
+            handle: 0,
+            chars: std::ptr::null_mut(),
+            attrs: std::ptr::null_mut(),
+            vcols: std::ptr::null_mut(),
+            line_offset: std::ptr::null_mut(),
+            dirty_col: std::ptr::null_mut(),
+            rows: 8,
+            cols: 23,
+            valid: false,
+            throttled: false,
+            blending: false,
+            mouse_enabled: true,
+            zindex: 0,
+            comp_row: 0,
+            comp_col: 0,
+            comp_width: 0,
+            comp_height: 0,
+            comp_index: 0,
+            comp_disabled: false,
+            pending_comp_index_update: true,
+        };
+
+        let mut grid: ScreenGrid = (&cgrid).into();
+        assert_eq!(grid.assign_handle(1), Some(2));
+        let cgrid = unsafe { grid.to_cgrid() };
+
+        assert_eq!(cgrid.handle, 2);
+        assert!(cgrid.chars.is_null());
+        assert!(cgrid.attrs.is_null());
+        assert!(cgrid.vcols.is_null());
+        assert!(cgrid.line_offset.is_null());
+    }
 
     #[test]
     fn glyph_mapping_extract_index() {
