@@ -1793,7 +1793,7 @@ pub extern "C" fn schar_cache_clear_if_full() -> bool {
 pub extern "C" fn schar_cache_clear() {
     unsafe {
         decor_check_invalid_glyphs();
-        let gm = &mut *&raw mut GLYPH_MAPPING;
+        let gm = &mut GLYPH_MAPPING;
         gm.clear();
         if check_chars_options() {
             panic!("Erroc checking chars options");
