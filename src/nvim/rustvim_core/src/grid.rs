@@ -759,7 +759,7 @@ impl LineBuffer {
     /// This function is highly usafe!!!. If you are not carefull you will easily
     /// leak memory or produce UB. It should be called only after the ownership
     /// of the existing memory was taken by the call to from_cline_buffer.
-    unsafe fn to_cline_buffer_ref(self) -> CLineBufferRef {
+    unsafe fn into_cline_buffer_ref(self) -> CLineBufferRef {
         let clb = CLineBufferRef::new();
         unsafe {
             *clb.chars = self.chars.leak().as_mut_ptr();
@@ -866,14 +866,14 @@ impl CLineBufferRef {
     fn alloc(&self, size: usize) {
         let lb = LineBuffer::new(size);
         unsafe {
-            lb.to_cline_buffer_ref();
+            lb.into_cline_buffer_ref();
         }
     }
     fn realloc(&self, size: usize) {
         unsafe {
             let mut lb = LineBuffer::from_cline_buffer_ref(self);
             lb.realloc(size);
-            lb.to_cline_buffer_ref();
+            lb.into_cline_buffer_ref();
         }
     }
 }
@@ -1163,7 +1163,7 @@ pub extern "C" fn grid_line_start(view: *mut CGridView, row: libc::c_int) {
 
         LINE_GRID.start(view, row, &mut lb);
 
-        lb.to_cline_buffer_ref();
+        lb.into_cline_buffer_ref();
     }
 }
 
@@ -1179,7 +1179,7 @@ pub extern "C" fn screengrid_line_start(
 
         LINE_GRID.screengrid_line_start(grid, row, col, &mut lb);
 
-        lb.to_cline_buffer_ref();
+        lb.into_cline_buffer_ref();
     }
 }
 
@@ -1205,7 +1205,7 @@ pub extern "C" fn grid_line_put_schar(col: libc::c_int, schar: VimSCharT, attr: 
     unsafe {
         let mut lb = LineBuffer::from_cline_buffer_ref(&clb);
         LINE_GRID.put_schar_and_attr(col, schar, attr, &mut lb);
-        lb.to_cline_buffer_ref();
+        lb.into_cline_buffer_ref();
     }
 }
 
@@ -1232,7 +1232,7 @@ pub extern "C" fn grid_line_puts(
         )
     };
     unsafe {
-        lb.to_cline_buffer_ref();
+        lb.into_cline_buffer_ref();
     }
     num_cells as i32
 }
@@ -1250,7 +1250,7 @@ pub extern "C" fn grid_line_fill(
 
         let ret = LINE_GRID.fill(start_col, end_col, sc, attr, &mut lb);
 
-        lb.to_cline_buffer_ref();
+        lb.into_cline_buffer_ref();
 
         ret
     }
@@ -1284,7 +1284,7 @@ pub extern "C" fn grid_line_mirror(width: libc::c_int) {
 
         LINE_GRID.mirror(width, &mut lb);
 
-        lb.to_cline_buffer_ref();
+        lb.into_cline_buffer_ref();
     }
 }
 
@@ -1299,7 +1299,7 @@ pub extern "C" fn linebuf_mirror(
         let clb = CLineBufferRef::new();
         let mut lb = LineBuffer::from_cline_buffer_ref(&clb);
         lb.mirror(*pfirst as usize, *plast as usize, width as usize);
-        lb.to_cline_buffer_ref();
+        lb.into_cline_buffer_ref();
 
         let first = *pfirst;
         let last = *plast;
@@ -1319,7 +1319,7 @@ pub extern "C" fn grid_line_flush() {
 
         LINE_GRID.flush(&mut lb);
 
-        lb.to_cline_buffer_ref();
+        lb.into_cline_buffer_ref();
     }
 }
 
@@ -1334,7 +1334,7 @@ pub extern "C" fn grid_line_flush_if_valid_row() {
 
         LINE_GRID.flush_if_valid_row(&mut lb);
 
-        lb.to_cline_buffer_ref();
+        lb.into_cline_buffer_ref();
     }
 }
 
@@ -1368,7 +1368,7 @@ pub extern "C" fn grid_put_linebuf(
     );
     unsafe {
         *grid = g.to_cgrid();
-        lb.to_cline_buffer_ref();
+        lb.into_cline_buffer_ref();
     }
 }
 
@@ -1396,7 +1396,7 @@ pub extern "C" fn grid_clear(
         }
     }
     unsafe {
-        lb.to_cline_buffer_ref();
+        lb.into_cline_buffer_ref();
     }
 }
 
@@ -1711,7 +1711,7 @@ pub extern "C" fn grid_alloc(
         let mut lb = LineBuffer::from_cline_buffer_ref(&clb);
         let g = ScreenGrid::from_cgrid(&*grid, rows, cols, valid, copy, &mut lb);
         *grid = g.to_cgrid();
-        lb.to_cline_buffer_ref();
+        lb.into_cline_buffer_ref();
     }
 }
 
@@ -2139,7 +2139,7 @@ mod tests {
             lb.attrs = vec![1, 2, 3, 4, 5, 6, 7, 8];
             println!("chars: {:?}", lb.chars);
             println!("attrs: {:?}", lb.attrs);
-            lb.to_cline_buffer_ref();
+            lb.into_cline_buffer_ref();
 
             let mut first = 0;
             let mut last = 8;
@@ -2152,7 +2152,7 @@ mod tests {
             let lb = LineBuffer::from_cline_buffer_ref(&clb);
             println!("chars: {:?}", lb.chars);
             println!("attrs: {:?}", lb.attrs);
-            lb.to_cline_buffer_ref();
+            lb.into_cline_buffer_ref();
         }
     }
 }
