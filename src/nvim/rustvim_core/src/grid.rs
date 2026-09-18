@@ -914,7 +914,7 @@ impl LineGrid {
     /// another line.
     fn start(&mut self, view: *mut CGridView, mut row: i32, line_buf: &mut LineBuffer) {
         let mut col = 0;
-        let grid = grid_adjust(view, &mut row, &mut col);
+        let grid = unsafe { grid_adjust(view, &mut row, &mut col) };
         self.screengrid_line_start(grid, row, col, line_buf);
     }
     fn screengrid_line_start(
@@ -1188,8 +1188,13 @@ pub extern "C" fn screengrid_line_start(
 /// This indicates what already is on screen, not the pending render buffer.
 ///
 /// @return char or space if out of bounds
+///
+/// # Safety
+///
+/// An active line operation must reference a valid grid. `attr` must be null
+/// or point to valid, properly aligned writable memory.
 #[unsafe(no_mangle)]
-pub extern "C" fn grid_line_getchar(col: libc::c_int, attr: *mut VimSAttrT) -> VimSCharT {
+pub unsafe extern "C" fn grid_line_getchar(col: libc::c_int, attr: *mut VimSAttrT) -> VimSCharT {
     let (sc, a) = unsafe { LINE_GRID.get_schar_and_attr(col) };
     if !attr.is_null() {
         unsafe {
@@ -1209,8 +1214,14 @@ pub extern "C" fn grid_line_put_schar(col: libc::c_int, schar: VimSCharT, attr: 
     }
 }
 
+/// # Safety
+///
+/// An active line operation must reference a valid grid and line buffer. If
+/// `text_len` is `-1`, `text` must point to a NUL-terminated string.
+/// Otherwise, `text_len` must be nonnegative and `text` must be valid for
+/// reads of that many bytes.
 #[unsafe(no_mangle)]
-pub extern "C" fn grid_line_puts(
+pub unsafe extern "C" fn grid_line_puts(
     col: libc::c_int,
     text: *const libc::c_char,
     text_len: libc::c_int,
@@ -1288,8 +1299,13 @@ pub extern "C" fn grid_line_mirror(width: libc::c_int) {
     }
 }
 
+/// # Safety
+///
+/// `pfirst`, `plast`, and `pclear` must point to valid, properly aligned
+/// writable integers. Their values and `width` must describe a valid range in
+/// the initialized line buffer.
 #[unsafe(no_mangle)]
-pub extern "C" fn linebuf_mirror(
+pub unsafe extern "C" fn linebuf_mirror(
     pfirst: *mut libc::c_int,
     plast: *mut libc::c_int,
     pclear: *mut libc::c_int,
@@ -1338,8 +1354,13 @@ pub extern "C" fn grid_line_flush_if_valid_row() {
     }
 }
 
+/// # Safety
+///
+/// `grid` must point to a valid, exclusively accessible `CScreenGrid` whose
+/// buffer pointers satisfy the ownership and layout requirements of
+/// `ScreenGrid`. The global line buffer must be initialized.
 #[unsafe(no_mangle)]
-pub extern "C" fn grid_put_linebuf(
+pub unsafe extern "C" fn grid_put_linebuf(
     grid: *mut CScreenGrid,
     row: libc::c_int,
     col_offset: libc::c_int,
@@ -1698,8 +1719,13 @@ pub extern "C" fn alloc_initial_line_buffer() {
     CLineBufferRef::new().alloc(unsafe { globals::Columns as usize });
 }
 
+/// # Safety
+///
+/// `grid` must point to a valid, exclusively accessible `CScreenGrid`. Any
+/// existing buffers and dimensions must satisfy the ownership and layout
+/// requirements of `ScreenGrid`.
 #[unsafe(no_mangle)]
-pub extern "C" fn grid_alloc(
+pub unsafe extern "C" fn grid_alloc(
     grid: *mut CScreenGrid,
     rows: libc::c_int,
     cols: libc::c_int,
@@ -1715,8 +1741,12 @@ pub extern "C" fn grid_alloc(
     }
 }
 
+/// # Safety
+///
+/// `grid` must point to a valid, exclusively accessible `CScreenGrid`. Its
+/// non-null buffer pointers must own compatible, unreclaimed Rust allocations.
 #[unsafe(no_mangle)]
-pub extern "C" fn grid_free(grid: *mut CScreenGrid) {
+pub unsafe extern "C" fn grid_free(grid: *mut CScreenGrid) {
     unsafe {
         let _: ScreenGrid = (&*grid).into();
         (*grid).chars = std::ptr::null_mut();
@@ -1728,8 +1758,13 @@ pub extern "C" fn grid_free(grid: *mut CScreenGrid) {
 
 /// clear a line in the grid starting at `offset` until `width` characters
 /// are cleared. `valid` is used to fill attributes. See `ScreenGrid::attrs_fill`
+///
+/// # Safety
+///
+/// `grid` must point to a valid, exclusively accessible `CScreenGrid` whose
+/// buffers contain the requested range.
 #[unsafe(no_mangle)]
-pub extern "C" fn grid_clear_line(
+pub unsafe extern "C" fn grid_clear_line(
     grid: *mut CScreenGrid,
     offset: libc::size_t,
     width: libc::c_int,
@@ -1760,8 +1795,12 @@ pub extern "C" fn schar_from_buf(buf: *const libc::c_char, len: libc::size_t) ->
     }
 }
 
+/// # Safety
+///
+/// `buf` must be null or point to a valid NUL-terminated string that remains
+/// readable for the duration of the call.
 #[unsafe(no_mangle)]
-pub extern "C" fn schar_from_str(buf: *const libc::c_char) -> VimSCharT {
+pub unsafe extern "C" fn schar_from_str(buf: *const libc::c_char) -> VimSCharT {
     // note: critical max is really (1<<24)-1. This gives us some marginal
     // until next time update_screen() is called
     if buf.is_null() {
@@ -1807,8 +1846,16 @@ pub extern "C" fn schar_high(sc: VimSCharT) -> bool {
 }
 
 /// advance buf_out. do NOT set final NUL
+///
+/// # Safety
+///
+/// `buf_out` must point to a valid writable pointer. That pointer must
+/// reference writable storage for the bytes represented by `sc`.
 #[unsafe(no_mangle)]
-pub extern "C" fn schar_get_adv(buf_out: *mut *mut libc::c_char, sc: VimSCharT) -> libc::size_t {
+pub unsafe extern "C" fn schar_get_adv(
+    buf_out: *mut *mut libc::c_char,
+    sc: VimSCharT,
+) -> libc::size_t {
     let gm = unsafe { &mut GLYPH_MAPPING };
     let gb = schar_to_bytes(sc, gm);
     let len = gb.len as usize;
@@ -1821,8 +1868,13 @@ pub extern "C" fn schar_get_adv(buf_out: *mut *mut libc::c_char, sc: VimSCharT) 
 }
 
 /// sets final NUL
+///
+/// # Safety
+///
+/// `buf_out` must point to writable storage for the bytes represented by `sc`
+/// and a trailing NUL byte.
 #[unsafe(no_mangle)]
-pub extern "C" fn schar_get(mut buf_out: *mut libc::c_char, sc: VimSCharT) -> libc::size_t {
+pub unsafe extern "C" fn schar_get(mut buf_out: *mut libc::c_char, sc: VimSCharT) -> libc::size_t {
     unsafe {
         let len = schar_get_adv(&raw mut buf_out, sc);
         *buf_out = NULL_TERMINATOR as libc::c_char;
@@ -1867,8 +1919,13 @@ pub extern "C" fn schar_get_ascii(sc: VimSCharT) -> libc::c_char {
 ///
 /// If the default_grid is used, adjust window relative positions to global
 /// screen positions.
+///
+/// # Safety
+///
+/// `grid` must point to a valid `CGridView`. `row_offset` and `col_offset`
+/// must point to valid, properly aligned writable integers.
 #[unsafe(no_mangle)]
-pub extern "C" fn grid_adjust(
+pub unsafe extern "C" fn grid_adjust(
     grid: *const CGridView,
     row_offset: *mut libc::c_int,
     col_offset: *mut libc::c_int,
@@ -1883,8 +1940,12 @@ pub extern "C" fn grid_adjust(
     }
 }
 
+/// # Safety
+///
+/// `grid` must point to a valid, exclusively accessible `CScreenGrid` whose
+/// buffers satisfy the ownership and layout requirements of `ScreenGrid`.
 #[unsafe(no_mangle)]
-pub extern "C" fn grid_invalidate(grid: *mut CScreenGrid) {
+pub unsafe extern "C" fn grid_invalidate(grid: *mut CScreenGrid) {
     unsafe {
         let mut g: ScreenGrid = (&*grid).into();
         g.invalidate();
@@ -1895,8 +1956,14 @@ pub extern "C" fn grid_invalidate(grid: *mut CScreenGrid) {
 /// Get a single character directly from grid.chars
 ///
 /// @param[out] attrp  set to the character's attribute (optional)
+///
+/// # Safety
+///
+/// `grid` must point to a valid, exclusively accessible `CScreenGrid`, and
+/// `row` and `col` must identify a valid cell. `attrp` must be null or point
+/// to valid, properly aligned writable memory.
 #[unsafe(no_mangle)]
-pub extern "C" fn grid_getchar(
+pub unsafe extern "C" fn grid_getchar(
     grid: *mut CScreenGrid,
     row: libc::c_int,
     col: libc::c_int,
@@ -1929,8 +1996,12 @@ pub extern "C" fn schar_from_char(mut c: libc::c_int) -> VimSCharT {
     VimSCharT::from_le_bytes(bytes)
 }
 
+/// # Safety
+///
+/// `grid` must point to a valid, exclusively accessible `CScreenGrid` whose
+/// buffers satisfy the ownership and layout requirements of `ScreenGrid`.
 #[unsafe(no_mangle)]
-pub extern "C" fn grid_assign_handle(grid: *mut CScreenGrid) {
+pub unsafe extern "C" fn grid_assign_handle(grid: *mut CScreenGrid) {
     let mut g: ScreenGrid = unsafe { (&*grid).into() };
 
     unsafe {
@@ -1944,8 +2015,12 @@ pub extern "C" fn grid_assign_handle(grid: *mut CScreenGrid) {
     }
 }
 
+/// # Safety
+///
+/// `grid` must point to a valid, exclusively accessible `CScreenGrid` whose
+/// buffers satisfy the ownership and layout requirements of `ScreenGrid`.
 #[unsafe(no_mangle)]
-pub extern "C" fn grid_ins_lines(
+pub unsafe extern "C" fn grid_ins_lines(
     grid: *mut CScreenGrid,
     row: libc::c_int,
     line_count: libc::c_int,
@@ -1962,8 +2037,12 @@ pub extern "C" fn grid_ins_lines(
     }
 }
 
+/// # Safety
+///
+/// `grid` must point to a valid, exclusively accessible `CScreenGrid` whose
+/// buffers satisfy the ownership and layout requirements of `ScreenGrid`.
 #[unsafe(no_mangle)]
-pub extern "C" fn grid_del_lines(
+pub unsafe extern "C" fn grid_del_lines(
     grid: *mut CScreenGrid,
     row: libc::c_int,
     line_count: libc::c_int,

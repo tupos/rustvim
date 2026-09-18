@@ -90,8 +90,12 @@ fn ui_may_set_default_colors() {
     }
 }
 
+/// # Safety
+///
+/// `grid` must point to a valid, exclusively accessible `CScreenGrid` whose
+/// buffers satisfy the ownership and layout requirements of `ScreenGrid`.
 #[unsafe(no_mangle)]
-pub extern "C" fn ui_line(
+pub unsafe extern "C" fn ui_line(
     grid: *mut CScreenGrid,
     row: libc::c_int,
     invalid_row: bool,
