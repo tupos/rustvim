@@ -1226,7 +1226,7 @@ pub extern "C" fn grid_line_puts(
     let num_cells = unsafe {
         LINE_GRID.puts(
             col,
-            std::slice::from_raw_parts(text as *const u8, len),
+            std::slice::from_raw_parts(text.cast::<u8>(), len),
             attr,
             &mut lb,
         )
