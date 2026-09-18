@@ -338,6 +338,8 @@ impl ScreenGrid {
     //     TODO: Make size proper sizes and not i32;
     //     TODO: this has high cyclomatic complexity and should be rewritten!!!
     //           as currently it is just a copy paste of the old c impl
+    // Keep the arguments aligned with grid_put_linebuf() in grid.c.
+    #[allow(clippy::too_many_arguments)]
     fn put_line_buffer(
         &mut self,
         row: i32,
