@@ -1160,28 +1160,28 @@ impl<'grid> LineGrid<'grid> {
     }
 
     /// Starts buffering a line belonging to the borrowed Rust grid.
-    fn screen_grid_line_start(&mut self, row: i32, col: i32, line_buf: &mut LineBuffer) {
+    fn start(&mut self, row: i32, col: i32, line_buf: &mut LineBuffer) {
         self.state.start_line(self.grid.cols, row, col, line_buf);
     }
 
     /// Places one character and its attributes in the buffered line.
-    fn put_schar_and_attr(
-        &mut self,
-        col: i32,
-        sc: VimSCharT,
-        attr: VimSAttrT,
-        line_buf: &mut LineBuffer,
-    ) {
+    fn put_cell(&mut self, col: i32, sc: VimSCharT, attr: VimSAttrT, line_buf: &mut LineBuffer) {
         self.state.put_schar_and_attr(col, sc, attr, line_buf);
     }
 
     /// Places text in the buffered line and returns its occupied cell count.
-    fn puts(&mut self, col: i32, text: &[u8], attr: VimSAttrT, line_buf: &mut LineBuffer) -> usize {
+    fn put_text(
+        &mut self,
+        col: i32,
+        text: &[u8],
+        attr: VimSAttrT,
+        line_buf: &mut LineBuffer,
+    ) -> usize {
         self.state.puts(col, text, attr, line_buf)
     }
 
     /// Ends the current line operation and sends it to the UI layer.
-    fn flush_screen_grid(&mut self, line_buf: &mut LineBuffer) {
+    fn flush(&mut self, line_buf: &mut LineBuffer) {
         if self.state.finish_line() {
             self.state.write_line(&mut *self.grid, line_buf);
         }
@@ -1228,7 +1228,7 @@ impl CLineGrid {
         let grid = unsafe { grid_adjust(view, &mut row, &mut col) };
         // SAFETY: `grid_adjust` returned the valid target owned by `view`.
         unsafe {
-            self.screengrid_line_start(grid, row, col, line_buf);
+            self.start_grid(grid, row, col, line_buf);
         }
     }
 
@@ -1238,7 +1238,7 @@ impl CLineGrid {
     ///
     /// `grid` must point to a valid, exclusively accessible `CScreenGrid` and
     /// remain valid until the matching flush.
-    unsafe fn screengrid_line_start(
+    unsafe fn start_grid(
         &mut self,
         grid: *mut CScreenGrid,
         row: i32,
@@ -1398,8 +1398,8 @@ pub unsafe extern "C" fn grid_line_start(view: *mut CGridView, row: libc::c_int)
 ///
 /// `grid` must point to a valid, exclusively accessible `CScreenGrid` and
 /// remain valid until the matching `grid_line_flush` call.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn screengrid_line_start(
+#[unsafe(export_name = "screengrid_line_start")]
+pub unsafe extern "C" fn start_grid_line(
     grid: *mut CScreenGrid,
     row: libc::c_int,
     col: libc::c_int,
@@ -1408,7 +1408,7 @@ pub unsafe extern "C" fn screengrid_line_start(
         let clb = CLineBufferRef::new();
         let mut lb = LineBuffer::from_cline_buffer_ref(&clb);
 
-        LINE_GRID.screengrid_line_start(grid, row, col, &mut lb);
+        LINE_GRID.start_grid(grid, row, col, &mut lb);
 
         lb.into_cline_buffer_ref();
     }
@@ -2333,28 +2333,27 @@ impl BorderCanvas<'_> {
 
     /// Starts buffering updates for one absolute grid row.
     fn start_line(&mut self, row: libc::c_int) {
-        self.line_grid
-            .screen_grid_line_start(row, 0, self.line_buffer);
+        self.line_grid.start(row, 0, self.line_buffer);
     }
 
     /// Places one border cell in the current buffered row.
     fn put_cell(&mut self, col: libc::c_int, cell: BorderCell) {
         self.line_grid
-            .put_schar_and_attr(col, cell.character, cell.highlight.0, self.line_buffer);
+            .put_cell(col, cell.character, cell.highlight.0, self.line_buffer);
     }
 
     /// Places one text chunk and returns the number of occupied cells.
     fn put_text(&mut self, col: libc::c_int, text: &[u8], highlight: Highlight) -> libc::c_int {
         libc::c_int::try_from(
             self.line_grid
-                .puts(col, text, highlight.0, self.line_buffer),
+                .put_text(col, text, highlight.0, self.line_buffer),
         )
         .unwrap_or(libc::c_int::MAX)
     }
 
     /// Commits the current buffered row to the grid.
     fn flush(&mut self) {
-        self.line_grid.flush_screen_grid(self.line_buffer);
+        self.line_grid.flush(self.line_buffer);
     }
 }
 
