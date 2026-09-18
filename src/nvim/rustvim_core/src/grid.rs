@@ -1780,7 +1780,7 @@ pub extern "C" fn schar_from_str(buf: *const libc::c_char) -> VimSCharT {
 #[unsafe(no_mangle)]
 pub extern "C" fn schar_cache_clear_if_full() -> bool {
     unsafe {
-        let gm = &mut *&raw mut GLYPH_MAPPING;
+        let gm = &mut GLYPH_MAPPING;
         if gm.is_full() {
             schar_cache_clear();
             return true;
