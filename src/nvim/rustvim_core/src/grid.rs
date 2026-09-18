@@ -20,7 +20,7 @@ pub type VimDirtyColT = libc::c_int;
 /// ensures we can fit all composed chars which did fit before.
 static MAX_SCHAR_SIZE: usize = 32;
 
-static NULL_TERMINATOR: u8 = '\0' as u8;
+static NULL_TERMINATOR: u8 = b'\0';
 
 static mut GLYPH_MAPPING: GlyphMapping = GlyphMapping::new();
 
