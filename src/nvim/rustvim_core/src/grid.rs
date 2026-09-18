@@ -1833,7 +1833,7 @@ pub extern "C" fn schar_get(mut buf_out: *mut libc::c_char, sc: VimSCharT) -> li
 #[unsafe(no_mangle)]
 pub extern "C" fn schar_len(sc: VimSCharT) -> libc::size_t {
     let gm = unsafe { &mut GLYPH_MAPPING };
-    schar_len_impl(sc, &gm)
+    schar_len_impl(sc, gm)
 }
 
 #[unsafe(no_mangle)]
