@@ -164,7 +164,7 @@ pub fn ui_line_r(
                 std::cmp::min(clear_col, grid.cols - 1) as Integer,
             );
             ui_call_flush();
-            let wd = p_wd.abs() as u64;
+            let wd = p_wd.unsigned_abs();
             os_sleep(wd);
             // restore the cursor later
             pending_cursor_update = true;
