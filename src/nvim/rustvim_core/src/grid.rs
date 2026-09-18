@@ -1812,7 +1812,7 @@ pub extern "C" fn schar_get_adv(buf_out: *mut *mut libc::c_char, sc: VimSCharT) 
     let gm = unsafe { &mut GLYPH_MAPPING };
     let gb = schar_to_bytes(sc, gm);
     let len = gb.len as usize;
-    let slice = unsafe { std::slice::from_raw_parts_mut(*buf_out as *mut u8, len) };
+    let slice = unsafe { std::slice::from_raw_parts_mut((*buf_out).cast::<u8>(), len) };
     slice.copy_from_slice(&gb.buff[..len]);
     unsafe {
         *buf_out = (*buf_out).add(len);
