@@ -900,7 +900,7 @@ impl LineGrid {
             row: -1,
             col_offset: 0,
             max_col: 0,
-            first: i32::max_value(),
+            first: i32::MAX,
             last: 0,
             clear_to: 0,
             bg_attr: 0,
