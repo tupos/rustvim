@@ -1748,7 +1748,7 @@ pub extern "C" fn grid_clear_line(
 #[unsafe(no_mangle)]
 pub extern "C" fn schar_from_buf(buf: *const libc::c_char, len: libc::size_t) -> VimSCharT {
     assert!(len < MAX_SCHAR_SIZE);
-    let buf = buf as *const u8;
+    let buf = buf.cast::<u8>();
     let s = if buf.is_null() {
         &[]
     } else {
