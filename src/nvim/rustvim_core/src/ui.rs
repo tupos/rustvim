@@ -117,6 +117,8 @@ pub extern "C" fn ui_line(
     }
 }
 
+// Keep the arguments aligned with ui_line() in ui.c.
+#[allow(clippy::too_many_arguments)]
 pub fn ui_line_r(
     grid: &ScreenGrid,
     row: i32,
