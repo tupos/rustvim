@@ -1838,7 +1838,7 @@ pub extern "C" fn schar_len(sc: VimSCharT) -> libc::size_t {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn schar_in_arabic_block(sc: VimSCharT) -> bool {
-    let gm = unsafe { &mut *&raw mut GLYPH_MAPPING };
+    let gm = unsafe { &mut GLYPH_MAPPING };
     schar_in_arabic_block_impl(sc, gm)
 }
 
