@@ -63,6 +63,8 @@ unsafe extern "C" {
         next_c: libc::c_int,
     ) -> libc::c_int;
     fn hl_combine_attr(char_attr: libc::c_int, prim_attr: libc::c_int) -> libc::c_int;
+    fn hl_apply_winblend(winbl: libc::c_int, attr: libc::c_int) -> libc::c_int;
+    fn syn_id2attr(hl_id: libc::c_int) -> libc::c_int;
 }
 
 /// ScreenGrid represents a resizable rectuangular grid displayed by UI clients.
@@ -906,6 +908,7 @@ struct LineGrid {
     bg_attr: i32,
     clear_attr: i32,
     flags: i32,
+    active: bool,
 }
 
 static mut LINE_GRID: LineGrid = LineGrid::new();
@@ -923,8 +926,10 @@ impl LineGrid {
             bg_attr: 0,
             clear_attr: 0,
             flags: 0,
+            active: false,
         }
     }
+
     /// Start a group of grid_line_puts calls that builds a single grid line.
     ///
     /// Must be matched with a grid_line_flush call before moving to
@@ -941,13 +946,32 @@ impl LineGrid {
         col: i32,
         line_buf: &mut LineBuffer,
     ) {
-        self.max_col = unsafe { (*grid).cols };
+        let cols = unsafe { (*grid).cols };
         assert!(self.grid.is_null());
+        self.start_line(cols, row, col, line_buf);
         self.grid = grid;
+    }
+
+    /// Starts buffering a line belonging to an owned Rust grid.
+    fn screen_grid_line_start(
+        &mut self,
+        grid: &ScreenGrid,
+        row: i32,
+        col: i32,
+        line_buf: &mut LineBuffer,
+    ) {
+        assert!(self.grid.is_null());
+        self.start_line(grid.cols, row, col, line_buf);
+    }
+
+    /// Initializes the grid-independent state for a buffered line.
+    fn start_line(&mut self, cols: i32, row: i32, col: i32, line_buf: &mut LineBuffer) {
+        assert!(!self.active);
+        self.active = true;
         self.row = row;
         self.col_offset = col;
         self.first = line_buf.size as i32;
-        self.max_col = std::cmp::min(self.max_col, unsafe { (*self.grid).cols } - self.col_offset);
+        self.max_col = std::cmp::min(cols, cols - self.col_offset);
         self.last = 0;
         self.clear_to = 0;
         self.bg_attr = 0;
@@ -992,7 +1016,7 @@ impl LineGrid {
         attr: VimSAttrT,
         lb: &mut LineBuffer,
     ) {
-        assert!(!self.grid.is_null());
+        assert!(self.active);
         if col >= self.max_col {
             return;
         }
@@ -1011,7 +1035,7 @@ impl LineGrid {
     ///
     /// @return number of grid cells used
     fn puts(&mut self, mut col: i32, text: &[u8], attr: VimSAttrT, lb: &mut LineBuffer) -> usize {
-        assert!(!self.grid.is_null());
+        assert!(self.active);
         let start_col = col;
         let mut it = text.iter().enumerate();
         while let Some((i, c)) = it.next() {
@@ -1126,17 +1150,18 @@ impl LineGrid {
 
         self.flags |= Slf::Rightleft as i32;
     }
-    /// End a group of grid_line_puts calls and send the screen buffer to the UI layer.
-    fn flush(&mut self, lb: &mut LineBuffer) {
-        let grid = self.grid;
-        self.grid = std::ptr::null_mut();
+    /// Finishes the current line and reports whether it contains updates.
+    fn finish_line(&mut self) -> bool {
+        assert!(self.active);
+        self.active = false;
         self.clear_to = std::cmp::max(self.last, self.clear_to);
         assert!(self.clear_to <= self.max_col);
-        if self.first >= self.clear_to {
-            return;
-        }
-        let mut g: ScreenGrid = unsafe { (&*grid).into() };
-        g.put_line_buffer(
+        self.first < self.clear_to
+    }
+
+    /// Writes the completed line into an owned Rust grid.
+    fn write_line(&self, grid: &mut ScreenGrid, lb: &mut LineBuffer) {
+        grid.put_line_buffer(
             self.row,
             self.col_offset,
             self.first,
@@ -1148,10 +1173,31 @@ impl LineGrid {
             self.flags,
             lb,
         );
+    }
+
+    /// Ends a C-facing line operation and sends it to the UI layer.
+    fn flush(&mut self, lb: &mut LineBuffer) {
+        let grid = self.grid;
+        self.grid = std::ptr::null_mut();
+        if !self.finish_line() {
+            return;
+        }
+
+        let mut g: ScreenGrid = unsafe { (&*grid).into() };
+        self.write_line(&mut g, lb);
         unsafe {
             *grid = g.to_cgrid();
         }
     }
+
+    /// Ends a Rust-owned line operation and sends it to the UI layer.
+    fn flush_screen_grid(&mut self, grid: &mut ScreenGrid, lb: &mut LineBuffer) {
+        assert!(self.grid.is_null());
+        if self.finish_line() {
+            self.write_line(grid, lb);
+        }
+    }
+
     /// flush grid line but only if on a valid row
     ///
     /// This is a stopgap until message.c has been refactored to behave
@@ -1161,6 +1207,7 @@ impl LineGrid {
                 panic!("rdb_flags & RdbFlags::Invalid != 0");
             } else {
                 self.grid = std::ptr::null_mut();
+                self.active = false;
                 return;
             }
         }
@@ -1427,6 +1474,7 @@ pub extern "C" fn grid_clear(
             end_col = std::cmp::min(end_col, LINE_GRID.max_col);
             if LINE_GRID.row >= (*LINE_GRID.grid).rows || start_col >= end_col {
                 LINE_GRID.grid = std::ptr::null_mut();
+                LINE_GRID.active = false;
                 return;
             }
             LINE_GRID.clear_end(start_col, end_col, attr, 0);
@@ -1435,6 +1483,69 @@ pub extern "C" fn grid_clear(
     }
     unsafe {
         lb.into_cline_buffer_ref();
+    }
+}
+
+/// Draws a floating-window border from a stable subset of `WinConfig`.
+///
+/// # Safety
+///
+/// `grid` must point to a valid, exclusively accessible `CScreenGrid`.
+/// `config` must point to a valid `CGridBorderConfig` whose arrays and enabled
+/// virtual-text vectors satisfy the requirements of `Border::from_c`. A
+/// non-null `adjustments` must point to four initialized integers. The global
+/// line buffer must be initialized, and this function must run on Neovim's
+/// main thread with exclusive access to the line-buffer and glyph-map globals.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn grid_draw_border_impl(
+    grid: *mut CScreenGrid,
+    config: *const CGridBorderConfig,
+    adjustments: *const libc::c_int,
+    winbl: libc::c_int,
+    win_hl_attr_normal: libc::c_int,
+) {
+    if grid.is_null() || config.is_null() {
+        return;
+    }
+
+    // SAFETY: The caller guarantees exclusive main-thread access to the
+    // global glyph mapping for the duration of border conversion.
+    let glyph_map_ptr = &raw mut GLYPH_MAPPING;
+    let glyph_map = unsafe { &mut *glyph_map_ptr };
+    // SAFETY: The pointer and all nested border data satisfy the contract
+    // documented on this function.
+    let Some(border) = (unsafe {
+        Border::from_c(
+            &*config,
+            adjustments,
+            winbl,
+            Highlight(win_hl_attr_normal),
+            glyph_map,
+        )
+    }) else {
+        return;
+    };
+
+    // SAFETY: The caller transfers exclusive ownership of the grid buffers
+    // into Rust for the duration of this function.
+    let mut rust_grid: ScreenGrid = unsafe { (&*grid).into() };
+    let clb = CLineBufferRef::new();
+    // SAFETY: The caller guarantees exclusive access to the initialized
+    // global line buffer for the duration of this function.
+    let mut line_buffer = unsafe { LineBuffer::from_cline_buffer_ref(&clb) };
+    {
+        let mut canvas = BorderCanvas {
+            grid: &mut rust_grid,
+            line_grid: LineGrid::new(),
+            line_buffer: &mut line_buffer,
+        };
+        border.draw(&mut canvas);
+    }
+    // SAFETY: Both owners were taken from their C representations above and
+    // are returned exactly once after all canvas borrows have ended.
+    unsafe {
+        *grid = rust_grid.to_cgrid();
+        line_buffer.into_cline_buffer_ref();
     }
 }
 
@@ -1548,6 +1659,534 @@ pub struct CGridView {
     target: *mut CScreenGrid,
     row_offset: libc::c_int,
     col_offset: libc::c_int,
+}
+
+/// C representation of one virtual-text chunk.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct CVirtTextChunk {
+    text: *const libc::c_char,
+    hl_id: libc::c_int,
+}
+
+/// C representation of Neovim's `kvec_t(VirtTextChunk)`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct CVirtText {
+    size: libc::size_t,
+    capacity: libc::size_t,
+    items: *const CVirtTextChunk,
+}
+
+impl CVirtText {
+    /// Borrows the initialized virtual-text chunks.
+    ///
+    /// # Safety
+    ///
+    /// For a nonzero size, `items` must point to that many initialized chunks
+    /// and remain valid for the returned slice's lifetime.
+    unsafe fn as_slice(&self) -> Option<&[CVirtTextChunk]> {
+        if self.size == 0 {
+            return Some(&[]);
+        }
+        if self.items.is_null() {
+            return None;
+        }
+        // SAFETY: The caller guarantees that `items` describes `size`
+        // initialized chunks.
+        Some(unsafe { std::slice::from_raw_parts(self.items, self.size) })
+    }
+}
+
+/// Stable C-facing subset of `WinConfig` needed to render a border.
+#[repr(C)]
+#[derive(Debug)]
+pub struct CGridBorderConfig {
+    chars: *const libc::c_char,
+    attrs: *const libc::c_int,
+    title: libc::c_int,
+    title_pos: libc::c_int,
+    title_chunks: CVirtText,
+    title_width: libc::c_int,
+    title_attr: libc::c_int,
+    footer: libc::c_int,
+    footer_pos: libc::c_int,
+    footer_chunks: CVirtText,
+    footer_width: libc::c_int,
+    footer_attr: libc::c_int,
+}
+
+const BORDER_PART_COUNT: usize = 8;
+
+/// Semantic positions in Neovim's eight-element border arrays.
+#[derive(Clone, Copy)]
+#[repr(usize)]
+enum BorderPart {
+    TopLeft = 0,
+    Top = 1,
+    TopRight = 2,
+    Right = 3,
+    BottomRight = 4,
+    Bottom = 5,
+    BottomLeft = 6,
+    Left = 7,
+}
+
+/// A resolved Neovim highlight attribute.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Highlight(libc::c_int);
+
+impl Highlight {
+    /// Combines this base attribute with `primary` using Neovim's highlight
+    /// composition rules.
+    fn combine(self, primary: Self) -> Self {
+        // SAFETY: Both attributes are integer handles. The C function accepts
+        // every integer value and returns a resolved attribute by value.
+        Self(unsafe { hl_combine_attr(self.0, primary.0) })
+    }
+
+    /// Applies the configured floating-window transparency.
+    fn with_winblend(self, winbl: libc::c_int) -> Self {
+        // SAFETY: The C function accepts the blend amount and attribute by
+        // value and does not retain references.
+        Self(unsafe { hl_apply_winblend(winbl, self.0) })
+    }
+
+    /// Resolves a syntax highlight group to an attribute.
+    fn from_group(hl_id: libc::c_int) -> Self {
+        // SAFETY: Positive IDs originate from validated virtual-text chunks.
+        // The C function accepts the ID by value and retains no references.
+        Self(unsafe { syn_id2attr(hl_id) })
+    }
+}
+
+/// One character and highlight pair in a floating-window border style.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct BorderCell {
+    character: VimSCharT,
+    highlight: Highlight,
+}
+
+/// The eight corner and edge cells that make up a border style.
+struct BorderStyle {
+    cells: [BorderCell; BORDER_PART_COUNT],
+}
+
+impl BorderStyle {
+    /// Converts bounded C character arrays and attributes into owned cells.
+    fn new(
+        chars: &[libc::c_char],
+        attrs: &[libc::c_int],
+        normal: Highlight,
+        glyph_map: &mut GlyphMapping,
+    ) -> Option<Self> {
+        if chars.len() != BORDER_PART_COUNT * MAX_SCHAR_SIZE || attrs.len() != BORDER_PART_COUNT {
+            return None;
+        }
+
+        let mut cells = [BorderCell::default(); BORDER_PART_COUNT];
+        for (index, (cell, raw)) in cells
+            .iter_mut()
+            .zip(chars.chunks_exact(MAX_SCHAR_SIZE))
+            .enumerate()
+        {
+            let len = raw.iter().position(|byte| *byte == 0)?;
+            let bytes: Vec<u8> = raw[..len]
+                .iter()
+                .map(|byte| byte.to_ne_bytes()[0])
+                .collect();
+            *cell = BorderCell {
+                character: schar_from_bytes(&bytes, glyph_map),
+                highlight: normal.combine(Highlight(attrs[index])),
+            };
+        }
+        Some(Self { cells })
+    }
+
+    /// Returns the cell for one semantic border position.
+    fn cell(&self, part: BorderPart) -> BorderCell {
+        self.cells[part as usize]
+    }
+}
+
+/// Insets describing whether each border edge occupies a grid row or column.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct BorderAdjustments {
+    top: libc::c_int,
+    right: libc::c_int,
+    bottom: libc::c_int,
+    left: libc::c_int,
+}
+
+impl Default for BorderAdjustments {
+    fn default() -> Self {
+        Self {
+            top: 1,
+            right: 1,
+            bottom: 1,
+            left: 1,
+        }
+    }
+}
+
+impl From<&[libc::c_int; 4]> for BorderAdjustments {
+    fn from(adjustments: &[libc::c_int; 4]) -> Self {
+        Self {
+            top: adjustments[0],
+            right: adjustments[1],
+            bottom: adjustments[2],
+            left: adjustments[3],
+        }
+    }
+}
+
+/// Horizontal alignment of a border title or footer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BorderTextAlign {
+    Left,
+    Center,
+    Right,
+}
+
+impl TryFrom<libc::c_int> for BorderTextAlign {
+    type Error = ();
+
+    fn try_from(value: libc::c_int) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Self::Left),
+            1 => Ok(Self::Center),
+            2 => Ok(Self::Right),
+            _ => Err(()),
+        }
+    }
+}
+
+impl BorderTextAlign {
+    /// Finds the first grid column for text with `text_width` cells.
+    fn column(self, inner_width: libc::c_int, text_width: libc::c_int) -> libc::c_int {
+        match self {
+            Self::Left => 1,
+            Self::Center => ((inner_width - text_width) / 2 + 1).max(1),
+            Self::Right => (inner_width - text_width + 1).max(1),
+        }
+    }
+}
+
+/// An owned title/footer chunk with its final display highlight.
+#[derive(Debug, PartialEq, Eq)]
+struct BorderTextChunk {
+    text: Vec<u8>,
+    highlight: Highlight,
+}
+
+/// Owned, validated title or footer text ready for border rendering.
+struct BorderText {
+    chunks: Vec<BorderTextChunk>,
+    width: libc::c_int,
+    align: BorderTextAlign,
+    default_highlight: Highlight,
+}
+
+impl BorderText {
+    /// Copies virtual text out of its C allocation and resolves highlights.
+    ///
+    /// # Safety
+    ///
+    /// Every non-null chunk string must be NUL-terminated and readable for
+    /// the duration of this call. `chunks` must satisfy `CVirtText::as_slice`.
+    unsafe fn from_c(
+        chunks: &CVirtText,
+        width: libc::c_int,
+        align: libc::c_int,
+        default_highlight: Highlight,
+        winbl: libc::c_int,
+        normal: Highlight,
+    ) -> Option<Self> {
+        let align = BorderTextAlign::try_from(align).ok()?;
+        let default_highlight = normal.combine(default_highlight.with_winblend(winbl));
+        // SAFETY: The caller upholds the virtual-text allocation contract.
+        let raw_chunks = unsafe { chunks.as_slice()? };
+        let mut rendered_chunks = Vec::with_capacity(raw_chunks.len());
+        let mut attr = -1;
+
+        for chunk in raw_chunks {
+            if chunk.hl_id >= 0 {
+                attr = attr.max(0);
+                if chunk.hl_id > 0 {
+                    attr = Highlight(attr)
+                        .combine(Highlight::from_group(chunk.hl_id))
+                        .0;
+                }
+            }
+            if chunk.text.is_null() {
+                continue;
+            }
+
+            // SAFETY: The caller guarantees that every non-null text pointer
+            // references a readable NUL-terminated string.
+            let text = unsafe { CStr::from_ptr(chunk.text) }.to_bytes().to_vec();
+            let highlight = if attr == -1 {
+                default_highlight
+            } else {
+                normal.combine(Highlight(attr).with_winblend(winbl))
+            };
+            rendered_chunks.push(BorderTextChunk { text, highlight });
+            attr = -1;
+        }
+
+        Some(Self {
+            chunks: rendered_chunks,
+            width,
+            align,
+            default_highlight,
+        })
+    }
+
+    /// Removes complete leading screen characters until `overflow` cells
+    /// have been consumed. Returning `None` means the entire chunk is hidden.
+    fn visible_suffix<'a>(mut text: &'a [u8], overflow: &mut libc::c_int) -> Option<&'a [u8]> {
+        if *overflow <= 0 {
+            return Some(text);
+        }
+
+        let cells = libc::c_int::try_from(mbyte::string_cells(text)).unwrap_or(libc::c_int::MAX);
+        if *overflow >= cells {
+            *overflow -= cells;
+            return None;
+        }
+
+        while !text.is_empty() && *overflow > 0 {
+            *overflow -= mbyte::first_char_cells(text);
+            let len = mbyte::first_cluster_len(text);
+            text = &text[len.min(text.len())..];
+        }
+        Some(text)
+    }
+
+    /// Draws this title or footer over a horizontal border edge.
+    fn draw(&self, canvas: &mut BorderCanvas, inner_width: libc::c_int) {
+        let mut col = self.align.column(inner_width, self.width);
+        let mut overflow = self.width - inner_width;
+
+        if overflow > 0 {
+            canvas.put_text(1, b"<", self.default_highlight);
+            col += 1;
+            overflow += 1;
+        }
+
+        for chunk in &self.chunks {
+            let Some(text) = Self::visible_suffix(&chunk.text, &mut overflow) else {
+                continue;
+            };
+            col += canvas.put_text(col, text, chunk.highlight);
+        }
+    }
+}
+
+/// Complete owned description of a floating-window border.
+struct Border {
+    style: BorderStyle,
+    adjustments: BorderAdjustments,
+    title: Option<BorderText>,
+    footer: Option<BorderText>,
+}
+
+impl Border {
+    /// Copies and validates the C border description before rendering.
+    ///
+    /// # Safety
+    ///
+    /// `config` must contain pointers to eight initialized character arrays
+    /// and eight attributes. A non-null `adjustments` must reference four
+    /// initialized integers. Enabled title/footer vectors must satisfy the
+    /// requirements of `BorderText::from_c`.
+    unsafe fn from_c(
+        config: &CGridBorderConfig,
+        adjustments: *const libc::c_int,
+        winbl: libc::c_int,
+        normal: Highlight,
+        glyph_map: &mut GlyphMapping,
+    ) -> Option<Self> {
+        if config.chars.is_null() || config.attrs.is_null() {
+            return None;
+        }
+        // SAFETY: The caller guarantees both fixed-size border arrays.
+        let chars =
+            unsafe { std::slice::from_raw_parts(config.chars, BORDER_PART_COUNT * MAX_SCHAR_SIZE) };
+        // SAFETY: The caller guarantees both fixed-size border arrays.
+        let attrs = unsafe { std::slice::from_raw_parts(config.attrs, BORDER_PART_COUNT) };
+        let style = BorderStyle::new(chars, attrs, normal, glyph_map)?;
+        let adjustments = if adjustments.is_null() {
+            BorderAdjustments::default()
+        } else {
+            // SAFETY: The caller guarantees four initialized adjustments.
+            let values = unsafe { &*adjustments.cast::<[libc::c_int; 4]>() };
+            values.into()
+        };
+        let title = if config.title != 0 {
+            // SAFETY: The caller guarantees the enabled title vector and its
+            // strings remain valid for this conversion.
+            Some(unsafe {
+                BorderText::from_c(
+                    &config.title_chunks,
+                    config.title_width,
+                    config.title_pos,
+                    Highlight(config.title_attr),
+                    winbl,
+                    normal,
+                )?
+            })
+        } else {
+            None
+        };
+        let footer = if config.footer != 0 {
+            // SAFETY: The caller guarantees the enabled footer vector and
+            // its strings remain valid for this conversion.
+            Some(unsafe {
+                BorderText::from_c(
+                    &config.footer_chunks,
+                    config.footer_width,
+                    config.footer_pos,
+                    Highlight(config.footer_attr),
+                    winbl,
+                    normal,
+                )?
+            })
+        } else {
+            None
+        };
+
+        Some(Self {
+            style,
+            adjustments,
+            title,
+            footer,
+        })
+    }
+
+    /// Draws all enabled border edges and their title/footer text.
+    fn draw(&self, canvas: &mut BorderCanvas) {
+        let inner_rows = canvas.rows() - self.adjustments.top - self.adjustments.bottom;
+        let inner_cols = canvas.cols() - self.adjustments.right - self.adjustments.left;
+
+        if self.adjustments.top != 0 {
+            canvas.start_line(0);
+            if self.adjustments.left != 0 {
+                canvas.put_cell(0, self.style.cell(BorderPart::TopLeft));
+            }
+            for col in 0..inner_cols {
+                canvas.put_cell(
+                    col + self.adjustments.left,
+                    self.style.cell(BorderPart::Top),
+                );
+            }
+            if let Some(title) = &self.title {
+                title.draw(canvas, inner_cols);
+            }
+            if self.adjustments.right != 0 {
+                canvas.put_cell(
+                    inner_cols + self.adjustments.left,
+                    self.style.cell(BorderPart::TopRight),
+                );
+            }
+            canvas.flush();
+        }
+
+        for row in 0..inner_rows {
+            if self.adjustments.left != 0 {
+                canvas.start_line(row + self.adjustments.top);
+                canvas.put_cell(0, self.style.cell(BorderPart::Left));
+                canvas.flush();
+            }
+            if self.adjustments.right != 0 {
+                let part = if row == 0
+                    && self.adjustments.top == 0
+                    && self.style.cell(BorderPart::TopRight).character != 0
+                {
+                    BorderPart::TopRight
+                } else {
+                    BorderPart::Right
+                };
+                canvas.start_line(row + self.adjustments.top);
+                canvas.put_cell(inner_cols + self.adjustments.left, self.style.cell(part));
+                canvas.flush();
+            }
+        }
+
+        if self.adjustments.bottom != 0 {
+            canvas.start_line(inner_rows + self.adjustments.top);
+            if self.adjustments.left != 0 {
+                canvas.put_cell(0, self.style.cell(BorderPart::BottomLeft));
+            }
+            for col in 0..inner_cols {
+                let part = if col == 0
+                    && self.adjustments.left == 0
+                    && self.style.cell(BorderPart::BottomLeft).character != 0
+                {
+                    BorderPart::BottomLeft
+                } else {
+                    BorderPart::Bottom
+                };
+                canvas.put_cell(col + self.adjustments.left, self.style.cell(part));
+            }
+            if let Some(footer) = &self.footer {
+                footer.draw(canvas, inner_cols);
+            }
+            if self.adjustments.right != 0 {
+                canvas.put_cell(
+                    inner_cols + self.adjustments.left,
+                    self.style.cell(BorderPart::BottomRight),
+                );
+            }
+            canvas.flush();
+        }
+    }
+}
+
+/// Safe drawing facade over the stateful line-grid renderer.
+struct BorderCanvas<'a> {
+    grid: &'a mut ScreenGrid,
+    line_grid: LineGrid,
+    line_buffer: &'a mut LineBuffer,
+}
+
+impl BorderCanvas<'_> {
+    /// Returns the number of grid rows available to the border.
+    fn rows(&self) -> libc::c_int {
+        self.grid.rows
+    }
+
+    /// Returns the number of grid columns available to the border.
+    fn cols(&self) -> libc::c_int {
+        self.grid.cols
+    }
+
+    /// Starts buffering updates for one absolute grid row.
+    fn start_line(&mut self, row: libc::c_int) {
+        self.line_grid
+            .screen_grid_line_start(&*self.grid, row, 0, self.line_buffer);
+    }
+
+    /// Places one border cell in the current buffered row.
+    fn put_cell(&mut self, col: libc::c_int, cell: BorderCell) {
+        self.line_grid
+            .put_schar_and_attr(col, cell.character, cell.highlight.0, self.line_buffer);
+    }
+
+    /// Places one text chunk and returns the number of occupied cells.
+    fn put_text(&mut self, col: libc::c_int, text: &[u8], highlight: Highlight) -> libc::c_int {
+        libc::c_int::try_from(
+            self.line_grid
+                .puts(col, text, highlight.0, self.line_buffer),
+        )
+        .unwrap_or(libc::c_int::MAX)
+    }
+
+    /// Commits the current buffered row to the grid.
+    fn flush(&mut self) {
+        self.line_grid
+            .flush_screen_grid(&mut *self.grid, self.line_buffer);
+    }
 }
 
 macro_rules! init_ptr {
@@ -2441,6 +3080,27 @@ mod tests {
         assert!(cgrid.attrs.is_null());
         assert!(cgrid.vcols.is_null());
         assert!(cgrid.line_offset.is_null());
+    }
+
+    #[test]
+    fn border_text_alignment_columns() {
+        assert_eq!(BorderTextAlign::Left.column(9, 5), 1);
+        assert_eq!(BorderTextAlign::Center.column(9, 5), 3);
+        assert_eq!(BorderTextAlign::Right.column(9, 5), 5);
+        assert_eq!(BorderTextAlign::Center.column(9, 12), 1);
+        assert_eq!(BorderTextAlign::Right.column(9, 12), 1);
+    }
+
+    #[test]
+    fn border_text_clips_complete_screen_characters() {
+        let mut overflow = 5;
+        assert_eq!(BorderText::visible_suffix(b"abcd", &mut overflow), None);
+        assert_eq!(overflow, 1);
+        assert_eq!(
+            BorderText::visible_suffix("界xyz".as_bytes(), &mut overflow),
+            Some(b"xyz".as_slice())
+        );
+        assert_eq!(overflow, -1);
     }
 
     #[test]

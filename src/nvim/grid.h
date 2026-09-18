@@ -36,6 +36,22 @@ enum {
   SLF_INC_VCOL  = 4,
 };
 
+/// Stable subset of WinConfig passed to the Rust border renderer.
+typedef struct {
+  const char *chars;
+  const int *attrs;
+  int title;
+  int title_pos;
+  VirtText title_chunks;
+  int title_width;
+  int title_attr;
+  int footer;
+  int footer_pos;
+  VirtText footer_chunks;
+  int footer_width;
+  int footer_attr;
+} GridBorderConfig;
+
 extern void grid_alloc(ScreenGrid *grid, int rows, int columns, bool copy, bool valid);
 extern void grid_free(ScreenGrid *grid);
 extern void grid_clear_line(ScreenGrid *grid, size_t off, int width, bool valid);
@@ -72,6 +88,8 @@ extern void grid_line_flush_if_valid_row(void);
 extern void grid_clear(GridView *grid, int start_row, int end_row, int start_col, int end_col, int attr);
 extern void grid_put_linebuf(ScreenGrid *grid, int row, int coloff, int col, int endcol, int clear_width,
                       int bg_attr, int clear_attr, colnr_T last_vcol, int flags);
+extern void grid_draw_border_impl(ScreenGrid *grid, const GridBorderConfig *config, const int *adj,
+                                  int winbl, int win_hl_attr_normal);
 
 extern void grid_assign_handle(ScreenGrid *grid);
 

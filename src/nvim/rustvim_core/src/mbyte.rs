@@ -18,6 +18,9 @@ unsafe extern "C" {
     #[link_name = "utf_char2bytes"]
     fn utf_char2bytes_ffi(c: libc::c_int, buf: *mut libc::c_char) -> libc::c_int;
 
+    #[link_name = "mb_string2cells_len"]
+    fn mb_string2cells_len_ffi(text: *const libc::c_char, len: libc::size_t) -> libc::size_t;
+
     pub fn utfc_ptr2len_len(p: *const libc::c_char, size: libc::c_int) -> libc::c_int;
     pub fn utf_ptr2cells_len(p: *const libc::c_char, size: libc::c_int) -> libc::c_int;
     pub fn utfc_ptrlen2schar(
@@ -47,6 +50,37 @@ pub(crate) fn utf_ptr2len(p_in: &CStr) -> usize {
     // SAFETY: CStr guarantees a non-null pointer to a readable,
     // NUL-terminated byte sequence for the duration of this call.
     unsafe { utf_ptr2len_ffi(p_in.as_ptr()) as usize }
+}
+
+/// Returns the display width of a byte string using Neovim's multibyte rules.
+pub(crate) fn string_cells(text: &[u8]) -> usize {
+    // SAFETY: `text` supplies a valid pointer and length for the duration of
+    // the call. The length-delimited C function does not require a trailing
+    // NUL.
+    unsafe { mb_string2cells_len_ffi(text.as_ptr().cast::<libc::c_char>(), text.len()) }
+}
+
+/// Returns the byte length of the first base character and its composing
+/// characters using Neovim's multibyte rules.
+pub(crate) fn first_cluster_len(text: &[u8]) -> usize {
+    if text.is_empty() {
+        return 0;
+    }
+    let len = libc::c_int::try_from(text.len()).unwrap_or(libc::c_int::MAX);
+    // SAFETY: `text` is nonempty and valid for reads of `len` bytes. The
+    // length-delimited C function cannot inspect beyond that range.
+    unsafe { utfc_ptr2len_len(text.as_ptr().cast::<libc::c_char>(), len) as usize }
+}
+
+/// Returns the display width of the first character in `text`.
+pub(crate) fn first_char_cells(text: &[u8]) -> libc::c_int {
+    if text.is_empty() {
+        return 0;
+    }
+    let len = libc::c_int::try_from(text.len()).unwrap_or(libc::c_int::MAX);
+    // SAFETY: `text` is nonempty and valid for reads of `len` bytes. The
+    // length-delimited C function cannot inspect beyond that range.
+    unsafe { utf_ptr2cells_len(text.as_ptr().cast::<libc::c_char>(), len) }
 }
 
 /// A codepoint encoded with Neovim's extended UTF-8 representation.

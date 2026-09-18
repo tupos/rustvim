@@ -16,12 +16,10 @@
 #include "nvim/api/private/defs.h"
 #include "nvim/ascii_defs.h"
 #include "nvim/buffer_defs.h"
-#include "nvim/decoration.h"
 #include "nvim/globals.h"
 #include "nvim/grid.h"
 #include "nvim/highlight.h"
 #include "nvim/map_defs.h"
-#include "nvim/mbyte.h"
 #include "nvim/memory.h"
 #include "nvim/message.h"
 #include "nvim/option_vars.h"
@@ -125,144 +123,26 @@ void win_grid_alloc(win_T *wp)
   }
 }
 
-/// @param overflow Number of cells to skip.
-static void grid_draw_bordertext(VirtText vt, int col, int winbl, const int *hl_attr,
-                                 int win_hl_attr_normal, BorderTextType bt, int overflow)
-{
-  int default_attr = hl_attr[bt == kBorderTextTitle ? HLF_BTITLE : HLF_BFOOTER];
-  default_attr = hl_apply_winblend(winbl, default_attr);
-  default_attr = hl_combine_attr(win_hl_attr_normal, default_attr);
-
-  if (overflow > 0) {
-    grid_line_puts(1, "<", -1, default_attr);
-    col += 1;
-    overflow += 1;
-  }
-
-  for (size_t i = 0; i < kv_size(vt);) {
-    int attr = -1;
-    char *text = next_virt_text_chunk(vt, &i, &attr);
-    if (text == NULL) {
-      break;
-    }
-    // Skip characters from the beginning when title overflows available width.
-    if (overflow > 0) {
-      int cells = (int)mb_string2cells(text);
-      // Skip entire chunk if overflow is larger than chunk width.
-      if (overflow >= cells) {
-        overflow -= cells;
-        continue;
-      }
-      // Skip partial characters within the chunk.
-      char *p = text;
-      while (*p && overflow > 0) {
-        overflow -= utf_ptr2cells(p);
-        p += utfc_ptr2len(p);
-      }
-      text = p;
-    }
-    if (attr == -1) {  // No highlight specified.
-      attr = default_attr;
-    } else {
-      attr = hl_apply_winblend(winbl, attr);
-      attr = hl_combine_attr(win_hl_attr_normal, attr);
-    }
-    col += grid_line_puts(col, text, -1, attr);
-  }
-}
-
-static int get_bordertext_col(int total_col, int text_width, AlignTextPos align)
-{
-  switch (align) {
-  case kAlignLeft:
-    return 1;
-  case kAlignCenter:
-    return MAX((total_col - text_width) / 2 + 1, 1);
-  case kAlignRight:
-    return MAX(total_col - text_width + 1, 1);
-  }
-  UNREACHABLE;
-}
-
 /// draw border on floating window grid
 void grid_draw_border(ScreenGrid *grid, WinConfig *config, int *adj, int winbl, int *hl_attr,
                       int win_hl_attr_normal)
 {
-  int default_adj[4] = { 1, 1, 1, 1 };
-  if (adj == NULL) {
-    adj = default_adj;
-  }
-  schar_T chars[8];
-  int border_attrs[8];
-  if (!hl_attr) {
-    hl_attr = hl_attr_active;
-  }
-
-  for (int i = 0; i < 8; i++) {
-    chars[i] = schar_from_str(config->border_chars[i]);
-    border_attrs[i] = hl_combine_attr(win_hl_attr_normal, config->border_attr[i]);
-  }
-
-  int irow = grid->rows - adj[0] - adj[2];
-  int icol = grid->cols - adj[1] - adj[3];
-
-  if (adj[0]) {
-    screengrid_line_start(grid, 0, 0);
-    if (adj[3]) {
-      grid_line_put_schar(0, chars[0], border_attrs[0]);
-    }
-
-    for (int i = 0; i < icol; i++) {
-      grid_line_put_schar(i + adj[3], chars[1], border_attrs[1]);
-    }
-
-    if (config->title) {
-      int title_col = get_bordertext_col(icol, config->title_width, config->title_pos);
-      grid_draw_bordertext(config->title_chunks, title_col, winbl, hl_attr,
-                           win_hl_attr_normal, kBorderTextTitle,
-                           config->title_width - icol);
-    }
-    if (adj[1]) {
-      grid_line_put_schar(icol + adj[3], chars[2], border_attrs[2]);
-    }
-    grid_line_flush();
-  }
-
-  for (int i = 0; i < irow; i++) {
-    if (adj[3]) {
-      screengrid_line_start(grid, i + adj[0], 0);
-      grid_line_put_schar(0, chars[7], border_attrs[7]);
-      grid_line_flush();
-    }
-    if (adj[1]) {
-      int ic = (i == 0 && !adj[0] && chars[2]) ? 2 : 3;
-      screengrid_line_start(grid, i + adj[0], 0);
-      grid_line_put_schar(icol + adj[3], chars[ic], border_attrs[ic]);
-      grid_line_flush();
-    }
-  }
-
-  if (adj[2]) {
-    screengrid_line_start(grid, irow + adj[0], 0);
-    if (adj[3]) {
-      grid_line_put_schar(0, chars[6], border_attrs[6]);
-    }
-
-    for (int i = 0; i < icol; i++) {
-      int ic = (i == 0 && !adj[3] && chars[6]) ? 6 : 5;
-      grid_line_put_schar(i + adj[3], chars[ic], border_attrs[ic]);
-    }
-
-    if (config->footer) {
-      int footer_col = get_bordertext_col(icol, config->footer_width, config->footer_pos);
-      grid_draw_bordertext(config->footer_chunks, footer_col, winbl, hl_attr, win_hl_attr_normal,
-                           kBorderTextFooter, config->footer_width - icol);
-    }
-    if (adj[1]) {
-      grid_line_put_schar(icol + adj[3], chars[4], border_attrs[4]);
-    }
-    grid_line_flush();
-  }
+  const int *active_hl_attr = hl_attr == NULL ? hl_attr_active : hl_attr;
+  GridBorderConfig border = {
+    .chars = &config->border_chars[0][0],
+    .attrs = config->border_attr,
+    .title = config->title,
+    .title_pos = config->title_pos,
+    .title_chunks = config->title_chunks,
+    .title_width = config->title_width,
+    .title_attr = active_hl_attr[HLF_BTITLE],
+    .footer = config->footer,
+    .footer_pos = config->footer_pos,
+    .footer_chunks = config->footer_chunks,
+    .footer_width = config->footer_width,
+    .footer_attr = active_hl_attr[HLF_BFOOTER],
+  };
+  grid_draw_border_impl(grid, &border, adj, winbl, win_hl_attr_normal);
 }
 
 win_T *get_win_by_grid_handle(handle_T handle)
