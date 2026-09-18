@@ -1695,7 +1695,7 @@ impl GlyphMapping {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn alloc_initial_line_buffer() {
-    let _ = CLineBufferRef::new().alloc(unsafe { globals::Columns as usize });
+    CLineBufferRef::new().alloc(unsafe { globals::Columns as usize });
 }
 
 #[unsafe(no_mangle)]
