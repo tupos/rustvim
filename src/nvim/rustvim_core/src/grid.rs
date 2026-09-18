@@ -1809,7 +1809,7 @@ pub extern "C" fn schar_high(sc: VimSCharT) -> bool {
 /// advance buf_out. do NOT set final NUL
 #[unsafe(no_mangle)]
 pub extern "C" fn schar_get_adv(buf_out: *mut *mut libc::c_char, sc: VimSCharT) -> libc::size_t {
-    let gm = unsafe { &mut *&raw mut GLYPH_MAPPING };
+    let gm = unsafe { &mut GLYPH_MAPPING };
     let gb = schar_to_bytes(sc, gm);
     let len = gb.len as usize;
     let slice = unsafe { std::slice::from_raw_parts_mut(*buf_out as *mut u8, len) };
