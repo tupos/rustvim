@@ -53,7 +53,15 @@ unsafe extern "C" {
 
     fn decor_check_invalid_glyphs();
     fn check_chars_options() -> bool;
-    fn line_do_arabic_shape(buf: *mut VimSCharT, cols: libc::c_int);
+    /// Shape one Arabic base codepoint using its neighboring screen cells.
+    #[link_name = "arabic_shape"]
+    fn arabic_shape_ffi(
+        c: libc::c_int,
+        c1p: *mut libc::c_int,
+        prev_c: libc::c_int,
+        prev_c1: libc::c_int,
+        next_c: libc::c_int,
+    ) -> libc::c_int;
     fn hl_combine_attr(char_attr: libc::c_int, prim_attr: libc::c_int) -> libc::c_int;
 }
 
@@ -395,7 +403,11 @@ impl ScreenGrid {
 
         unsafe {
             if p_arshape != 0 && p_tbidi == 0 && endcol > col {
-                line_do_arabic_shape(lb.chars.as_mut_ptr().add(col as usize), endcol - col);
+                // SAFETY: Screen updates run on Neovim's main thread, so this
+                // is the only active borrow of the global glyph mapping.
+                let glyph_map_ptr = &raw mut GLYPH_MAPPING;
+                let glyph_map = &mut *glyph_map_ptr;
+                ArabicShaper::new(glyph_map).shape(&mut lb.chars[col as usize..endcol as usize]);
             }
         }
 
@@ -1581,6 +1593,77 @@ impl From<&CScreenGrid> for ScreenGrid {
     }
 }
 
+/// The codepoints that participate in shaping a single screen cell.
+///
+/// An absent composing codepoint is represented as `None` instead of the C
+/// implementation's NUL sentinel. A zero base represents an absent neighbor.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+struct CellCodepoints {
+    /// The first codepoint in the cell.
+    base: i32,
+    /// The first composing codepoint, when one is present.
+    composing: Option<i32>,
+}
+
+impl CellCodepoints {
+    /// Returns whether the base is in the Arabic block shaped by Neovim.
+    fn is_arabic(self) -> bool {
+        self.base & 0xFF00 == 0x0600
+    }
+
+    /// Returns the size of these codepoints in Neovim's UTF-8 encoding.
+    fn encoded_len(self) -> usize {
+        let base_len = mbyte::EncodedCodepoint::new(self.base).as_bytes().len();
+        let composing_len = self
+            .composing
+            .map(|codepoint| mbyte::EncodedCodepoint::new(codepoint).as_bytes().len())
+            .unwrap_or_default();
+        base_len + composing_len
+    }
+}
+
+/// Stack-backed builder for a screen-cell glyph.
+///
+/// Its capacity excludes the trailing NUL that `GlyphBuff` adds, preventing
+/// construction of a payload that cannot fit in one screen cell.
+struct GlyphBuilder {
+    bytes: [u8; MAX_SCHAR_SIZE - 1],
+    len: usize,
+}
+
+impl GlyphBuilder {
+    /// Creates an empty builder with the maximum screen-cell payload capacity.
+    fn new() -> Self {
+        Self {
+            bytes: [0; MAX_SCHAR_SIZE - 1],
+            len: 0,
+        }
+    }
+
+    /// Returns the number of payload bytes that can still be appended.
+    fn remaining(&self) -> usize {
+        self.bytes.len() - self.len
+    }
+
+    /// Appends one codepoint using Neovim's UTF-8 encoding.
+    fn push_codepoint(&mut self, codepoint: i32) {
+        let encoded = mbyte::EncodedCodepoint::new(codepoint);
+        self.extend_from_slice(encoded.as_bytes());
+    }
+
+    /// Appends bytes while enforcing the screen-cell size invariant.
+    fn extend_from_slice(&mut self, bytes: &[u8]) {
+        assert!(bytes.len() <= self.remaining());
+        self.bytes[self.len..self.len + bytes.len()].copy_from_slice(bytes);
+        self.len += bytes.len();
+    }
+
+    /// Converts the initialized payload into a NUL-terminated glyph.
+    fn finish(self) -> GlyphBuff {
+        GlyphBuff::from_bytes(&self.bytes[..self.len])
+    }
+}
+
 /// Glyph buffer to store bytes for the cell value of the `ScreenGrid`.
 #[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord)]
 struct GlyphBuff {
@@ -1606,8 +1689,91 @@ impl GlyphBuff {
     }
 
     fn as_c_str(&self) -> &CStr {
-        CStr::from_bytes_with_nul(&self.buff[..=self.len as usize])
+        self.as_c_str_from(0)
+    }
+
+    /// Returns the NUL-terminated suffix beginning at `offset`.
+    fn as_c_str_from(&self, offset: usize) -> &CStr {
+        assert!(offset <= self.len as usize);
+        CStr::from_bytes_with_nul(&self.buff[offset..=self.len as usize])
             .expect("glyph buffer must contain exactly one trailing NUL")
+    }
+
+    /// Decodes the base and first composing codepoint used for shaping.
+    fn first_two_codepoints(&self) -> CellCodepoints {
+        let base = mbyte::utf_ptr2char(self.as_c_str());
+        if base == 0 {
+            return CellCodepoints::default();
+        }
+
+        let base_len = mbyte::utf_ptr2len(self.as_c_str());
+        let composing = match mbyte::utf_ptr2char(self.as_c_str_from(base_len)) {
+            0 => None,
+            codepoint => Some(codepoint),
+        };
+        CellCodepoints { base, composing }
+    }
+
+    /// Replaces the shaping codepoints while preserving remaining modifiers.
+    ///
+    /// If the shaped codepoints require more space, the final modifier is
+    /// removed to retain the maximum screen-cell payload size.
+    fn replace_first_two_codepoints(
+        &self,
+        current: CellCodepoints,
+        replacement: CellCodepoints,
+    ) -> Self {
+        let rest_start = current.encoded_len().min(self.as_bytes().len());
+        let mut rest = &self.as_bytes()[rest_start..];
+
+        let mut shaped = GlyphBuilder::new();
+        shaped.push_codepoint(replacement.base);
+        if let Some(composing) = replacement.composing {
+            shaped.push_codepoint(composing);
+        }
+        if rest.len() > shaped.remaining() {
+            // Shaping can increase the base character's byte length. Discarding
+            // the final codepoint preserves the screen-cell size invariant.
+            rest = Self::without_last_codepoint(rest);
+        }
+        shaped.extend_from_slice(rest);
+        shaped.finish()
+    }
+
+    /// Removes the final codepoint using Neovim's extended UTF-8 boundaries.
+    ///
+    /// A malformed or incomplete final sequence is treated as one byte,
+    /// matching `utf_cp_bounds` in the previous C implementation.
+    fn without_last_codepoint(bytes: &[u8]) -> &[u8] {
+        let Some(last) = bytes.len().checked_sub(1) else {
+            return bytes;
+        };
+        if bytes[last] < 0x80 {
+            return &bytes[..last];
+        }
+
+        let earliest = last.saturating_sub(5);
+        let mut first = last;
+        while bytes[first] & 0xC0 == 0x80 {
+            if first == earliest {
+                return &bytes[..last];
+            }
+            first -= 1;
+        }
+
+        let sequence_len = match bytes[first] {
+            0xC0..=0xDF => 2,
+            0xE0..=0xEF => 3,
+            0xF0..=0xF7 => 4,
+            0xF8..=0xFB => 5,
+            0xFC..=0xFD => 6,
+            _ => 1,
+        };
+        if sequence_len == last - first + 1 {
+            &bytes[..first]
+        } else {
+            &bytes[..last]
+        }
     }
 }
 
@@ -1713,6 +1879,11 @@ impl GlyphMapping {
         }
     }
 
+    /// Resolves a screen character and decodes its shaping codepoints.
+    fn codepoints(&self, c: VimSCharT) -> CellCodepoints {
+        self.resolve(c).first_two_codepoints()
+    }
+
     /// Returns the length of the bytes from the mapping schart -> bytes
     fn get_len(&self, c: VimSCharT) -> Option<usize> {
         self.dict.get(&c).map(|glyph_buff| glyph_buff.len as usize)
@@ -1735,6 +1906,94 @@ impl GlyphMapping {
         self.dict.clear();
         self.index.clear();
         self.next_free = Self::to_schart(0);
+    }
+}
+
+/// Applies Arabic presentation shaping to a sequence of screen cells.
+///
+/// Glyph lookup and reinterning remain internal, so callers provide only a
+/// safe mutable slice of screen characters.
+struct ArabicShaper<'a> {
+    glyph_map: &'a mut GlyphMapping,
+}
+
+impl<'a> ArabicShaper<'a> {
+    /// Creates a shaper backed by the screen's glyph mapping.
+    fn new(glyph_map: &'a mut GlyphMapping) -> Self {
+        Self { glyph_map }
+    }
+
+    /// Shapes all Arabic cells in place, leaving other cells unchanged.
+    fn shape(&mut self, cells: &mut [VimSCharT]) {
+        let Some(start) = cells
+            .iter()
+            .position(|cell| schar_in_arabic_block_impl(*cell, self.glyph_map))
+        else {
+            return;
+        };
+
+        let mut before = 0;
+        let mut current = self.glyph_map.codepoints(cells[start]);
+        for index in start..cells.len() {
+            let after = cells
+                .get(index + 1)
+                .map(|cell| self.glyph_map.codepoints(*cell))
+                .unwrap_or_default();
+
+            self.shape_cell(&mut cells[index], current, after, before);
+            before = current.base;
+            current = after;
+        }
+    }
+
+    /// Shapes and reinterns one cell when its base is Arabic.
+    fn shape_cell(
+        &mut self,
+        cell: &mut VimSCharT,
+        current: CellCodepoints,
+        after: CellCodepoints,
+        before: i32,
+    ) {
+        if !current.is_arabic() {
+            return;
+        }
+
+        let replacement = Self::shape_codepoints(current, after, before);
+        if replacement == current {
+            return;
+        }
+
+        let glyph = self.glyph_map.resolve(*cell);
+        let shaped = glyph.replace_first_two_codepoints(current, replacement);
+        *cell = schar_from_bytes(shaped.as_bytes(), self.glyph_map);
+    }
+
+    /// Calls the remaining C shaping primitive for one cell.
+    ///
+    /// Screen order is the reverse of the logical joining order expected by
+    /// `arabic_shape`, so `after` is passed as its previous character and
+    /// `before` as its next character.
+    fn shape_codepoints(
+        current: CellCodepoints,
+        after: CellCodepoints,
+        before: i32,
+    ) -> CellCodepoints {
+        let mut composing = current.composing.unwrap_or_default();
+        // SAFETY: `composing` is a valid writable integer for the duration of
+        // the call; the remaining arguments are passed by value.
+        let base = unsafe {
+            arabic_shape_ffi(
+                current.base,
+                &raw mut composing,
+                after.base,
+                after.composing.unwrap_or_default(),
+                before,
+            )
+        };
+        CellCodepoints {
+            base,
+            composing: (composing != 0).then_some(composing),
+        }
     }
 }
 
@@ -1945,6 +2204,30 @@ pub extern "C" fn schar_in_arabic_block(sc: VimSCharT) -> bool {
     schar_in_arabic_block_impl(sc, gm)
 }
 
+/// Shape `cols` screen characters for Arabic display.
+///
+/// # Safety
+///
+/// For a positive `cols`, `buf` must point to `cols` initialized screen
+/// characters that are exclusively writable for the duration of this call.
+/// The function must run on Neovim's main thread while the global glyph
+/// mapping is not otherwise accessed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn line_do_arabic_shape(buf: *mut VimSCharT, cols: libc::c_int) {
+    if buf.is_null() || cols <= 0 {
+        return;
+    }
+
+    // SAFETY: The caller guarantees that `buf` references `cols` initialized,
+    // exclusively writable elements. `cols` was checked to be positive.
+    let buf = unsafe { std::slice::from_raw_parts_mut(buf, cols as usize) };
+    // SAFETY: The caller guarantees main-thread access and therefore unique
+    // access to the global glyph mapping for the duration of this call.
+    let glyph_map_ptr = &raw mut GLYPH_MAPPING;
+    let glyph_map = unsafe { &mut *glyph_map_ptr };
+    ArabicShaper::new(glyph_map).shape(buf);
+}
+
 /// @return ascii char or NULL_TERMINATOR if not ascii
 #[unsafe(no_mangle)]
 pub extern "C" fn schar_get_ascii(sc: VimSCharT) -> libc::c_char {
@@ -2041,9 +2324,8 @@ pub extern "C" fn schar_from_char(mut c: libc::c_int) -> VimSCharT {
         c = 0xFFFD;
     }
     let mut bytes = (0 as VimSCharT).to_le_bytes();
-    unsafe {
-        mbyte::utf_char2bytes(c, bytes.as_mut_ptr().cast::<libc::c_char>());
-    }
+    let encoded = mbyte::EncodedCodepoint::new(c);
+    bytes[..encoded.as_bytes().len()].copy_from_slice(encoded.as_bytes());
     VimSCharT::from_le_bytes(bytes)
 }
 
@@ -2244,6 +2526,31 @@ mod tests {
                 expected_codepoint
             );
         }
+    }
+
+    #[test]
+    fn line_do_arabic_shape() {
+        let mut gm = GlyphMapping::new();
+        let mut line =
+            ["س", "ل", "م"].map(|glyph| super::schar_from_bytes(glyph.as_bytes(), &mut gm));
+
+        ArabicShaper::new(&mut gm).shape(&mut line);
+
+        let actual = line.map(|sc| gm.resolve(sc).as_bytes().to_vec());
+        let expected = ["ﺲ", "ﻠ", "ﻣ"].map(|glyph| glyph.as_bytes().to_vec());
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn line_do_arabic_shape_discards_overflowing_codepoint() {
+        let mut gm = GlyphMapping::new();
+        let input = "م့̀́̂̃̄̅̆̇̈̉̊̋̌";
+        assert_eq!(input.len(), MAX_SCHAR_SIZE - 1);
+        let mut line = [super::schar_from_bytes(input.as_bytes(), &mut gm)];
+
+        ArabicShaper::new(&mut gm).shape(&mut line);
+
+        assert_eq!(gm.resolve(line[0]).as_bytes(), "ﻡ̀́̂̃̄̅̆̇̈̉̊̋̌".as_bytes());
     }
 
     #[test]

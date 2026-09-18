@@ -18,7 +18,6 @@
 #include <string.h>
 
 #include "nvim/api/private/defs.h"
-#include "nvim/arabic.h"
 #include "nvim/ascii_defs.h"
 #include "nvim/buffer_defs.h"
 #include "nvim/decoration.h"
@@ -50,82 +49,6 @@ int last_grid_handle = DEFAULT_GRID_HANDLE;
 #else
 # define schar_idx(sc) (sc >> 8)
 #endif
-
-/// Get the first two codepoints of an schar, or NUL when not available
-static void schar_get_first_two_codepoints(schar_T sc, int *c0, int *c1)
-{
-  char sc_buf[MAX_SCHAR_SIZE];
-  schar_get(sc_buf, sc);
-
-  *c0 = utf_ptr2char(sc_buf);
-  int len = utf_ptr2len(sc_buf);
-  if (*c0 == NUL) {
-    *c1 = NUL;
-  } else {
-    *c1 = utf_ptr2char(sc_buf + len);
-  }
-}
-
-void line_do_arabic_shape(schar_T *buf, int cols)
-{
-  int i = 0;
-
-  for (i = 0; i < cols; i++) {
-    // quickly skip over non-arabic text
-    if (schar_in_arabic_block(buf[i])) {
-      break;
-    }
-  }
-
-  if (i == cols) {
-    return;
-  }
-
-  int c0prev = 0;
-  int c0, c1;
-  schar_get_first_two_codepoints(buf[i], &c0, &c1);
-
-  for (; i < cols; i++) {
-    int c0next, c1next;
-    schar_get_first_two_codepoints(i + 1 < cols ? buf[i + 1] : 0, &c0next, &c1next);
-
-    if (!ARABIC_CHAR(c0)) {
-      goto next;
-    }
-
-    int c1new = c1;
-    int c0new = arabic_shape(c0, &c1new, c0next, c1next, c0prev);
-
-    if (c0new == c0 && c1new == c1) {
-      goto next;  // unchanged
-    }
-
-    char scbuf[MAX_SCHAR_SIZE];
-    schar_get(scbuf, buf[i]);
-
-    char scbuf_new[MAX_SCHAR_SIZE];
-    size_t len = (size_t)utf_char2bytes(c0new, scbuf_new);
-    if (c1new) {
-      len += (size_t)utf_char2bytes(c1new, scbuf_new + len);
-    }
-
-    int off = utf_char2len(c0) + (c1 ? utf_char2len(c1) : 0);
-    size_t rest = strlen(scbuf + off);
-    if (rest + len + 1 > MAX_SCHAR_SIZE) {
-      // Too bigly, discard one code-point.
-      // This should be enough as c0 cannot grow more than from 2 to 4 bytes
-      // (base arabic to extended arabic)
-      rest -= (size_t)utf_cp_bounds(scbuf + off, scbuf + off + rest - 1).begin_off + 1;
-    }
-    memcpy(scbuf_new + len, scbuf + off, rest);
-    buf[i] = schar_from_buf(scbuf_new, len + rest);
-
-next:
-    c0prev = c0;
-    c0 = c0next;
-    c1 = c1next;
-  }
-}
 
 #ifdef VIM_IMPL
 // DONE
