@@ -1472,7 +1472,6 @@ fn schar_to_bytes(sc: VimSCharT, glyph_map: &GlyphMapping) -> GlyphBuff {
 /// Sets NULL_TERMINATOR
 fn schar_to_null_term_bytes(sc: VimSCharT, glyph_map: &GlyphMapping) -> GlyphBuff {
     let mut glyph_buff = schar_to_bytes(sc, glyph_map);
-    glyph_buff.len += 1;
     assert!((glyph_buff.len as usize) < MAX_SCHAR_SIZE);
     glyph_buff.buff[glyph_buff.len as usize] = NULL_TERMINATOR;
     glyph_buff
@@ -2163,6 +2162,22 @@ mod tests {
         for (t, e) in &test_cases {
             assert_eq!(super::schar_to_bytes(u32::from_ne_bytes(*t), &gm), *e);
         }
+    }
+    #[test]
+    fn schar_to_null_term_bytes() {
+        let mut gm = GlyphMapping::new();
+
+        let two_byte_schar = super::schar_from_bytes("é".as_bytes(), &mut gm);
+        let two_byte_glyph = super::schar_to_null_term_bytes(two_byte_schar, &gm);
+        assert_eq!(two_byte_glyph.len, 2);
+        assert_eq!(&two_byte_glyph.buff[..3], &[0xc3, 0xa9, NULL_TERMINATOR]);
+
+        let max_bytes = [b'a'; MAX_SCHAR_SIZE - 1];
+        let max_schar = super::schar_from_bytes(&max_bytes, &mut gm);
+        let max_glyph = super::schar_to_null_term_bytes(max_schar, &gm);
+        assert_eq!(max_glyph.len as usize, max_bytes.len());
+        assert_eq!(&max_glyph.buff[..max_bytes.len()], &max_bytes);
+        assert_eq!(max_glyph.buff[max_bytes.len()], NULL_TERMINATOR);
     }
     #[test]
     fn schar_len() {
