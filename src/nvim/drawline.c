@@ -225,51 +225,6 @@ static void margin_columns_win(win_T *wp, int *left_col, int *right_col)
   saved_w_virtcol = wp->w_virtcol;
 }
 
-/// Put a single char from an UTF-8 buffer into a line buffer.
-///
-/// If `*pp` is a double-width char and only one cell is left, emit a space,
-/// and don't advance *pp
-///
-/// Handles composing chars
-static int line_putchar(buf_T *buf, const char **pp, schar_T *dest, int maxcells, int vcol)
-{
-  // Caller should handle overwriting the right half of a double-width char.
-  assert(dest[0] != 0);
-
-  const char *p = *pp;
-  int cells = utf_ptr2cells(p);
-  int c_len = utfc_ptr2len(p);
-  assert(maxcells > 0);
-  if (cells > maxcells) {
-    dest[0] = schar_from_ascii(' ');
-    return 1;
-  }
-
-  if (*p == TAB) {
-    cells = tabstop_padding(vcol, buf->b_p_ts, buf->b_p_vts_array);
-    cells = MIN(cells, maxcells);
-  }
-
-  // When overwriting the left half of a double-width char, clear the right half.
-  if (cells < maxcells && dest[cells] == 0) {
-    dest[cells] = schar_from_ascii(' ');
-  }
-  if (*p == TAB) {
-    for (int c = 0; c < cells; c++) {
-      dest[c] = schar_from_ascii(' ');
-    }
-  } else {
-    int u8c;
-    dest[0] = utfc_ptr2schar(p, &u8c);
-    if (cells > 1) {
-      dest[1] = 0;
-    }
-  }
-
-  *pp += c_len;
-  return cells;
-}
-
 static void draw_virt_text(win_T *wp, buf_T *buf, int col_off, int *end_col, int win_row)
 {
   DecorState *const state = &decor_state;
@@ -413,36 +368,21 @@ static int draw_virt_text_item(buf_T *buf, int col, VirtText vt, HlMode hl_mode,
       continue;
     }
     assert(skip_cells <= 0);
-    int attr;
-    bool through = false;
-    if (hl_mode == kHlModeCombine) {
-      attr = hl_combine_attr(linebuf_attr[col], virt_attr);
-    } else if (hl_mode == kHlModeBlend) {
-      through = (*draw_str == ' ');
-      attr = hl_blend_attrs(linebuf_attr[col], virt_attr, &through);
-    } else {
-      attr = virt_attr;
-    }
-    schar_T dummy[2] = { schar_from_ascii(' '), schar_from_ascii(' ') };
-    int maxcells = max_col - col;
-    // When overwriting the right half of a double-width char, clear the left half.
-    if (!through && linebuf_char[col] == 0) {
-      assert(col > 0);
-      linebuf_char[col - 1] = schar_from_ascii(' ');
-      // Clear the right half as well for the assertion in line_putchar().
-      linebuf_char[col] = schar_from_ascii(' ');
-    }
-    int cells = line_putchar(buf, &draw_str, through ? dummy : &linebuf_char[col],
-                             maxcells, vcol);
-    for (int c = 0; c < cells; c++) {
-      linebuf_attr[col] = attr;
-      col++;
-    }
+    int max_cells = max_col - col;
+    int tab_cells = *draw_str == TAB
+                    ? tabstop_padding(vcol, buf->b_p_ts, buf->b_p_vts_array)
+                    : 0;
+    size_t bytes_consumed = 0;
+    int cells = linebuf_put_virtual_text_glyph(col, draw_str, max_cells, tab_cells,
+                                               hl_mode, virt_attr, &bytes_consumed);
+    assert(cells > 0);
+    col += cells;
+
     if (skip_cells < 0) {
       skip_cells++;
     } else {
       vcol += cells;
-      virt_str = draw_str;
+      virt_str = draw_str + bytes_consumed;
     }
   }
   return col;

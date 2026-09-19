@@ -164,6 +164,11 @@ unsafe extern "C" {
         next_c: libc::c_int,
     ) -> libc::c_int;
     fn hl_combine_attr(char_attr: libc::c_int, prim_attr: libc::c_int) -> libc::c_int;
+    fn hl_blend_attrs(
+        back_attr: libc::c_int,
+        front_attr: libc::c_int,
+        through: *mut bool,
+    ) -> libc::c_int;
     fn hl_apply_winblend(winbl: libc::c_int, attr: libc::c_int) -> libc::c_int;
     fn syn_id2attr(hl_id: libc::c_int) -> libc::c_int;
 }
@@ -945,12 +950,31 @@ impl TextGlyph {
     }
 }
 
+/// Highlight composition used while drawing virtual text.
+#[derive(Clone, Copy)]
+enum VirtualTextHighlightMode {
+    Replace,
+    Combine,
+    Blend,
+}
+
+impl From<libc::c_int> for VirtualTextHighlightMode {
+    fn from(value: libc::c_int) -> Self {
+        match value {
+            2 => Self::Combine,
+            3 => Self::Blend,
+            _ => Self::Replace,
+        }
+    }
+}
+
 /// Source of virtual columns for a line-buffer glyph.
 #[derive(Clone, Copy)]
 enum VirtualColumns<'a> {
     Incrementing(VimColNrT),
     Provided(&'a [VimColNrT]),
     Unavailable,
+    Preserve,
 }
 
 #[derive(Debug)]
@@ -1086,8 +1110,15 @@ impl LineBuffer {
             bytes_consumed: 0,
         };
 
-        self.put_text_glyph(col, glyph, attr, VirtualColumns::Incrementing(vcol), width)
-            .then_some(width)
+        self.put_text_glyph(
+            col,
+            glyph,
+            attr,
+            VirtualColumns::Incrementing(vcol),
+            width,
+            false,
+        )
+        .then_some(width)
     }
 
     /// Writes one prepared text glyph and its cell metadata.
@@ -1102,6 +1133,7 @@ impl LineBuffer {
         attr: VimSAttrT,
         virtual_columns: VirtualColumns<'_>,
         max_cells: usize,
+        repair_leading_continuation: bool,
     ) -> bool {
         if glyph.width == 0 || glyph.width > max_cells {
             return false;
@@ -1123,21 +1155,26 @@ impl LineBuffer {
                 }
             }
             VirtualColumns::Provided(values) if values.len() < glyph.width => return false,
-            VirtualColumns::Provided(_) | VirtualColumns::Unavailable => {}
+            VirtualColumns::Provided(_)
+            | VirtualColumns::Unavailable
+            | VirtualColumns::Preserve => {}
         }
 
-        let Some(line_chars) = self.chars.get_mut(col..line_end) else {
-            return false;
-        };
-        let Some(attrs) = self.attrs.get_mut(col..end_col) else {
-            return false;
-        };
-        let Some(vcols) = self.vcols.get_mut(col..end_col) else {
-            return false;
-        };
-        if line_chars[0] == 0 {
+        if line_end > self.chars.len() || end_col > self.attrs.len() || end_col > self.vcols.len() {
             return false;
         }
+        let starts_in_continuation = self.chars[col] == 0;
+        if starts_in_continuation && (!repair_leading_continuation || col == 0) {
+            return false;
+        }
+
+        if starts_in_continuation {
+            self.chars[col - 1] = schar_from_ascii(' ');
+            self.chars[col] = schar_from_ascii(' ');
+        }
+        let line_chars = &mut self.chars[col..line_end];
+        let attrs = &mut self.attrs[col..end_col];
+        let vcols = &mut self.vcols[col..end_col];
 
         if glyph.width < max_cells && line_chars[glyph.width] == 0 {
             line_chars[glyph.width] = schar_from_ascii(' ');
@@ -1163,8 +1200,61 @@ impl LineBuffer {
                 vcols.copy_from_slice(&values[..glyph.width]);
             }
             VirtualColumns::Unavailable => vcols.fill(-1),
+            VirtualColumns::Preserve => {}
         }
         true
+    }
+
+    /// Overlays one virtual-text glyph while preserving virtual columns.
+    ///
+    /// Blend-through spaces retain the existing characters and only update
+    /// their attributes. Other glyphs repair either half of an overwritten
+    /// double-width character before replacing it.
+    fn put_virtual_text_glyph(
+        &mut self,
+        col: usize,
+        glyph: TextGlyph,
+        virt_attr: VimSAttrT,
+        highlight_mode: VirtualTextHighlightMode,
+        source_is_space: bool,
+        max_cells: usize,
+    ) -> bool {
+        if glyph.width == 0 || glyph.width > max_cells {
+            return false;
+        }
+        let Some(end_col) = col.checked_add(glyph.width) else {
+            return false;
+        };
+        let Some(&background_attr) = self.attrs.get(col) else {
+            return false;
+        };
+        if end_col > self.attrs.len() {
+            return false;
+        }
+
+        let (attr, through) = match highlight_mode {
+            VirtualTextHighlightMode::Replace => (Highlight(virt_attr), false),
+            VirtualTextHighlightMode::Combine => (
+                Highlight(background_attr).combine(Highlight(virt_attr)),
+                false,
+            ),
+            VirtualTextHighlightMode::Blend => {
+                Highlight(background_attr).blend(Highlight(virt_attr), source_is_space)
+            }
+        };
+        if through {
+            self.attrs[col..end_col].fill(attr.0);
+            true
+        } else {
+            self.put_text_glyph(
+                col,
+                glyph,
+                attr.0,
+                VirtualColumns::Preserve,
+                max_cells,
+                true,
+            )
+        }
     }
 
     /// Fills a virtual-column range with one value.
@@ -2230,7 +2320,71 @@ pub unsafe extern "C" fn linebuf_put_text_glyph(
     };
 
     let mut line_buffer = LineBufferGuard::acquire();
-    if !line_buffer.put_text_glyph(col, glyph, attr, virtual_columns, max_cells) {
+    if !line_buffer.put_text_glyph(col, glyph, attr, virtual_columns, max_cells, false) {
+        return 0;
+    }
+    // SAFETY: The caller guarantees that this output pointer is writable.
+    unsafe {
+        *bytes_consumed = glyph.bytes_consumed;
+    }
+    libc::c_int::try_from(glyph.width).unwrap_or(0)
+}
+
+/// Decodes and overlays one virtual-text glyph.
+///
+/// Invalid inputs leave the line buffer unchanged and return zero.
+///
+/// # Safety
+///
+/// `text` must point to a readable NUL-terminated string, and
+/// `bytes_consumed` must be a valid writable pointer. Neither pointer may alias
+/// Rust-owned line-buffer storage. This function must run on Neovim's main
+/// thread while the global glyph mapping and highlight tables are not
+/// otherwise accessed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn linebuf_put_virtual_text_glyph(
+    col: libc::c_int,
+    text: *const libc::c_char,
+    max_cells: libc::c_int,
+    tab_cells: libc::c_int,
+    hl_mode: libc::c_int,
+    virt_attr: VimSAttrT,
+    bytes_consumed: *mut libc::size_t,
+) -> libc::c_int {
+    if text.is_null() || bytes_consumed.is_null() {
+        return 0;
+    }
+    // SAFETY: The caller guarantees that this output pointer is writable.
+    unsafe {
+        *bytes_consumed = 0;
+    }
+
+    let (Ok(col), Ok(max_cells), Ok(tab_cells)) = (
+        usize::try_from(col),
+        usize::try_from(max_cells),
+        usize::try_from(tab_cells),
+    ) else {
+        return 0;
+    };
+    // SAFETY: The caller guarantees a readable NUL-terminated string.
+    let text = unsafe { CStr::from_ptr(text) }.to_bytes();
+    // SAFETY: The caller guarantees exclusive main-thread access to the glyph
+    // mapping for the duration of the conversion.
+    let glyph_map = unsafe { &mut GLYPH_MAPPING };
+    let Some(glyph) = TextGlyph::from_text(text, max_cells, tab_cells, glyph_map) else {
+        return 0;
+    };
+    let source_is_space = text.first() == Some(&b' ');
+
+    let mut line_buffer = LineBufferGuard::acquire();
+    if !line_buffer.put_virtual_text_glyph(
+        col,
+        glyph,
+        virt_attr,
+        VirtualTextHighlightMode::from(hl_mode),
+        source_is_space,
+        max_cells,
+    ) {
         return 0;
     }
     // SAFETY: The caller guarantees that this output pointer is writable.
@@ -2712,6 +2866,17 @@ impl Highlight {
         // SAFETY: Both attributes are integer handles. The C function accepts
         // every integer value and returns a resolved attribute by value.
         Self(unsafe { hl_combine_attr(self.0, primary.0) })
+    }
+
+    /// Blends `foreground` over this background attribute.
+    ///
+    /// `through` requests preservation of the underlying character and is
+    /// returned with the decision made by Neovim's blend rules.
+    fn blend(self, foreground: Self, mut through: bool) -> (Self, bool) {
+        // SAFETY: The attributes and initial through flag are passed by value.
+        // The C function only updates the local flag and returns an attribute.
+        let attr = unsafe { hl_blend_attrs(self.0, foreground.0, &mut through) };
+        (Self(attr), through)
     }
 
     /// Applies the configured floating-window transparency.
@@ -4366,6 +4531,7 @@ mod tests {
             20,
             VirtualColumns::Provided(&[30, 40]),
             3,
+            false,
         ));
 
         assert_eq!(
@@ -4380,6 +4546,51 @@ mod tests {
         );
         assert_eq!(line_buffer.attrs, [1, 20, 20, 4, 5]);
         assert_eq!(line_buffer.vcols, [6, 30, 40, 9, 10]);
+    }
+
+    #[test]
+    fn line_buffer_overlays_text_across_double_width_cells() {
+        let first = schar_from_ascii('w');
+        let second = schar_from_ascii('x');
+        let mut line_buffer = LineBuffer::new(5);
+        line_buffer.chars = vec![first, 0, schar_from_ascii('c'), second, 0];
+        line_buffer.attrs.copy_from_slice(&[1, 2, 3, 4, 5]);
+        line_buffer.vcols.copy_from_slice(&[6, 7, 8, 9, 10]);
+        let glyph = |character| TextGlyph {
+            contents: TextGlyphContents::Character(character),
+            width: 1,
+            bytes_consumed: 1,
+        };
+
+        assert!(line_buffer.put_virtual_text_glyph(
+            1,
+            glyph(schar_from_ascii('a')),
+            20,
+            VirtualTextHighlightMode::Replace,
+            false,
+            4,
+        ));
+        assert!(line_buffer.put_virtual_text_glyph(
+            3,
+            glyph(schar_from_ascii('b')),
+            30,
+            VirtualTextHighlightMode::Replace,
+            false,
+            2,
+        ));
+
+        assert_eq!(
+            line_buffer.chars,
+            [
+                schar_from_ascii(' '),
+                schar_from_ascii('a'),
+                schar_from_ascii('c'),
+                schar_from_ascii('b'),
+                schar_from_ascii(' '),
+            ]
+        );
+        assert_eq!(line_buffer.attrs, [1, 20, 3, 30, 5]);
+        assert_eq!(line_buffer.vcols, [6, 7, 8, 9, 10]);
     }
 
     #[test]
