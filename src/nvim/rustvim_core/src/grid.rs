@@ -537,6 +537,15 @@ impl ScreenGrid {
         (self.chars[offset], self.attrs[offset])
     }
 
+    /// Returns the virtual column stored for a logical grid cell.
+    fn get_vcol(&self, row: usize, col: usize) -> Option<VimColNrT> {
+        if col >= usize::try_from(self.cols).ok()? {
+            return None;
+        }
+        let offset = self.line_offset.get(row)?.checked_add(col)?;
+        self.vcols.get(offset).copied()
+    }
+
     fn is_invalid_row(&self, row: usize) -> bool {
         self.attrs[self.line_offset[row]] < 0
     }
@@ -3810,6 +3819,38 @@ pub unsafe extern "C" fn grid_getchar(
     sc
 }
 
+/// Returns the virtual column stored for a logical grid cell.
+///
+/// Returns `-1` if the grid pointer or cell coordinates are invalid.
+///
+/// # Safety
+///
+/// `grid` must point to a valid, exclusively accessible `CScreenGrid` whose
+/// buffers satisfy the ownership and layout requirements of `ScreenGrid`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn grid_get_vcol(
+    grid: *mut CScreenGrid,
+    row: libc::c_int,
+    col: libc::c_int,
+) -> VimColNrT {
+    if grid.is_null() {
+        return -1;
+    }
+    let (Ok(row), Ok(col)) = (usize::try_from(row), usize::try_from(col)) else {
+        return -1;
+    };
+
+    // SAFETY: The caller transfers exclusive ownership of the grid buffers.
+    let g = unsafe { ScreenGrid::take_from_cgrid(&mut *grid) };
+    let vcol = g.get_vcol(row, col).unwrap_or(-1);
+
+    // SAFETY: Ownership of every grid allocation is returned exactly once.
+    unsafe {
+        *grid = g.to_cgrid();
+    }
+    vcol
+}
+
 /// Put a unicode character in a screen cell.
 #[unsafe(no_mangle)]
 pub extern "C" fn schar_from_char(mut c: libc::c_int) -> VimSCharT {
@@ -4486,6 +4527,19 @@ mod tests {
         assert!(grid.is_invalid_row(0));
         assert!(!grid.is_invalid_row(1));
         assert_eq!(grid.attrs, [1, 2, 3, -1, 5, 6]);
+    }
+
+    #[test]
+    fn getting_vcol_follows_logical_line_offsets() {
+        let mut line_buffer = LineBuffer::new(3);
+        let mut grid = ScreenGrid::new(2, 3, true, &mut line_buffer);
+        grid.vcols = vec![10, 11, 12, 20, 21, 22];
+        grid.line_offset.swap(0, 1);
+
+        assert_eq!(grid.get_vcol(0, 1), Some(21));
+        assert_eq!(grid.get_vcol(1, 2), Some(12));
+        assert_eq!(grid.get_vcol(2, 0), None);
+        assert_eq!(grid.get_vcol(0, 3), None);
     }
 
     #[test]

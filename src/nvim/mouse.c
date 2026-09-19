@@ -2004,8 +2004,7 @@ static void mouse_check_grid(colnr_T *vcolp, int *flagsp)
     return;
   }
 
-  const size_t off = gp->line_offset[click_row] + (size_t)click_col;
-  colnr_T col_from_screen = gp->vcols[off];
+  colnr_T col_from_screen = grid_get_vcol(gp, click_row, click_col);
 
   if (col_from_screen >= 0) {
     // Use the virtual column from vcols[], it is accurate also after
