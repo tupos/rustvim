@@ -148,10 +148,6 @@ unsafe extern "C" {
     static mut msg_grid_adj: CScreenGrid;
     static mut pum_grid: CScreenGrid;
 
-    static mut linebuf_char: *mut VimSCharT;
-    static mut linebuf_attr: *mut VimSAttrT;
-    static mut linebuf_vcol: *mut VimColNrT;
-
     fn decor_check_invalid_glyphs();
     fn check_chars_options() -> bool;
     /// Shape one Arabic base codepoint using its neighboring screen cells.
@@ -1014,30 +1010,6 @@ impl LineBuffer {
         *self = Self::empty();
     }
 
-    fn c_pointer<T>(values: &mut [T]) -> *mut T {
-        if values.is_empty() {
-            std::ptr::null_mut()
-        } else {
-            values.as_mut_ptr()
-        }
-    }
-
-    /// Publishes non-owning views of the Rust allocations for transitional C
-    /// callers.
-    ///
-    /// # Safety
-    ///
-    /// The caller must ensure that C does not access these pointers while the
-    /// vectors are resized or released. All access must remain on Neovim's
-    /// main rendering thread.
-    unsafe fn publish_c_views(&mut self) {
-        unsafe {
-            linebuf_char = Self::c_pointer(&mut self.chars);
-            linebuf_attr = Self::c_pointer(&mut self.attrs);
-            linebuf_vcol = Self::c_pointer(&mut self.vcols);
-        }
-    }
-
     fn invalidate_chars_and_attrs(&mut self) {
         self.chars.fill(0xFF);
         self.attrs.fill(0xFF);
@@ -1468,9 +1440,6 @@ impl LineBuffer {
 }
 //                                                                  abcdef           fedcba
 /// Exclusive access to the process-global Rust-owned line buffer.
-///
-/// Dropping the guard refreshes the temporary pointers used by the remaining
-/// C rendering code.
 struct LineBufferGuard {
     line_buffer: MutexGuard<'static, LineBuffer>,
 }
@@ -1498,16 +1467,6 @@ impl std::ops::Deref for LineBufferGuard {
 impl std::ops::DerefMut for LineBufferGuard {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.line_buffer
-    }
-}
-
-impl Drop for LineBufferGuard {
-    fn drop(&mut self) {
-        // SAFETY: Rendering is confined to Neovim's main thread. The guard
-        // provides exclusive Rust access, and C resumes after it is dropped.
-        unsafe {
-            self.line_buffer.publish_c_views();
-        }
     }
 }
 
@@ -1565,7 +1524,7 @@ impl LineState {
 
         unsafe {
             if full_screen && (rdb_flags & RdbFlags::Invalid as u32 != 0) {
-                // Current batch must not depend on previous contents of linebuf_char.
+                // Current batch must not depend on previous line-buffer characters.
                 // Set invalid values which will cause assertion failures later if they are used.
                 line_buf.invalidate_chars_and_attrs();
             }
