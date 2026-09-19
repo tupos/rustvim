@@ -2225,11 +2225,11 @@ describe('ui/builtin messages', function()
                                                                                       |
       {MATCH:.*}|
                         {1:────────────────────────────────────────────}                  |
-                        Nvim is open source and freely distributable                  |
-                                  https://neovim.io/#chat                             |
+                      Rustvim is open source and freely distributable                 |
+                                    https://rustvim.org                               |
                         {1:────────────────────────────────────────────}                  |
                         type  {18::}{25:help nvim}{18:<Enter>}     if you are new!                   |
-                        type  {18::}{25:checkhealth}{18:<Enter>}   to optimize Nvim                  |
+                        type  {18::}{25:checkhealth}{18:<Enter>}   to optimize Rvim                  |
                         type  {18::}{25:q}{18:<Enter>}             to exit                           |
                         type  {18::}{25:help}{18:<Enter>}          for help                          |
                         {1:────────────────────────────────────────────}                  |
@@ -2247,7 +2247,7 @@ describe('ui/builtin messages', function()
   it(':intro with small screen #38396', function()
     screen:try_resize(80, 6)
     feed(':intro<CR>')
-    screen:expect({ any = 'NVIM' })
+    screen:expect({ any = 'RUSTVIM' })
     feed('<CR>')
     assert_alive()
   end)
@@ -2293,13 +2293,13 @@ describe('ui/ext_messages', function()
       {1:~                                    }{16:││}{26:╲╲││}{1:                                     }|
       {1:~                                    }{16:││} {26:╲} {26:│}{1:                                     }|
       {1:~                                                                               }|
-      {1:~{MATCH: +}}{26:NVIM {MATCH:%S+}}{1:{MATCH: +}}|
+      {1:~{MATCH: +}}{26:RUSTVIM {MATCH:%S+}}{1:{MATCH: +}}|
       {1:~                 ────────────────────────────────────────────                  }|
-      {1:~                 }Nvim is open source and freely distributable{1:                  }|
-      {1:~                           }https://neovim.io/#chat{1:                             }|
+      {1:~               }Rustvim is open source and freely distributable{1:                 }|
+      {1:~                             }https://rustvim.org{1:                               }|
       {1:~                 ────────────────────────────────────────────                  }|
       {1:~                 }type  {18::}{25:help nvim}{18:<Enter>}     if you are new! {1:                  }|
-      {1:~                 }type  {18::}{25:checkhealth}{18:<Enter>}   to optimize Nvim{1:                  }|
+      {1:~                 }type  {18::}{25:checkhealth}{18:<Enter>}   to optimize Rvim{1:                  }|
       {1:~                 }type  {18::}{25:q}{18:<Enter>}             to exit         {1:                  }|
       {1:~                 }type  {18::}{25:help}{18:<Enter>}          for help        {1:                  }|
       {1:~                 ────────────────────────────────────────────                  }|
@@ -2333,13 +2333,13 @@ describe('ui/ext_messages', function()
         {1:~                                    }{16:││}{26:╲╲││}{1:                                     }|
         {1:~                                    }{16:││} {26:╲} {26:│}{1:                                     }|
         {1:~                                                                               }|
-        {1:~{MATCH: +}}{26:NVIM {MATCH:%S+}}{1:{MATCH: +}}|
+        {1:~{MATCH: +}}{26:RUSTVIM {MATCH:%S+}}{1:{MATCH: +}}|
         {1:~                 ────────────────────────────────────────────                  }|
-        {1:~                 }Nvim is open source and freely distributable{1:                  }|
-        {1:~                           }https://neovim.io/#chat{1:                             }|
+        {1:~               }Rustvim is open source and freely distributable{1:                 }|
+        {1:~                             }https://rustvim.org{1:                               }|
         {1:~                 ────────────────────────────────────────────                  }|
         {1:~                 }type  {18::}{25:help nvim}{18:<Enter>}     if you are new! {1:                  }|
-        {1:~                 }type  {18::}{25:checkhealth}{18:<Enter>}   to optimize Nvim{1:                  }|
+        {1:~                 }type  {18::}{25:checkhealth}{18:<Enter>}   to optimize Rvim{1:                  }|
         {1:~                 }type  {18::}{25:q}{18:<Enter>}             to exit         {1:                  }|
         {1:~                 }type  {18::}{25:help}{18:<Enter>}          for help        {1:                  }|
         {1:~                 ────────────────────────────────────────────                  }|
@@ -2374,13 +2374,13 @@ describe('ui/ext_messages', function()
                                              {16:││}{26:╲╲││}                                     |
                                              {16:││} {26:╲} {26:│}                                     |
                                                                                         |
-        {MATCH: +}{26:NVIM {MATCH:%S+}}{MATCH: +}|
+        {MATCH: +}{26:RUSTVIM {MATCH:%S+}}{MATCH: +}|
                           {1:────────────────────────────────────────────}                  |
-                          Nvim is open source and freely distributable                  |
-                                    https://neovim.io/#chat                             |
+                        Rustvim is open source and freely distributable                 |
+                                      https://rustvim.org                               |
                           {1:────────────────────────────────────────────}                  |
                           type  {18::}{25:help nvim}{18:<Enter>}     if you are new!                   |
-                          type  {18::}{25:checkhealth}{18:<Enter>}   to optimize Nvim                  |
+                          type  {18::}{25:checkhealth}{18:<Enter>}   to optimize Rvim                  |
                           type  {18::}{25:q}{18:<Enter>}             to exit                           |
                           type  {18::}{25:help}{18:<Enter>}          for help                          |
                           {1:────────────────────────────────────────────}                  |
@@ -2508,13 +2508,13 @@ it('ui/ext_multigrid supports intro screen', function()
       {1:~                                    }{16:││}{26:╲╲││}{1:                                     }|
       {1:~                                    }{16:││} {26:╲} {26:│}{1:                                     }|
       {1:~                                                                               }|
-      {1:~{MATCH: +}}{26:NVIM {MATCH:%S+}}{1:{MATCH: +}}|
+      {1:~{MATCH: +}}{26:RUSTVIM {MATCH:%S+}}{1:{MATCH: +}}|
       {1:~                 ────────────────────────────────────────────                  }|
-      {1:~                 }Nvim is open source and freely distributable{1:                  }|
-      {1:~                           }https://neovim.io/#chat{1:                             }|
+      {1:~               }Rustvim is open source and freely distributable{1:                 }|
+      {1:~                             }https://rustvim.org{1:                               }|
       {1:~                 ────────────────────────────────────────────                  }|
       {1:~                 }type  {18::}{25:help nvim}{18:<Enter>}     if you are new! {1:                  }|
-      {1:~                 }type  {18::}{25:checkhealth}{18:<Enter>}   to optimize Nvim{1:                  }|
+      {1:~                 }type  {18::}{25:checkhealth}{18:<Enter>}   to optimize Rvim{1:                  }|
       {1:~                 }type  {18::}{25:q}{18:<Enter>}             to exit         {1:                  }|
       {1:~                 }type  {18::}{25:help}{18:<Enter>}          for help        {1:                  }|
       {1:~                 ────────────────────────────────────────────                  }|

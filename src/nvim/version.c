@@ -45,7 +45,8 @@
   "." STR(NVIM_VERSION_MINOR) "." STR(NVIM_VERSION_PATCH) \
   NVIM_VERSION_PRERELEASE
 #endif
-#define NVIM_VERSION_LONG "RUSTVIM " NVIM_VERSION_MEDIUM  // NOLINT(bugprone-suspicious-missing-comma)
+#define RUSTVIM_NAME "RUSTVIM"
+#define NVIM_VERSION_LONG RUSTVIM_NAME " " NVIM_VERSION_MEDIUM
 
 char *Versions[] = { "8.1", "8.2", "9.0", "9.1", "9.2" };
 char *longVersion = NVIM_VERSION_LONG;
@@ -4168,9 +4169,9 @@ static void do_intro_line(int row, char *mesg, bool colon, bool is_logo)
   }
 
   // Try highlighting full line:
-  // - Version starts with "NVIM".
+  // - Version starts with the Rustvim name.
   // - Separator line consists from ─ (UTF-8: E2 94 80).
-  bool is_version = mesg[0] == 'N' && mesg[1] == 'V' && mesg[2] == 'I' && mesg[3] == 'M';
+  bool is_version = strncmp(mesg, RUSTVIM_NAME, sizeof(RUSTVIM_NAME) - 1) == 0;
   bool is_sep = utfc_ptr2len(mesg) == 3 && utf_ptr2char(mesg) == 0x2500;
   if (is_version || is_sep) {
     int clen = is_sep ? 3 : 1;

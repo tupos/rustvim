@@ -3258,7 +3258,7 @@ describe('API', function()
       eq(expected2, actual2)
 
       -- Make sure Nvim TUI is started (which is after registering SIGHUP handler).
-      screen:expect({ any = 'Nvim is open source and freely distributable' })
+      screen:expect({ any = 'Rustvim is open source and freely distributable' })
 
       -- :terminal with args + stopped process (Nvim TUI).
       eq(1, eval('jobstop(&channel)'))
