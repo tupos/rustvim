@@ -1737,6 +1737,20 @@ pub extern "C" fn grid_line_mirror(width: libc::c_int) {
     }
 }
 
+/// Resets the visible line-buffer cells before drawing a window line.
+///
+/// Negative and out-of-bounds widths are ignored.
+#[unsafe(no_mangle)]
+pub extern "C" fn linebuf_reset(width: libc::c_int) {
+    let Ok(width) = usize::try_from(width) else {
+        return;
+    };
+    let mut line_buffer = LineBufferGuard::acquire();
+    if width <= line_buffer.size {
+        line_buffer.fill(0..width, schar_from_ascii(' '), 0, -1);
+    }
+}
+
 /// # Safety
 ///
 /// `pfirst`, `plast`, and `pclear` must point to valid, properly aligned
@@ -3539,6 +3553,31 @@ mod tests {
         assert_eq!(line_buffer.vcols, [0; 4]);
         assert_eq!(line_buffer.scratch, [0; 4]);
         assert_eq!(line_buffer.size, 4);
+    }
+
+    #[test]
+    fn line_buffer_fill_resets_visible_prefix() {
+        let mut line_buffer = LineBuffer::new(5);
+        line_buffer.chars.fill(schar_from_ascii('x'));
+        line_buffer.attrs.fill(7);
+        line_buffer.vcols.fill(9);
+        line_buffer.scratch.fill(11);
+
+        line_buffer.fill(0..3, schar_from_ascii(' '), 0, -1);
+
+        assert_eq!(
+            line_buffer.chars,
+            [
+                schar_from_ascii(' '),
+                schar_from_ascii(' '),
+                schar_from_ascii(' '),
+                schar_from_ascii('x'),
+                schar_from_ascii('x'),
+            ]
+        );
+        assert_eq!(line_buffer.attrs, [0, 0, 0, 7, 7]);
+        assert_eq!(line_buffer.vcols, [-1, -1, -1, 9, 9]);
+        assert_eq!(line_buffer.scratch, [11; 5]);
     }
 
     #[test]

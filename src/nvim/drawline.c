@@ -1067,11 +1067,7 @@ static void win_line_start(win_T *wp, winlinevars_T *wlv)
   wlv->col = 0;
   wlv->off = 0;
   wlv->need_lbr = false;
-  for (int i = 0; i < wp->w_view_width; i++) {
-    linebuf_char[i] = schar_from_ascii(' ');
-    linebuf_attr[i] = 0;
-    linebuf_vcol[i] = -1;
-  }
+  linebuf_reset(wp->w_view_width);
 }
 
 static void fix_for_boguscols(winlinevars_T *wlv)
