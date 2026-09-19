@@ -5787,7 +5787,7 @@ static void f_screenattr(typval_T *argvars, typval_T *rettv, EvalFuncData fptr)
   if (row < 0 || row >= grid->rows || col < 0 || col >= grid->cols) {
     c = -1;
   } else {
-    c = grid->attrs[grid->line_offset[row] + (size_t)col];
+    grid_getchar(grid, row, col, &c);
   }
   rettv->vval.v_number = c;
 }
