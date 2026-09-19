@@ -936,8 +936,7 @@ impl LineBuffer {
         };
         let copy = &mut scratch[first..last];
         copy.copy_from_slice(&arr[first..last]);
-        let len = last - first;
-        arr[width - len..width]
+        arr[width - last..width - first]
             .iter_mut()
             .rev()
             .zip(copy.iter())
@@ -3824,60 +3823,19 @@ mod tests {
             assert_eq!(super::schar_len_impl(u32::from_le_bytes(*t), &gm), *e);
         }
     }
-    #[link(name = "nvim")]
-    unsafe extern "C" {
-        fn linebuf_mirror(
-            firstp: *mut libc::c_int,
-            lastp: *mut libc::c_int,
-            clearp: *mut libc::c_int,
-            maxcol: libc::c_int,
-        );
-        fn utf_ptr2cells(p_in: *const libc::c_char) -> libc::c_int;
-    }
+
     #[test]
-    fn line_buffer_mirror() {
+    fn line_buffer_mirrors_a_nonzero_range() {
         let mut lb = LineBuffer::new(8);
-        lb.chars = vec![1, 0, 2, 3, 0, 4, 5, 0];
-        lb.attrs = vec![1, 2, 3, 4, 5, 6, 7, 8];
-        lb.vcols = vec![0; 8];
+        lb.chars = vec![9, 8, 1, 0, 2, 3, 7, 6];
+        lb.attrs = vec![10, 20, 30, 40, 50, 60, 70, 80];
+        lb.vcols = vec![1, 2, 3, 4, 5, 6, 7, 8];
         lb.scratch = vec![0; 8];
-        println!("chars: {:?}", lb.chars);
-        println!("attrs: {:?}", lb.attrs);
 
-        let first = 0;
-        let last = 8;
-        let max_col = 8;
+        lb.mirror(2, 6, 8);
 
-        lb.mirror(first, last, max_col);
-
-        println!("chars: {:?}", lb.chars);
-        println!("attrs: {:?}", lb.attrs);
-    }
-    #[test]
-    fn test2() {
-        unsafe {
-            alloc_initial_line_buffer();
-            let clb = CLineBufferRef::new();
-            let mut lb = LineBuffer::from_cline_buffer_ref(&clb);
-            lb.realloc(8);
-            lb.chars = vec![1, 0, 2, 3, 0, 4, 5, 0];
-            lb.attrs = vec![1, 2, 3, 4, 5, 6, 7, 8];
-            println!("chars: {:?}", lb.chars);
-            println!("attrs: {:?}", lb.attrs);
-            lb.into_cline_buffer_ref();
-
-            let mut first = 0;
-            let mut last = 8;
-            let mut clear = 0;
-            let max_col = 8;
-
-            linebuf_mirror(&raw mut first, &raw mut last, &raw mut clear, max_col);
-
-            let clb = CLineBufferRef::new();
-            let lb = LineBuffer::from_cline_buffer_ref(&clb);
-            println!("chars: {:?}", lb.chars);
-            println!("attrs: {:?}", lb.attrs);
-            lb.into_cline_buffer_ref();
-        }
+        assert_eq!(lb.chars, [9, 8, 3, 2, 1, 0, 7, 6]);
+        assert_eq!(lb.attrs, [10, 20, 60, 50, 40, 30, 70, 80]);
+        assert_eq!(lb.vcols, [1, 2, 6, 5, 4, 3, 7, 8]);
     }
 }
