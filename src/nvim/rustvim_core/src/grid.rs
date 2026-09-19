@@ -986,6 +986,46 @@ impl CLineBufferRef {
             lb.into_cline_buffer_ref();
         }
     }
+
+    /// Releases one raw vector allocation and clears its C-visible pointer.
+    ///
+    /// # Safety
+    ///
+    /// `slot` must point to a valid pointer variable. Its value must either be
+    /// null or uniquely own a Rust vector allocation with capacity `capacity`.
+    unsafe fn release_buffer<T>(slot: *mut *mut T, capacity: usize) {
+        // SAFETY: The caller guarantees that `slot` points to a writable
+        // pointer variable.
+        let buffer = unsafe { std::ptr::replace(slot, std::ptr::null_mut()) };
+        if !buffer.is_null() {
+            // SAFETY: The caller transfers unique ownership of an allocation
+            // whose capacity is `capacity`. A zero length avoids reading any
+            // potentially uninitialized line-buffer cells before deallocation.
+            drop(unsafe { Vec::from_raw_parts(buffer, 0, capacity) });
+        }
+    }
+
+    /// Releases all line-buffer allocations and clears their C-visible state.
+    ///
+    /// # Safety
+    ///
+    /// Each non-null pointer must uniquely own the corresponding Rust vector
+    /// allocation, and `size` must be its capacity. The storage must not be
+    /// accessed after this call.
+    unsafe fn release(&self) {
+        // SAFETY: The caller guarantees that `size` remains valid throughout
+        // the operation.
+        let size = unsafe { *self.size };
+        // SAFETY: The caller guarantees unique ownership of all four
+        // allocations and that they share the recorded capacity.
+        unsafe {
+            Self::release_buffer(self.chars, size);
+            Self::release_buffer(self.attrs, size);
+            Self::release_buffer(self.vcols, size);
+            Self::release_buffer(self.scratch, size);
+            *self.size = 0;
+        }
+    }
 }
 
 /// Grid-independent state for one buffered line operation.
@@ -3040,6 +3080,34 @@ pub unsafe extern "C" fn grid_free(grid: *mut CScreenGrid) {
     }
 }
 
+/// Releases all process-global grid resources during editor shutdown.
+///
+/// # Safety
+///
+/// This must only be called by `free_all_mem` on Neovim's main thread, after
+/// all other users of the grids, line buffer, and glyph mapping have stopped.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn grid_free_all_mem() {
+    // SAFETY: The caller guarantees exclusive shutdown-time access to both
+    // global grids and their Rust-owned allocations.
+    unsafe {
+        grid_free(&raw mut default_grid);
+        grid_free(&raw mut msg_grid);
+    }
+
+    // SAFETY: The caller guarantees that no line-buffer user remains and that
+    // the C globals still uniquely own the allocations.
+    unsafe {
+        CLineBufferRef::new().release();
+    }
+
+    // SAFETY: The caller guarantees exclusive main-thread access. Replacing
+    // the static transfers all cached allocations into a normal Rust value,
+    // whose destructor releases them.
+    let glyph_mapping = unsafe { std::ptr::replace(&raw mut GLYPH_MAPPING, GlyphMapping::new()) };
+    drop(glyph_mapping);
+}
+
 /// clear a line in the grid starting at `offset` until `width` characters
 /// are cleared. `valid` is used to fill attributes. See `ScreenGrid::attrs_fill`
 ///
@@ -3412,6 +3480,50 @@ mod tests {
         assert_eq!(dirty_columns.take(0), Some(3));
         assert_eq!(&*dirty_columns.columns, [0, 0, 0]);
         assert_eq!(dirty_columns.take(3), None);
+    }
+
+    #[test]
+    fn line_buffer_release_clears_c_storage() {
+        let size = 4;
+        let mut chars = Vec::<VimSCharT>::with_capacity(size);
+        let mut attrs = Vec::<VimSAttrT>::with_capacity(size);
+        let mut vcols = Vec::<VimColNrT>::with_capacity(size);
+        let mut scratch = Vec::<VimSScratchT>::with_capacity(size);
+
+        assert_eq!(chars.capacity(), size);
+        assert_eq!(attrs.capacity(), size);
+        assert_eq!(vcols.capacity(), size);
+        assert_eq!(scratch.capacity(), size);
+
+        let mut chars_ptr = chars.as_mut_ptr();
+        let mut attrs_ptr = attrs.as_mut_ptr();
+        let mut vcols_ptr = vcols.as_mut_ptr();
+        let mut scratch_ptr = scratch.as_mut_ptr();
+        std::mem::forget(chars);
+        std::mem::forget(attrs);
+        std::mem::forget(vcols);
+        std::mem::forget(scratch);
+
+        let mut raw_size = size;
+        let line_buffer = CLineBufferRef {
+            chars: &raw mut chars_ptr,
+            attrs: &raw mut attrs_ptr,
+            vcols: &raw mut vcols_ptr,
+            scratch: &raw mut scratch_ptr,
+            size: &raw mut raw_size,
+        };
+
+        // SAFETY: The four pointers uniquely own the forgotten vectors above,
+        // and each allocation has the recorded capacity.
+        unsafe {
+            line_buffer.release();
+        }
+
+        assert!(chars_ptr.is_null());
+        assert!(attrs_ptr.is_null());
+        assert!(vcols_ptr.is_null());
+        assert!(scratch_ptr.is_null());
+        assert_eq!(raw_size, 0);
     }
 
     #[test]

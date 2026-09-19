@@ -19,7 +19,6 @@
 #include "nvim/globals.h"
 #include "nvim/grid.h"
 #include "nvim/highlight.h"
-#include "nvim/map_defs.h"
 #include "nvim/memory.h"
 #include "nvim/message.h"
 #include "nvim/option_vars.h"
@@ -41,20 +40,6 @@ int last_grid_handle = DEFAULT_GRID_HANDLE;
 # define schar_idx(sc) (sc & (0x00FFFFFF))
 #else
 # define schar_idx(sc) (sc >> 8)
-#endif
-
-#ifdef EXITFREE
-/// Doesn't allow reinit, so must only be called by free_all_mem!
-void grid_free_all_mem(void)
-{
-  grid_free(&default_grid);
-  grid_free(&msg_grid);
-  xfree(linebuf_char);
-  xfree(linebuf_attr);
-  xfree(linebuf_vcol);
-  xfree(linebuf_scratch);
-  set_destroy(glyph, &glyph_cache);
-}
 #endif
 
 /// (Re)allocates a window grid if size changed while in ext_multigrid mode.

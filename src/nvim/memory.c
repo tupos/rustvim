@@ -22,6 +22,7 @@
 #include "nvim/eval.h"
 #include "nvim/gettext_defs.h"
 #include "nvim/globals.h"
+#include "nvim/grid.h"
 #include "nvim/highlight.h"
 #include "nvim/highlight_group.h"
 #include "nvim/input_cmdatom.h"
