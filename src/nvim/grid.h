@@ -82,6 +82,8 @@ extern void grid_line_start(GridView *view, int row);
 extern void screengrid_line_start(ScreenGrid *grid, int row, int col);
 extern schar_T grid_line_getchar(int col, int *attr);
 extern void grid_line_put_schar(int col, schar_T schar, int attr);
+extern void grid_line_put_truncation(int start_col, int width, schar_T marker, int attr,
+                                     bool right_to_left);
 extern int grid_line_puts(int col, const char *text, int textlen, int attr);
 extern int grid_line_fill(int start_col, int end_col, schar_T sc, int attr);
 extern void grid_line_clear_end(int start_col, int end_col, int bg_attr, int clear_attr);

@@ -894,21 +894,13 @@ void pum_redraw(void)
       const int lcol = col_off - pum_width + 1;
       grid_line_fill(lcol, grid_col + 1, schar_from_ascii(' '), orig_attr);
       if (need_fcs_trunc) {
-        linebuf_char[lcol] = fcs_trunc != NUL ? fcs_trunc : schar_from_ascii('<');
-        linebuf_attr[lcol] = trunc_attr;
-        if (pum_width > 1 && linebuf_char[lcol + 1] == NUL) {
-          linebuf_char[lcol + 1] = schar_from_ascii(' ');
-        }
+        grid_line_put_truncation(lcol, pum_width, fcs_trunc, trunc_attr, true);
       }
     } else {
       const int rcol = col_off + pum_width;
       grid_line_fill(grid_col, rcol, schar_from_ascii(' '), orig_attr);
       if (need_fcs_trunc) {
-        if (pum_width > 1 && linebuf_char[rcol - 1] == NUL) {
-          linebuf_char[rcol - 2] = schar_from_ascii(' ');
-        }
-        linebuf_char[rcol - 1] = fcs_trunc != NUL ? fcs_trunc : schar_from_ascii('>');
-        linebuf_attr[rcol - 1] = trunc_attr;
+        grid_line_put_truncation(col_off, pum_width, fcs_trunc, trunc_attr, false);
       }
     }
 

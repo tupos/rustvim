@@ -849,6 +849,15 @@ impl ScreenGrid {
     }
 } // impl
 
+/// The screen edge at which a line is truncated.
+#[derive(Clone, Copy)]
+enum TruncationSide {
+    /// Truncate at the left edge of the range.
+    Left,
+    /// Truncate at the right edge of the range.
+    Right,
+}
+
 #[derive(Debug)]
 pub struct LineBuffer {
     chars: Vec<VimSCharT>,
@@ -928,6 +937,56 @@ impl LineBuffer {
             self.vcols[i] = vcol;
         }
     }
+
+    /// Writes a truncation marker at one edge of a line-buffer range.
+    ///
+    /// When the marker replaces one half of a double-width character, the
+    /// other half is replaced with a space. Empty or out-of-bounds ranges are
+    /// ignored.
+    fn put_truncation_marker(
+        &mut self,
+        range: std::ops::Range<usize>,
+        side: TruncationSide,
+        marker: Option<VimSCharT>,
+        attr: VimSAttrT,
+    ) {
+        let Some(chars) = self.chars.get_mut(range.clone()) else {
+            return;
+        };
+        let Some(attrs) = self.attrs.get_mut(range) else {
+            return;
+        };
+        if chars.is_empty() {
+            return;
+        }
+
+        let marker = marker.unwrap_or_else(|| {
+            schar_from_ascii(match side {
+                TruncationSide::Left => '<',
+                TruncationSide::Right => '>',
+            })
+        });
+        let marker_col = match side {
+            TruncationSide::Left => 0,
+            TruncationSide::Right => chars.len() - 1,
+        };
+
+        match side {
+            TruncationSide::Left => {
+                if chars.len() > 1 && chars[marker_col + 1] == 0 {
+                    chars[marker_col + 1] = schar_from_ascii(' ');
+                }
+            }
+            TruncationSide::Right => {
+                if chars.len() > 1 && chars[marker_col] == 0 {
+                    chars[marker_col - 1] = schar_from_ascii(' ');
+                }
+            }
+        }
+        chars[marker_col] = marker;
+        attrs[marker_col] = attr;
+    }
+
     fn mirror_arr<T: Copy, U: Copy>(
         arr: &mut [T],
         scratch: &mut [U],
@@ -1619,6 +1678,35 @@ pub extern "C" fn grid_line_fill(
 ) -> libc::c_int {
     let mut line_buffer = LineBufferGuard::acquire();
     unsafe { LINE_GRID.fill_cells(start_col, end_col, sc, attr, &mut line_buffer) }
+}
+
+/// Writes a popup-menu truncation marker into the current line buffer.
+///
+/// Invalid signed values, integer overflow, empty ranges, and ranges outside
+/// the initialized line buffer are ignored.
+#[unsafe(no_mangle)]
+pub extern "C" fn grid_line_put_truncation(
+    start_col: libc::c_int,
+    width: libc::c_int,
+    marker: VimSCharT,
+    attr: VimSAttrT,
+    right_to_left: bool,
+) {
+    let (Ok(start_col), Ok(width)) = (usize::try_from(start_col), usize::try_from(width)) else {
+        return;
+    };
+    let Some(end_col) = start_col.checked_add(width) else {
+        return;
+    };
+    let side = if right_to_left {
+        TruncationSide::Left
+    } else {
+        TruncationSide::Right
+    };
+    let marker = (marker != 0).then_some(marker);
+
+    let mut line_buffer = LineBufferGuard::acquire();
+    line_buffer.put_truncation_marker(start_col..end_col, side, marker, attr);
 }
 
 #[unsafe(no_mangle)]
@@ -3464,6 +3552,72 @@ mod tests {
         assert!(line_buffer.vcols.is_empty());
         assert!(line_buffer.scratch.is_empty());
         assert_eq!(line_buffer.size, 0);
+    }
+
+    #[test]
+    fn line_buffer_places_left_truncation_marker() {
+        let mut line_buffer = LineBuffer::new(5);
+        line_buffer.chars = vec![
+            schar_from_ascii('a'),
+            schar_from_ascii('w'),
+            0,
+            schar_from_ascii('b'),
+            schar_from_ascii('c'),
+        ];
+        line_buffer.attrs.fill(7);
+
+        line_buffer.put_truncation_marker(1..4, TruncationSide::Left, None, 42);
+
+        assert_eq!(
+            line_buffer.chars,
+            [
+                schar_from_ascii('a'),
+                schar_from_ascii('<'),
+                schar_from_ascii(' '),
+                schar_from_ascii('b'),
+                schar_from_ascii('c'),
+            ]
+        );
+        assert_eq!(line_buffer.attrs, [7, 42, 7, 7, 7]);
+
+        // A marker at the left edge must not inspect or modify the preceding
+        // cell, even when the marker cell initially contains NUL.
+        line_buffer.chars[1] = 0;
+        line_buffer.put_truncation_marker(1..4, TruncationSide::Left, None, 42);
+        assert_eq!(line_buffer.chars[0], schar_from_ascii('a'));
+        assert_eq!(line_buffer.chars[1], schar_from_ascii('<'));
+    }
+
+    #[test]
+    fn line_buffer_places_right_truncation_marker() {
+        let mut line_buffer = LineBuffer::new(5);
+        line_buffer.chars = vec![
+            schar_from_ascii('a'),
+            schar_from_ascii('b'),
+            schar_from_ascii('w'),
+            0,
+            schar_from_ascii('c'),
+        ];
+        line_buffer.attrs.fill(7);
+
+        line_buffer.put_truncation_marker(
+            1..4,
+            TruncationSide::Right,
+            Some(schar_from_ascii('*')),
+            42,
+        );
+
+        assert_eq!(
+            line_buffer.chars,
+            [
+                schar_from_ascii('a'),
+                schar_from_ascii('b'),
+                schar_from_ascii(' '),
+                schar_from_ascii('*'),
+                schar_from_ascii('c'),
+            ]
+        );
+        assert_eq!(line_buffer.attrs, [7, 7, 7, 42, 7]);
     }
 
     #[test]
