@@ -473,11 +473,7 @@ static void draw_col_buf(win_T *wp, winlinevars_T *wlv, const char *text, size_t
 
 static void draw_col_fill(winlinevars_T *wlv, schar_T fillchar, int width, int attr)
 {
-  for (int i = 0; i < width; i++) {
-    linebuf_char[wlv->off] = fillchar;
-    linebuf_attr[wlv->off] = attr;
-    wlv->off++;
-  }
+  wlv->off = linebuf_fill_chars_and_attrs(wlv->off, width, fillchar, attr);
 }
 
 /// Return true if CursorLineSign / CursorLineFold highlight is to be used.

@@ -938,6 +938,27 @@ impl LineBuffer {
         }
     }
 
+    /// Fills character and attribute cells while preserving virtual columns.
+    ///
+    /// Returns whether the complete range belongs to the initialized buffer.
+    fn fill_chars_and_attrs(
+        &mut self,
+        range: std::ops::Range<usize>,
+        sc: VimSCharT,
+        attr: VimSAttrT,
+    ) -> bool {
+        let Some(chars) = self.chars.get_mut(range.clone()) else {
+            return false;
+        };
+        let Some(attrs) = self.attrs.get_mut(range) else {
+            return false;
+        };
+
+        chars.fill(sc);
+        attrs.fill(attr);
+        true
+    }
+
     /// Writes a truncation marker at one edge of a line-buffer range.
     ///
     /// When the marker replaces one half of a double-width character, the
@@ -1748,6 +1769,32 @@ pub extern "C" fn linebuf_reset(width: libc::c_int) {
     let mut line_buffer = LineBufferGuard::acquire();
     if width <= line_buffer.size {
         line_buffer.fill(0..width, schar_from_ascii(' '), 0, -1);
+    }
+}
+
+/// Fills character and attribute cells and returns the resulting column.
+///
+/// Invalid positions, negative widths, integer overflow, and out-of-bounds
+/// ranges leave both the line buffer and returned column unchanged.
+#[unsafe(no_mangle)]
+pub extern "C" fn linebuf_fill_chars_and_attrs(
+    start_col: libc::c_int,
+    width: libc::c_int,
+    sc: VimSCharT,
+    attr: VimSAttrT,
+) -> libc::c_int {
+    if start_col < 0 || width < 0 {
+        return start_col;
+    }
+    let Some(end_col) = start_col.checked_add(width) else {
+        return start_col;
+    };
+
+    let mut line_buffer = LineBufferGuard::acquire();
+    if line_buffer.fill_chars_and_attrs(start_col as usize..end_col as usize, sc, attr) {
+        end_col
+    } else {
+        start_col
     }
 }
 
@@ -3578,6 +3625,31 @@ mod tests {
         assert_eq!(line_buffer.attrs, [0, 0, 0, 7, 7]);
         assert_eq!(line_buffer.vcols, [-1, -1, -1, 9, 9]);
         assert_eq!(line_buffer.scratch, [11; 5]);
+    }
+
+    #[test]
+    fn line_buffer_fills_chars_and_attrs_without_changing_vcols() {
+        let mut line_buffer = LineBuffer::new(5);
+        line_buffer.chars.fill(schar_from_ascii('x'));
+        line_buffer.attrs.fill(7);
+        line_buffer.vcols.copy_from_slice(&[1, 2, 3, 4, 5]);
+
+        assert!(line_buffer.fill_chars_and_attrs(1..4, schar_from_ascii(' '), 42,));
+
+        assert_eq!(
+            line_buffer.chars,
+            [
+                schar_from_ascii('x'),
+                schar_from_ascii(' '),
+                schar_from_ascii(' '),
+                schar_from_ascii(' '),
+                schar_from_ascii('x'),
+            ]
+        );
+        assert_eq!(line_buffer.attrs, [7, 42, 42, 42, 7]);
+        assert_eq!(line_buffer.vcols, [1, 2, 3, 4, 5]);
+
+        assert!(!line_buffer.fill_chars_and_attrs(4..6, 0, 0));
     }
 
     #[test]
