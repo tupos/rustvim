@@ -22,6 +22,7 @@ use std::{
 };
 
 use cell::GridCell;
+use fold_column::{FoldColumn, FoldColumnInfo, FoldColumnSymbols};
 pub use line_buffer::LineBuffer;
 use line_buffer::{LineTextRenderOptions, LineTextVirtualColumns};
 use tabstops::TabStops;
@@ -1842,6 +1843,77 @@ pub extern "C" fn linebuf_put_cell(
     } else {
         col
     }
+}
+
+/// Generates and writes one complete fold column.
+///
+/// When both output pointers are null, cells are written directly to the
+/// global line buffer. Otherwise both pointers must describe writable arrays
+/// containing `width` elements.
+///
+/// Invalid dimensions or output pointers leave the destination unchanged and
+/// return `start_col`.
+///
+/// # Safety
+///
+/// When non-null, `out_vcols` and `out_chars` must point to separate writable
+/// arrays of `width` initialized elements. They must not alias Rust-owned
+/// line-buffer storage.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn linebuf_render_fold_column(
+    start_col: libc::c_int,
+    attr: VimSAttrT,
+    width: libc::c_int,
+    level: libc::c_int,
+    lowest_level: libc::c_int,
+    starts_here: bool,
+    is_closed: bool,
+    virtual_line: bool,
+    open: VimSCharT,
+    closed: VimSCharT,
+    separator: VimSCharT,
+    inner: VimSCharT,
+    out_vcols: *mut VimColNrT,
+    out_chars: *mut VimSCharT,
+) -> libc::c_int {
+    let (Ok(start_col_index), Ok(width), Ok(level), Ok(lowest_level)) = (
+        usize::try_from(start_col),
+        usize::try_from(width),
+        usize::try_from(level),
+        usize::try_from(lowest_level),
+    ) else {
+        return start_col;
+    };
+
+    let fold_column = FoldColumn::render(
+        width,
+        FoldColumnInfo::new(level, lowest_level, starts_here, is_closed),
+        FoldColumnSymbols::new(open, closed, separator, (inner != 0).then_some(inner)),
+        virtual_line,
+    );
+
+    if out_vcols.is_null() && out_chars.is_null() {
+        let mut line_buffer = LineBufferGuard::acquire();
+        let end_col = line_buffer.put_fold_column(start_col_index, &fold_column, attr);
+        return libc::c_int::try_from(end_col).unwrap_or(start_col);
+    }
+    if out_vcols.is_null() || out_chars.is_null() {
+        return start_col;
+    }
+
+    // SAFETY: The caller guarantees that both output pointers address
+    // separate writable arrays containing `width` initialized elements.
+    let out_vcols = unsafe { std::slice::from_raw_parts_mut(out_vcols, width) };
+    // SAFETY: The caller guarantees that this pointer addresses `width`
+    // initialized elements and does not alias `out_vcols`.
+    let out_chars = unsafe { std::slice::from_raw_parts_mut(out_chars, width) };
+    if !fold_column.copy_to(out_chars, out_vcols) {
+        return start_col;
+    }
+
+    start_col
+        .checked_add(libc::c_int::try_from(width).unwrap_or(0))
+        .unwrap_or(start_col)
 }
 
 /// Writes one rendered glyph and returns its screen-cell width.

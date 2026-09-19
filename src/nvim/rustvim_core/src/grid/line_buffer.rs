@@ -1,7 +1,7 @@
 use super::{
     GlyphMapping, Highlight, TextGlyph, TextGlyphContents, TruncationSide, VimColNrT, VimSAttrT,
-    VimSCharT, VirtualColumns, VirtualTextHighlightMode, cell::GridCell, schar_cells_impl,
-    schar_from_ascii, schar_to_ascii, tabstops::TabStops,
+    VimSCharT, VirtualColumns, VirtualTextHighlightMode, cell::GridCell, fold_column::FoldColumn,
+    schar_cells_impl, schar_from_ascii, schar_to_ascii, tabstops::TabStops,
 };
 
 /// Source of virtual-column metadata while rendering a text run.
@@ -173,6 +173,28 @@ impl LineBuffer {
         cell.attribute = attr;
         cell.virtual_column = vcol;
         true
+    }
+
+    /// Writes a generated fold column and returns the following column.
+    ///
+    /// If the complete fold column does not fit, the visible prefix is written,
+    /// matching repeated single-cell insertion at the end of the line buffer.
+    pub(super) fn put_fold_column(
+        &mut self,
+        start_col: usize,
+        fold_column: &FoldColumn,
+        attr: VimSAttrT,
+    ) -> usize {
+        let Some(destination) = self.cells.get_mut(start_col..) else {
+            return start_col;
+        };
+        let writable = destination.len().min(fold_column.cells().len());
+        for (destination, source) in destination[..writable].iter_mut().zip(fold_column.cells()) {
+            destination.character = source.character();
+            destination.attribute = attr;
+            destination.virtual_column = source.virtual_column();
+        }
+        start_col + writable
     }
 
     /// Writes one rendered glyph and all metadata belonging to its screen cells.

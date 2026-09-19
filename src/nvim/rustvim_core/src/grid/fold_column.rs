@@ -146,6 +146,28 @@ impl FoldColumn {
         Self { cells }
     }
 
+    /// Copies the generated characters and virtual-column markers.
+    ///
+    /// Returns false without modifying either destination unless both slices
+    /// have exactly the generated column width.
+    pub(super) fn copy_to(
+        &self,
+        characters: &mut [VimSCharT],
+        virtual_columns: &mut [VimColNrT],
+    ) -> bool {
+        if characters.len() != self.cells.len() || virtual_columns.len() != self.cells.len() {
+            return false;
+        }
+
+        for (output, cell) in characters.iter_mut().zip(&self.cells) {
+            *output = cell.character();
+        }
+        for (output, cell) in virtual_columns.iter_mut().zip(&self.cells) {
+            *output = cell.virtual_column();
+        }
+        true
+    }
+
     /// Returns the generated cells in display order.
     pub(super) fn cells(&self) -> &[FoldColumnCell] {
         &self.cells

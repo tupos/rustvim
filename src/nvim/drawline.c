@@ -387,72 +387,26 @@ static void draw_foldcolumn(win_T *wp, winlinevars_T *wlv)
   }
 }
 
-/// Get foldcolumn char based on line fold level and column, either `foldsep`, `foldinner`,
-/// or an overflow indicator. `foldopen` and `foldclosed` are set in `fill_foldcolumn`.
-/// @param first_level Lowest fold level displayed on line
-/// @param i Column index
-static inline schar_T foldcolumn_sep_char(int first_level, int i, win_T *wp)
-{
-  if (first_level == 1) {
-    return wp->w_p_fcs_chars.foldsep;
-  } else if (wp->w_p_fcs_chars.foldinner != NUL) {
-    return wp->w_p_fcs_chars.foldinner;
-  } else if (first_level + i <= 9) {
-    return schar_from_ascii('0' + first_level + i);
-  } else {
-    return schar_from_ascii('>');
-  }
-}
-
 /// Draw the foldcolumn or fill "out_buffer". Assume monocell characters.
 ///
 /// @param fdc  Current width of the foldcolumn
 /// @param is_virt Whether the line is a filler line (diff or virtual)
 /// @param[out] wlv_off  Pointer to linebuf offset, incremented for default column
-/// @param[out] out_buffer  Char array to fill, only used for 'statuscolumn'
 /// @param[out] out_vcol  vcol array to fill, only used for 'statuscolumn'
+/// @param[out] out_buffer  Char array to fill, only used for 'statuscolumn'
 void fill_foldcolumn(win_T *wp, foldinfo_T foldinfo, linenr_T lnum, int attr, int fdc, bool is_virt,
                      int *wlv_off, colnr_T *out_vcol, schar_T *out_buffer)
 {
-  bool closed = foldinfo.fi_level != 0 && foldinfo.fi_lines > 0;
-  int level = foldinfo.fi_level;
+  const int start_col = wlv_off == NULL ? 0 : *wlv_off;
+  const int end_col = linebuf_render_fold_column(
+    start_col, attr, fdc, foldinfo.fi_level, foldinfo.fi_low_level,
+    foldinfo.fi_lnum == lnum, foldinfo.fi_level != 0 && foldinfo.fi_lines > 0,
+    is_virt, wp->w_p_fcs_chars.foldopen, wp->w_p_fcs_chars.foldclosed,
+    wp->w_p_fcs_chars.foldsep, wp->w_p_fcs_chars.foldinner,
+    out_vcol, out_buffer);
 
-  // If the column is too narrow, we start at the lowest level that
-  // fits and use numbers to indicate the depth.
-  int first_level = MAX(level - fdc - closed + 1, 1);
-  int closedcol = MIN(fdc, level);
-
-  for (int i = 0; i < fdc; i++) {
-    schar_T symbol = 0;
-    if (i >= level) {
-      symbol = schar_from_ascii(' ');
-    } else if (i == closedcol - 1 && closed) {
-      symbol = wp->w_p_fcs_chars.foldclosed;
-    } else if (foldinfo.fi_lnum == lnum && first_level + i >= foldinfo.fi_low_level) {
-      symbol = wp->w_p_fcs_chars.foldopen;
-    } else {
-      symbol = foldcolumn_sep_char(first_level, i, wp);
-    }
-
-    // We don't want to show `foldopen` or `foldclose` twice, so we compute
-    // the fold level of `lnum - 1` and reuse the logic from above.
-    if (is_virt && foldinfo.fi_level != 0 && foldinfo.fi_lnum == lnum) {
-      int outer_level = MAX(foldinfo.fi_low_level - 1, 0);
-      int outer_first_level = MAX(outer_level - fdc + 1, 1);
-      if (i >= outer_level) {
-        symbol = schar_from_ascii(' ');
-      } else {
-        symbol = foldcolumn_sep_char(outer_first_level, i, wp);
-      }
-    }
-
-    int vcol = i >= level ? -1 : (i == closedcol - 1 && closed) ? -2 : -3;
-    if (out_buffer) {
-      out_vcol[i] = vcol;
-      out_buffer[i] = symbol;
-    } else {
-      *wlv_off = linebuf_put_cell(*wlv_off, symbol, attr, vcol);
-    }
+  if (wlv_off != NULL) {
+    *wlv_off = end_col;
   }
 }
 

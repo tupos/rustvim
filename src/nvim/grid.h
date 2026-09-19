@@ -104,6 +104,11 @@ extern LinebufRenderTextResult linebuf_render_text(
   bool inc_vcol, colnr_T first_vcol, const colnr_T *vcols,
   size_t vcols_len, const colnr_T *color_cols, size_t color_cols_len,
   int color_col_attr, OptInt tabstop, const colnr_T *variable_tabstops);
+extern int linebuf_render_fold_column(
+  int start_col, int attr, int width, int level, int lowest_level,
+  bool starts_here, bool is_closed, bool virtual_line, schar_T open,
+  schar_T closed, schar_T separator, schar_T inner,
+  colnr_T *out_vcols, schar_T *out_chars);
 extern int linebuf_render_virtual_text(int col, VirtText virtual_text,
                                        int hl_mode, int max_col, colnr_T vcol,
                                        int skip_cells, bool eol_hl,
