@@ -98,6 +98,8 @@ extern int linebuf_update_cell(int col, schar_T sc, bool replace_char, int attr,
 extern void linebuf_put_char_pair(int col, schar_T first, schar_T second);
 extern void linebuf_fill_vcols(int start_col, int width, colnr_T vcol);
 extern void linebuf_fill_vcols_from(int start_col, int width, colnr_T first_vcol);
+extern void linebuf_put_smoothscroll_marker(int width, bool preserve_line_number,
+                                            int attr);
 extern void linebuf_mirror(int *firstp, int *lastp, int *clearp, int width);
 extern void grid_line_flush(void);
 extern void grid_line_flush_if_valid_row(void);

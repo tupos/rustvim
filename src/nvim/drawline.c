@@ -3327,24 +3327,8 @@ static void wlv_put_linebuf(win_T *wp, const winlinevars_T *wlv, int endcol, boo
       && *get_showbreak_value(wp) == NUL
       // do not overwrite the 'listchars' "precedes" text with "<<<"
       && !(wp->w_p_list && wp->w_p_lcs_chars.prec != 0)) {
-    int off = 0;
-    if (wp->w_p_nu && wp->w_p_rnu) {
-      // do not overwrite the line number, change "123 text" to "123<<<xt".
-      while (off < wp->w_view_width && ascii_isdigit(schar_get_ascii(linebuf_char[off]))) {
-        off++;
-      }
-    }
-
-    for (int i = 0; i < 3 && off < wp->w_view_width; i++) {
-      if (off + 1 < wp->w_view_width && linebuf_char[off + 1] == NUL) {
-        // When the first half of a double-width character is
-        // overwritten, change the second half to a space.
-        linebuf_char[off + 1] = schar_from_ascii(' ');
-      }
-      linebuf_char[off] = schar_from_ascii('<');
-      linebuf_attr[off] = HL_ATTR(HLF_AT);
-      off++;
-    }
+    linebuf_put_smoothscroll_marker(wp->w_view_width, wp->w_p_nu && wp->w_p_rnu,
+                                    HL_ATTR(HLF_AT));
   }
 
   int row = wlv->row;

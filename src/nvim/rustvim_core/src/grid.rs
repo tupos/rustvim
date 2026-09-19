@@ -1084,6 +1084,42 @@ impl LineBuffer {
         attrs[marker_col] = attr;
     }
 
+    /// Places the three-cell marker used for a smooth-scrolled line.
+    ///
+    /// When requested, leading ASCII digits belonging to the line-number
+    /// column are preserved. Replacing the first half of a double-width
+    /// character also clears its second half.
+    ///
+    /// Returns whether `width` belongs to the initialized buffer.
+    fn put_smoothscroll_marker(
+        &mut self,
+        width: usize,
+        preserve_line_number: bool,
+        attr: VimSAttrT,
+    ) -> bool {
+        if width > self.chars.len() || width > self.attrs.len() {
+            return false;
+        }
+
+        let marker_start = if preserve_line_number {
+            self.chars[..width]
+                .iter()
+                .take_while(|&&character| {
+                    schar_to_ascii(character).is_some_and(|c| c.is_ascii_digit())
+                })
+                .count()
+        } else {
+            0
+        };
+        let marker_end = marker_start.saturating_add(3).min(width);
+        let marker = schar_from_ascii('<');
+
+        for col in marker_start..marker_end {
+            self.put_truncation_marker(col..width, TruncationSide::Left, Some(marker), attr);
+        }
+        true
+    }
+
     fn mirror_arr<T: Copy, U: Copy>(
         arr: &mut [T],
         scratch: &mut [U],
@@ -1966,6 +2002,22 @@ pub extern "C" fn linebuf_fill_vcols_from(
     line_buffer.fill_vcols_from(start_col as usize..end_col as usize, first_vcol);
 }
 
+/// Places the three-cell marker used for a smooth-scrolled line.
+///
+/// Negative and out-of-bounds widths leave the line buffer unchanged.
+#[unsafe(no_mangle)]
+pub extern "C" fn linebuf_put_smoothscroll_marker(
+    width: libc::c_int,
+    preserve_line_number: bool,
+    attr: VimSAttrT,
+) {
+    let Ok(width) = usize::try_from(width) else {
+        return;
+    };
+    let mut line_buffer = LineBufferGuard::acquire();
+    line_buffer.put_smoothscroll_marker(width, preserve_line_number, attr);
+}
+
 /// Writes a two-cell character sequence without changing cell metadata.
 ///
 /// A negative or out-of-bounds column leaves the line buffer unchanged.
@@ -2153,6 +2205,21 @@ pub fn schar_from_ascii(c: char) -> VimSCharT {
         return (c as u32).to_be();
     }
     (c as u32).to_le()
+}
+
+/// Returns the ASCII byte represented directly by a screen character.
+fn schar_to_ascii(sc: VimSCharT) -> Option<u8> {
+    if cfg!(target_endian = "big") {
+        if sc & 0x80FFFFFF == 0 {
+            Some(sc.to_be_bytes()[0])
+        } else {
+            None
+        }
+    } else if sc < 0x80 {
+        Some(sc as u8)
+    } else {
+        None
+    }
 }
 
 /// Takes schar and either inserts it into a glyph_map if it is a "indexed" schar or just converts
@@ -3579,16 +3646,7 @@ pub unsafe extern "C" fn line_do_arabic_shape(buf: *mut VimSCharT, cols: libc::c
 /// @return ascii char or NULL_TERMINATOR if not ascii
 #[unsafe(no_mangle)]
 pub extern "C" fn schar_get_ascii(sc: VimSCharT) -> libc::c_char {
-    let c = if cfg!(target_endian = "big") {
-        if sc & 0x80FFFFFF == 0 {
-            sc.to_be_bytes()[0]
-        } else {
-            NULL_TERMINATOR
-        }
-    } else {
-        if sc < 0x80 { sc as u8 } else { NULL_TERMINATOR }
-    };
-    c as libc::c_char
+    schar_to_ascii(sc).unwrap_or(NULL_TERMINATOR) as libc::c_char
 }
 
 /// Determine if dedicated window grid should be used or the default_grid
@@ -3992,6 +4050,68 @@ mod tests {
             ]
         );
         assert_eq!(line_buffer.attrs, [7, 7, 7, 42, 7]);
+    }
+
+    #[test]
+    fn line_buffer_puts_smoothscroll_marker() {
+        let mut line_buffer = LineBuffer::new(5);
+        line_buffer.chars = vec![
+            schar_from_ascii('a'),
+            schar_from_ascii('b'),
+            schar_from_ascii('w'),
+            0,
+            schar_from_ascii('c'),
+        ];
+        line_buffer.attrs.fill(7);
+        line_buffer.vcols.copy_from_slice(&[1, 2, 3, 4, 5]);
+
+        assert!(line_buffer.put_smoothscroll_marker(5, false, 42));
+
+        assert_eq!(
+            line_buffer.chars,
+            [
+                schar_from_ascii('<'),
+                schar_from_ascii('<'),
+                schar_from_ascii('<'),
+                schar_from_ascii(' '),
+                schar_from_ascii('c'),
+            ]
+        );
+        assert_eq!(line_buffer.attrs, [42, 42, 42, 7, 7]);
+        assert_eq!(line_buffer.vcols, [1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn line_buffer_puts_smoothscroll_marker_after_line_number() {
+        let mut line_buffer = LineBuffer::new(7);
+        line_buffer.chars = vec![
+            schar_from_ascii('1'),
+            schar_from_ascii('2'),
+            schar_from_ascii('3'),
+            schar_from_ascii('w'),
+            0,
+            schar_from_ascii('c'),
+            schar_from_ascii('d'),
+        ];
+        line_buffer.attrs.fill(7);
+
+        assert!(line_buffer.put_smoothscroll_marker(7, true, 42));
+
+        assert_eq!(
+            line_buffer.chars,
+            [
+                schar_from_ascii('1'),
+                schar_from_ascii('2'),
+                schar_from_ascii('3'),
+                schar_from_ascii('<'),
+                schar_from_ascii('<'),
+                schar_from_ascii('<'),
+                schar_from_ascii('d'),
+            ]
+        );
+        assert_eq!(line_buffer.attrs, [7, 7, 7, 42, 42, 42, 7]);
+
+        assert!(!line_buffer.put_smoothscroll_marker(8, false, 0));
     }
 
     #[test]
