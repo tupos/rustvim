@@ -56,6 +56,7 @@ extern int grid_take_dirty_column(ScreenGrid *grid, int row);
 extern void grid_clear_row(ScreenGrid *grid, int row, int width, bool valid);
 extern ScreenGrid *grid_adjust(GridView *grid, int *row_off, int *col_off);
 extern void grid_invalidate(ScreenGrid *grid);
+extern void grid_invalidate_row(ScreenGrid *grid, int row);
 extern schar_T schar_from_str(const char *str);
 extern schar_T schar_from_buf(const char *buf, size_t len);
 extern bool schar_cache_clear_if_full(void);

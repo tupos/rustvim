@@ -519,6 +519,16 @@ impl ScreenGrid {
         self.attrs.fill(-1);
     }
 
+    /// Marks a logical row as invalid by invalidating its first cell.
+    fn invalidate_row(&mut self, row: usize) {
+        let Some(&offset) = self.line_offset.get(row) else {
+            return;
+        };
+        if let Some(attr) = self.attrs.get_mut(offset) {
+            *attr = -1;
+        }
+    }
+
     fn get_char_and_attr(&self, row: usize, col: usize) -> (VimSCharT, VimSAttrT) {
         if self.attrs.is_empty() || row >= self.rows as usize || col >= self.cols as usize {
             return (NULL_TERMINATOR as VimSCharT, 0);
@@ -3745,6 +3755,31 @@ pub unsafe extern "C" fn grid_invalidate(grid: *mut CScreenGrid) {
     }
 }
 
+/// Marks a logical grid row as invalid.
+///
+/// # Safety
+///
+/// `grid` must point to a valid, exclusively accessible `CScreenGrid` whose
+/// buffers satisfy the ownership and layout requirements of `ScreenGrid`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn grid_invalidate_row(grid: *mut CScreenGrid, row: libc::c_int) {
+    if grid.is_null() {
+        return;
+    }
+    let Ok(row) = usize::try_from(row) else {
+        return;
+    };
+
+    // SAFETY: The caller transfers exclusive ownership of the grid buffers.
+    let mut g = unsafe { ScreenGrid::take_from_cgrid(&mut *grid) };
+    g.invalidate_row(row);
+
+    // SAFETY: Ownership of every grid allocation is returned exactly once.
+    unsafe {
+        *grid = g.to_cgrid();
+    }
+}
+
 /// Get a single character directly from grid.chars
 ///
 /// @param[out] attrp  set to the character's attribute (optional)
@@ -4437,6 +4472,20 @@ mod tests {
         );
         assert_eq!(grid.attrs, [1, 2, 3, -1, -1, 6]);
         assert_eq!(grid.vcols, [1, 2, 3, -1, -1, 6]);
+    }
+
+    #[test]
+    fn invalidating_row_follows_logical_line_offsets() {
+        let mut line_buffer = LineBuffer::new(3);
+        let mut grid = ScreenGrid::new(2, 3, true, &mut line_buffer);
+        grid.attrs = vec![1, 2, 3, 4, 5, 6];
+        grid.line_offset.swap(0, 1);
+
+        grid.invalidate_row(0);
+
+        assert!(grid.is_invalid_row(0));
+        assert!(!grid.is_invalid_row(1));
+        assert_eq!(grid.attrs, [1, 2, 3, -1, 5, 6]);
     }
 
     #[test]

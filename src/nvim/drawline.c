@@ -3191,7 +3191,7 @@ end_check:
         ScreenGrid *current_grid = grid_adjust(grid, &current_row, &dummy_col);
 
         // Force a redraw of the first column of the next line.
-        current_grid->attrs[current_grid->line_offset[current_row + 1]] = -1;
+        grid_invalidate_row(current_grid, current_row + 1);
       }
 
       wlv.boguscols = 0;
