@@ -8,6 +8,7 @@ use crate::{
 };
 use std::{
     borrow::Cow,
+    cell::RefCell,
     collections::BTreeMap,
     ffi::CStr,
     sync::{
@@ -1325,7 +1326,18 @@ struct CLineGrid {
     state: LineState,
 }
 
-static mut LINE_GRID: CLineGrid = CLineGrid::new();
+std::thread_local! {
+    static LINE_GRID: RefCell<CLineGrid> = const {
+        RefCell::new(CLineGrid::new())
+    };
+}
+
+/// Runs an operation with exclusive access to this thread's C line adapter.
+///
+/// A complete begin-to-flush operation must remain on the same thread.
+fn with_line_grid<R>(operation: impl FnOnce(&mut CLineGrid) -> R) -> R {
+    LINE_GRID.with_borrow_mut(operation)
+}
 
 impl CLineGrid {
     /// Creates an inactive adapter with no target grid.
@@ -1350,6 +1362,7 @@ impl CLineGrid {
     ///
     /// `view` must point to a valid `CGridView` and its target grid must remain
     /// valid until the matching flush.
+    /// The matching flush must occur on the same thread.
     unsafe fn begin_view(&mut self, view: *mut CGridView, mut row: i32, line_buf: &mut LineBuffer) {
         let mut col = 0;
         // SAFETY: The caller guarantees that `view` and its target are valid.
@@ -1366,6 +1379,7 @@ impl CLineGrid {
     ///
     /// `grid` must point to a valid, exclusively accessible `CScreenGrid` and
     /// remain valid until the matching flush.
+    /// The matching flush must occur on the same thread.
     unsafe fn begin_raw_grid(
         &mut self,
         grid: *mut CScreenGrid,
@@ -1514,12 +1528,13 @@ impl CLineGrid {
 ///
 /// `view` must point to a valid `CGridView`. Its target grid must remain valid
 /// until the matching `grid_line_flush` call.
+/// The matching flush must occur on the same thread.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn grid_line_start(view: *mut CGridView, row: libc::c_int) {
     let mut line_buffer = LineBufferGuard::acquire();
-    unsafe {
-        LINE_GRID.begin_view(view, row, &mut line_buffer);
-    }
+    with_line_grid(|line_grid| unsafe {
+        line_grid.begin_view(view, row, &mut line_buffer);
+    });
 }
 
 /// Begins a buffered line operation directly on a screen grid.
@@ -1530,6 +1545,7 @@ pub unsafe extern "C" fn grid_line_start(view: *mut CGridView, row: libc::c_int)
 ///
 /// `grid` must point to a valid, exclusively accessible `CScreenGrid` and
 /// remain valid until the matching `grid_line_flush` call.
+/// The matching flush must occur on the same thread.
 #[unsafe(export_name = "screengrid_line_start")]
 pub unsafe extern "C" fn begin_raw_grid(
     grid: *mut CScreenGrid,
@@ -1537,9 +1553,9 @@ pub unsafe extern "C" fn begin_raw_grid(
     col: libc::c_int,
 ) {
     let mut line_buffer = LineBufferGuard::acquire();
-    unsafe {
-        LINE_GRID.begin_raw_grid(grid, row, col, &mut line_buffer);
-    }
+    with_line_grid(|line_grid| unsafe {
+        line_grid.begin_raw_grid(grid, row, col, &mut line_buffer);
+    });
 }
 
 /// Get present char from current rendered screen line
@@ -1554,7 +1570,7 @@ pub unsafe extern "C" fn begin_raw_grid(
 /// or point to valid, properly aligned writable memory.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn grid_line_getchar(col: libc::c_int, attr: *mut VimSAttrT) -> VimSCharT {
-    let (sc, a) = unsafe { LINE_GRID.read_cell(col) };
+    let (sc, a) = with_line_grid(|line_grid| line_grid.read_cell(col));
     if !attr.is_null() {
         unsafe {
             *attr = a;
@@ -1566,9 +1582,9 @@ pub unsafe extern "C" fn grid_line_getchar(col: libc::c_int, attr: *mut VimSAttr
 #[unsafe(no_mangle)]
 pub extern "C" fn grid_line_put_schar(col: libc::c_int, schar: VimSCharT, attr: VimSAttrT) {
     let mut line_buffer = LineBufferGuard::acquire();
-    unsafe {
-        LINE_GRID.put_cell(col, schar, attr, &mut line_buffer);
-    }
+    with_line_grid(|line_grid| {
+        line_grid.put_cell(col, schar, attr, &mut line_buffer);
+    });
 }
 
 /// # Safety
@@ -1590,14 +1606,10 @@ pub unsafe extern "C" fn grid_line_puts(
     } else {
         text_len as usize
     };
-    let num_cells = unsafe {
-        LINE_GRID.put_text(
-            col,
-            std::slice::from_raw_parts(text.cast::<u8>(), len),
-            attr,
-            &mut line_buffer,
-        )
-    };
+    // SAFETY: The caller guarantees that `text` covers `len` readable bytes.
+    let text = unsafe { std::slice::from_raw_parts(text.cast::<u8>(), len) };
+    let num_cells =
+        with_line_grid(|line_grid| line_grid.put_text(col, text, attr, &mut line_buffer));
     num_cells as i32
 }
 
@@ -1609,7 +1621,7 @@ pub extern "C" fn grid_line_fill(
     attr: libc::c_int,
 ) -> libc::c_int {
     let mut line_buffer = LineBufferGuard::acquire();
-    unsafe { LINE_GRID.fill_cells(start_col, end_col, sc, attr, &mut line_buffer) }
+    with_line_grid(|line_grid| line_grid.fill_cells(start_col, end_col, sc, attr, &mut line_buffer))
 }
 
 /// Writes a popup-menu truncation marker into the current line buffer.
@@ -1648,25 +1660,25 @@ pub extern "C" fn grid_line_clear_end(
     bg_attr: VimSAttrT,
     clear_attr: VimSAttrT,
 ) {
-    unsafe {
-        LINE_GRID.set_clear_range(start_col, end_col, bg_attr, clear_attr);
-    }
+    with_line_grid(|line_grid| {
+        line_grid.set_clear_range(start_col, end_col, bg_attr, clear_attr);
+    });
 }
 
 /// move the cursor to a position in a currently rendered line.
 #[unsafe(no_mangle)]
 pub extern "C" fn grid_line_cursor_goto(col: libc::c_int) {
-    unsafe {
-        LINE_GRID.move_cursor(col);
-    }
+    with_line_grid(|line_grid| {
+        line_grid.move_cursor(col);
+    });
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn grid_line_mirror(width: libc::c_int) {
     let mut line_buffer = LineBufferGuard::acquire();
-    unsafe {
-        LINE_GRID.mirror_cells(width, &mut line_buffer);
-    }
+    with_line_grid(|line_grid| {
+        line_grid.mirror_cells(width, &mut line_buffer);
+    });
 }
 
 /// Resets the visible line-buffer cells before drawing a window line.
@@ -2017,9 +2029,9 @@ pub unsafe extern "C" fn linebuf_mirror(
 #[unsafe(no_mangle)]
 pub extern "C" fn grid_line_flush() {
     let mut line_buffer = LineBufferGuard::acquire();
-    unsafe {
-        LINE_GRID.flush(&mut line_buffer);
-    }
+    with_line_grid(|line_grid| {
+        line_grid.flush(&mut line_buffer);
+    });
 }
 
 /// flush grid line but only if on a valid row
@@ -2028,9 +2040,9 @@ pub extern "C" fn grid_line_flush() {
 #[unsafe(no_mangle)]
 pub extern "C" fn grid_line_flush_if_valid_row() {
     let mut line_buffer = LineBufferGuard::acquire();
-    unsafe {
-        LINE_GRID.flush_if_valid_row(&mut line_buffer);
-    }
+    with_line_grid(|line_grid| {
+        line_grid.flush_if_valid_row(&mut line_buffer);
+    });
 }
 
 /// # Safety
@@ -2086,18 +2098,22 @@ pub unsafe extern "C" fn grid_clear(
     attr: libc::c_int,
 ) {
     let mut line_buffer = LineBufferGuard::acquire();
-    for row in start_row..end_row {
-        unsafe {
-            LINE_GRID.begin_view(view, row, &mut line_buffer);
-            end_col = std::cmp::min(end_col, LINE_GRID.max_col());
-            if LINE_GRID.row_reaches_grid_end() || start_col >= end_col {
-                LINE_GRID.cancel();
+    with_line_grid(|line_grid| {
+        for row in start_row..end_row {
+            // SAFETY: The caller guarantees that `view` and its target remain
+            // valid and exclusively accessible for this operation.
+            unsafe {
+                line_grid.begin_view(view, row, &mut line_buffer);
+            }
+            end_col = std::cmp::min(end_col, line_grid.max_col());
+            if line_grid.row_reaches_grid_end() || start_col >= end_col {
+                line_grid.cancel();
                 break;
             }
-            LINE_GRID.set_clear_range(start_col, end_col, attr, 0);
-            LINE_GRID.flush(&mut line_buffer);
+            line_grid.set_clear_range(start_col, end_col, attr, 0);
+            line_grid.flush(&mut line_buffer);
         }
-    }
+    });
 }
 
 /// Draws a floating-window border from a stable subset of `WinConfig`.
