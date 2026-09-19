@@ -938,6 +938,32 @@ impl LineBuffer {
         }
     }
 
+    /// Updates a cell's metadata and optionally replaces its character.
+    ///
+    /// Returns whether the cell belongs to the initialized buffer.
+    fn update_cell(
+        &mut self,
+        col: usize,
+        character: Option<VimSCharT>,
+        attr: VimSAttrT,
+        vcol: VimColNrT,
+    ) -> bool {
+        let (Some(char_cell), Some(attr_cell), Some(vcol_cell)) = (
+            self.chars.get_mut(col),
+            self.attrs.get_mut(col),
+            self.vcols.get_mut(col),
+        ) else {
+            return false;
+        };
+
+        if let Some(character) = character {
+            *char_cell = character;
+        }
+        *attr_cell = attr;
+        *vcol_cell = vcol;
+        true
+    }
+
     /// Fills character and attribute cells while preserving virtual columns.
     ///
     /// Returns whether the complete range belongs to the initialized buffer.
@@ -1832,8 +1858,35 @@ pub extern "C" fn linebuf_put_cell(
     };
 
     let mut line_buffer = LineBufferGuard::acquire();
-    if next_col as usize <= line_buffer.size {
-        line_buffer.fill(col as usize..next_col as usize, sc, attr, vcol);
+    if line_buffer.update_cell(col as usize, Some(sc), attr, vcol) {
+        next_col
+    } else {
+        col
+    }
+}
+
+/// Updates one line-buffer cell and returns the following column.
+///
+/// `replace_char` controls whether `sc` replaces the current character. The
+/// attribute and virtual column are always updated when the cell is valid.
+/// A negative or out-of-bounds column leaves the buffer unchanged.
+#[unsafe(no_mangle)]
+pub extern "C" fn linebuf_update_cell(
+    col: libc::c_int,
+    sc: VimSCharT,
+    replace_char: bool,
+    attr: VimSAttrT,
+    vcol: VimColNrT,
+) -> libc::c_int {
+    if col < 0 {
+        return col;
+    }
+    let Some(next_col) = col.checked_add(1) else {
+        return col;
+    };
+
+    let mut line_buffer = LineBufferGuard::acquire();
+    if line_buffer.update_cell(col as usize, replace_char.then_some(sc), attr, vcol) {
         next_col
     } else {
         col
@@ -3727,6 +3780,33 @@ mod tests {
         assert_eq!(line_buffer.attrs, [1, 2, 3, 4]);
         assert_eq!(line_buffer.vcols, [5, 6, 7, 8]);
         assert!(!line_buffer.put_chars(3, &[1, 2]));
+    }
+
+    #[test]
+    fn line_buffer_updates_cell_with_optional_character() {
+        let mut line_buffer = LineBuffer::new(3);
+        line_buffer.chars.copy_from_slice(&[
+            schar_from_ascii('a'),
+            schar_from_ascii('b'),
+            schar_from_ascii('c'),
+        ]);
+        line_buffer.attrs.copy_from_slice(&[1, 2, 3]);
+        line_buffer.vcols.copy_from_slice(&[4, 5, 6]);
+
+        assert!(line_buffer.update_cell(1, Some(schar_from_ascii('x')), 20, 50));
+        assert!(line_buffer.update_cell(2, None, 30, 60));
+
+        assert_eq!(
+            line_buffer.chars,
+            [
+                schar_from_ascii('a'),
+                schar_from_ascii('x'),
+                schar_from_ascii('c'),
+            ]
+        );
+        assert_eq!(line_buffer.attrs, [1, 20, 30]);
+        assert_eq!(line_buffer.vcols, [4, 50, 60]);
+        assert!(!line_buffer.update_cell(3, Some(0), 0, 0));
     }
 
     #[test]

@@ -2864,9 +2864,6 @@ int win_line(win_T *wp, linenr_T lnum, int startrow, int endrow, int col_rows, b
           // instead (better than nothing).
           wlv.off += n;
           wlv.col += n;
-        } else {
-          // Add a blank character to highlight.
-          linebuf_char[wlv.off] = schar_from_ascii(' ');
         }
         if (area_attr == 0 && !has_fold) {
           // Use attributes from match with highest priority among
@@ -2881,10 +2878,9 @@ int win_line(win_T *wp, linenr_T lnum, int startrow, int endrow, int col_rows, b
                              ? hl_combine_attr(wlv.cul_attr, wlv.char_attr)
                              : wlv.char_attr;
 
-        linebuf_attr[wlv.off] = eol_attr;
-        linebuf_vcol[wlv.off] = wlv.vcol;
+        wlv.off = linebuf_update_cell(wlv.off, schar_from_ascii(' '), n == 0,
+                                      eol_attr, wlv.vcol);
         wlv.col++;
-        wlv.off++;
         wlv.vcol++;
         eol_hl_off = 1;
       }
