@@ -831,16 +831,14 @@ static void handle_breakindent(win_T *wp, winlinevars_T *wlv, int gap_decor_attr
     colnr_T vcol_before = wlv->vcol;
 
     for (int i = 0; i < num; i++) {
-      linebuf_char[wlv->off] = schar_from_ascii(' ');
-
       advance_color_col(wlv, wlv->vcol);
       int myattr = attr;
       if (wlv->color_cols && wlv->vcol == *wlv->color_cols) {
         myattr = hl_combine_attr(win_hl_attr(wp, HLF_MC), myattr);
       }
-      linebuf_attr[wlv->off] = myattr;
-      linebuf_vcol[wlv->off] = wlv->vcol++;  // These are vcols, sorry I don't make the rules
-      wlv->off++;
+      wlv->off =
+        linebuf_put_cell(wlv->off, schar_from_ascii(' '), myattr, wlv->vcol);
+      wlv->vcol++;  // These are vcols, sorry I don't make the rules
     }
 
     // Correct start of highlighted area for 'breakindent',
