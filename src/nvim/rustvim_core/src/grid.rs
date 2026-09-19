@@ -385,6 +385,56 @@ impl ScreenGrid {
         self.dirty_columns.as_mut()?.take(row)
     }
 
+    /// Takes ownership of every allocation stored in a C screen grid.
+    ///
+    /// The C pointer fields remain available as non-owning views because
+    /// synchronous C UI callbacks may inspect this or other global grids while
+    /// the Rust operation is active.
+    ///
+    /// # Safety
+    ///
+    /// Every non-null buffer pointer in `cgrid` must have been produced by
+    /// `ScreenGrid::to_cgrid`, must remain uniquely owned by `cgrid`, and must
+    /// describe the lengths implied by `rows` and `cols`. Until ownership is
+    /// returned with `ScreenGrid::to_cgrid`, the C pointers must not be
+    /// reclaimed, reallocated, or used to create another owner.
+    pub(crate) unsafe fn take_from_cgrid(cgrid: &mut CScreenGrid) -> Self {
+        let num_cells = cgrid.rows as usize * cgrid.cols as usize;
+        // SAFETY: The caller guarantees ownership and the cell-buffer lengths.
+        let chars = unsafe { take_c_buffer(cgrid.chars, num_cells) };
+        // SAFETY: The caller guarantees ownership and the cell-buffer lengths.
+        let attrs = unsafe { take_c_buffer(cgrid.attrs, num_cells) };
+        // SAFETY: The caller guarantees ownership and the cell-buffer lengths.
+        let vcols = unsafe { take_c_buffer(cgrid.vcols, num_cells) };
+        // SAFETY: The caller guarantees ownership and the row-buffer length.
+        let line_offset = unsafe { take_c_buffer(cgrid.line_offset, cgrid.rows as usize) };
+        // SAFETY: The caller guarantees ownership and the row-buffer length.
+        let dirty_columns = unsafe { DirtyColumns::from_raw(cgrid.dirty_col, cgrid.rows as usize) };
+
+        Self {
+            handle: cgrid.handle,
+            chars,
+            attrs,
+            vcols,
+            line_offset,
+            dirty_columns,
+            rows: cgrid.rows,
+            cols: cgrid.cols,
+            valid: cgrid.valid,
+            throttled: cgrid.throttled,
+            blending: cgrid.blending,
+            mouse_enabled: cgrid.mouse_enabled,
+            zindex: cgrid.zindex,
+            comp_row: cgrid.comp_row,
+            comp_col: cgrid.comp_col,
+            comp_width: cgrid.comp_width,
+            comp_height: cgrid.comp_height,
+            comp_index: cgrid.comp_index,
+            comp_disabled: cgrid.comp_disabled,
+            pending_comp_index_update: cgrid.pending_comp_index_update,
+        }
+    }
+
     /// # Safety
     ///
     /// The returned `CScreenGrid` becomes the unique owner of the `chars`,
@@ -420,15 +470,22 @@ impl ScreenGrid {
         }
     }
 
-    fn from_cgrid(
-        grid: &CScreenGrid,
+    /// Reallocates a C-owned grid with new dimensions.
+    ///
+    /// # Safety
+    ///
+    /// `grid` must satisfy the ownership requirements of
+    /// `ScreenGrid::take_from_cgrid`.
+    unsafe fn from_cgrid(
+        grid: &mut CScreenGrid,
         rows: i32,
         cols: i32,
         valid: bool,
         copy: bool,
         line_buffer: &mut LineBuffer,
     ) -> Self {
-        let old_grid: ScreenGrid = grid.into();
+        // SAFETY: The caller guarantees unique ownership of the C buffers.
+        let old_grid = unsafe { Self::take_from_cgrid(grid) };
 
         Self::from_grid(&old_grid, rows, cols, valid, copy, line_buffer)
     }
@@ -1399,7 +1456,7 @@ impl CLineGrid {
     fn read_cell(&mut self, col: i32) -> (VimSCharT, VimSAttrT) {
         let target = self.target();
         // SAFETY: An active operation uniquely owns the target grid buffers.
-        let grid: ScreenGrid = unsafe { target.as_ref().into() };
+        let grid = unsafe { ScreenGrid::take_from_cgrid(&mut *target.as_ptr()) };
         let result = self.state.read_cell(&grid, col);
         // SAFETY: This returns the buffers to the same C grid exactly once.
         unsafe {
@@ -1474,7 +1531,7 @@ impl CLineGrid {
         }
 
         // SAFETY: The active operation uniquely owns the target grid buffers.
-        let mut grid: ScreenGrid = unsafe { target.as_ref().into() };
+        let mut grid = unsafe { ScreenGrid::take_from_cgrid(&mut *target.as_ptr()) };
         self.state.write_line(&mut grid, line_buf);
         // SAFETY: This returns the buffers to the same C grid exactly once.
         unsafe {
@@ -2064,7 +2121,7 @@ pub unsafe extern "C" fn grid_put_linebuf(
     flags: libc::c_int,
 ) {
     let mut line_buffer = LineBufferGuard::acquire();
-    let mut g: ScreenGrid = unsafe { (&*grid).into() };
+    let mut g = unsafe { ScreenGrid::take_from_cgrid(&mut *grid) };
     g.put_line_buffer(
         row,
         col_offset,
@@ -2158,7 +2215,7 @@ pub unsafe extern "C" fn grid_draw_border_impl(
 
     // SAFETY: The caller transfers exclusive ownership of the grid buffers
     // into Rust for the duration of this function.
-    let mut rust_grid: ScreenGrid = unsafe { (&*grid).into() };
+    let mut rust_grid = unsafe { ScreenGrid::take_from_cgrid(&mut *grid) };
     let mut line_buffer = LineBufferGuard::acquire();
     {
         let mut canvas = BorderCanvas {
@@ -2836,14 +2893,25 @@ impl BorderCanvas<'_> {
     }
 }
 
-macro_rules! init_ptr {
-    ($p:expr, $cap:expr) => {
-        if $p.is_null() {
-            Vec::new()
-        } else {
-            unsafe { Vec::from_raw_parts($p, $cap, $cap) }
-        }
-    };
+/// Takes temporary ownership of a C-facing boxed slice.
+///
+/// The raw pointer remains available as a non-owning C view until the vector
+/// is transferred back with `leak_nonempty_buffer`.
+///
+/// # Safety
+///
+/// A non-null `buffer` must point to exactly `len` initialized elements from a
+/// boxed slice created by `leak_nonempty_buffer`. It must not be reclaimed,
+/// reallocated, or used to create another owner while the vector exists.
+unsafe fn take_c_buffer<T>(buffer: *mut T, len: usize) -> Vec<T> {
+    if buffer.is_null() {
+        Vec::new()
+    } else {
+        let slice = std::ptr::slice_from_raw_parts_mut(buffer, len);
+        // SAFETY: The caller guarantees that this is the unique pointer to a
+        // boxed slice with exactly `len` initialized elements.
+        unsafe { Box::from_raw(slice).into_vec() }
+    }
 }
 
 /// Transfers a populated Rust buffer to C while preserving null as the
@@ -2852,42 +2920,7 @@ fn leak_nonempty_buffer<T>(buffer: Vec<T>) -> *mut T {
     if buffer.is_empty() {
         std::ptr::null_mut()
     } else {
-        buffer.leak().as_mut_ptr()
-    }
-}
-
-impl From<&CScreenGrid> for ScreenGrid {
-    fn from(cgrid: &CScreenGrid) -> Self {
-        let num_cells = cgrid.rows as usize * cgrid.cols as usize;
-        let chars = init_ptr!(cgrid.chars, num_cells);
-        let attrs = init_ptr!(cgrid.attrs, num_cells);
-        let vcols = init_ptr!(cgrid.vcols, num_cells);
-        let line_offset = init_ptr!(cgrid.line_offset, cgrid.rows as usize);
-        // SAFETY: The `CScreenGrid` ownership contract guarantees that a
-        // non-null pointer was produced by `DirtyColumns::into_raw`.
-        let dirty_columns = unsafe { DirtyColumns::from_raw(cgrid.dirty_col, cgrid.rows as usize) };
-        ScreenGrid {
-            handle: cgrid.handle,
-            chars,
-            attrs,
-            vcols,
-            line_offset,
-            dirty_columns,
-            rows: cgrid.rows,
-            cols: cgrid.cols,
-            valid: cgrid.valid,
-            throttled: cgrid.throttled,
-            blending: cgrid.blending,
-            mouse_enabled: cgrid.mouse_enabled,
-            zindex: cgrid.zindex,
-            comp_row: cgrid.comp_row,
-            comp_col: cgrid.comp_col,
-            comp_width: cgrid.comp_width,
-            comp_height: cgrid.comp_height,
-            comp_index: cgrid.comp_index,
-            comp_disabled: cgrid.comp_disabled,
-            pending_comp_index_update: cgrid.pending_comp_index_update,
-        }
+        Box::into_raw(buffer.into_boxed_slice()).cast::<T>()
     }
 }
 
@@ -3345,7 +3378,7 @@ pub unsafe extern "C" fn grid_alloc(
 ) {
     let mut line_buffer = LineBufferGuard::acquire();
     unsafe {
-        let g = ScreenGrid::from_cgrid(&*grid, rows, cols, valid, copy, &mut line_buffer);
+        let g = ScreenGrid::from_cgrid(&mut *grid, rows, cols, valid, copy, &mut line_buffer);
         *grid = g.to_cgrid();
     }
 }
@@ -3364,7 +3397,7 @@ pub unsafe extern "C" fn grid_reset_dirty_columns(grid: *mut CScreenGrid) {
 
     // SAFETY: The caller transfers exclusive ownership of the grid buffers
     // into Rust for the duration of this function.
-    let mut rust_grid: ScreenGrid = unsafe { (&*grid).into() };
+    let mut rust_grid = unsafe { ScreenGrid::take_from_cgrid(&mut *grid) };
     rust_grid.reset_dirty_columns();
 
     // SAFETY: Ownership of every grid allocation is returned exactly once.
@@ -3387,7 +3420,7 @@ pub unsafe extern "C" fn grid_scroll_dirty_columns(grid: *mut CScreenGrid) {
 
     // SAFETY: The caller transfers exclusive ownership of the grid buffers
     // into Rust for the duration of this function.
-    let mut rust_grid: ScreenGrid = unsafe { (&*grid).into() };
+    let mut rust_grid = unsafe { ScreenGrid::take_from_cgrid(&mut *grid) };
     rust_grid.scroll_dirty_columns();
 
     // SAFETY: Ownership of every grid allocation is returned exactly once.
@@ -3413,7 +3446,7 @@ pub unsafe extern "C" fn grid_take_dirty_column(
 
     // SAFETY: The caller transfers exclusive ownership of the grid buffers
     // into Rust for the duration of this function.
-    let mut rust_grid: ScreenGrid = unsafe { (&*grid).into() };
+    let mut rust_grid = unsafe { ScreenGrid::take_from_cgrid(&mut *grid) };
     let dirty_col = usize::try_from(row)
         .ok()
         .and_then(|row| rust_grid.take_dirty_column(row))
@@ -3432,8 +3465,12 @@ pub unsafe extern "C" fn grid_take_dirty_column(
 /// non-null buffer pointers must own compatible, unreclaimed Rust allocations.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn grid_free(grid: *mut CScreenGrid) {
+    // SAFETY: The caller transfers ownership of every grid allocation.
+    let _owned_grid = unsafe { ScreenGrid::take_from_cgrid(&mut *grid) };
+
+    // SAFETY: The allocations are now owned by `_owned_grid`; clear the
+    // non-owning C views before `_owned_grid` releases them.
     unsafe {
-        let _: ScreenGrid = (&*grid).into();
         (*grid).chars = std::ptr::null_mut();
         (*grid).attrs = std::ptr::null_mut();
         (*grid).vcols = std::ptr::null_mut();
@@ -3484,9 +3521,11 @@ pub unsafe extern "C" fn grid_clear_line(
     width: libc::c_int,
     valid: bool,
 ) {
+    // SAFETY: The caller transfers exclusive ownership of the grid buffers.
+    let mut g = unsafe { ScreenGrid::take_from_cgrid(&mut *grid) };
+    g.clear_line(offset, width as usize, valid);
+    // SAFETY: Ownership of every grid allocation is returned exactly once.
     unsafe {
-        let mut g: ScreenGrid = (&*grid).into();
-        g.clear_line(offset, width as usize, valid);
         *grid = g.to_cgrid();
     }
 }
@@ -3676,9 +3715,11 @@ pub unsafe extern "C" fn grid_adjust(
 /// buffers satisfy the ownership and layout requirements of `ScreenGrid`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn grid_invalidate(grid: *mut CScreenGrid) {
+    // SAFETY: The caller transfers exclusive ownership of the grid buffers.
+    let mut g = unsafe { ScreenGrid::take_from_cgrid(&mut *grid) };
+    g.invalidate();
+    // SAFETY: Ownership of every grid allocation is returned exactly once.
     unsafe {
-        let mut g: ScreenGrid = (&*grid).into();
-        g.invalidate();
         *grid = g.to_cgrid();
     }
 }
@@ -3699,15 +3740,16 @@ pub unsafe extern "C" fn grid_getchar(
     col: libc::c_int,
     attrp: *mut libc::c_int,
 ) -> VimSCharT {
-    let g: ScreenGrid = unsafe { (&*grid).into() };
+    let g = unsafe { ScreenGrid::take_from_cgrid(&mut *grid) };
     let (sc, at) = g.get_char_and_attr(row as usize, col as usize);
-    unsafe {
-        *grid = g.to_cgrid();
-    }
     if !attrp.is_null() {
         unsafe {
             *attrp = at;
         }
+    }
+    // SAFETY: Ownership of every grid allocation is returned exactly once.
+    unsafe {
+        *grid = g.to_cgrid();
     }
     sc
 }
@@ -3732,10 +3774,11 @@ pub extern "C" fn schar_from_char(mut c: libc::c_int) -> VimSCharT {
 /// `ScreenGrid`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn grid_assign_handle(grid: *mut CScreenGrid) {
-    let mut g: ScreenGrid = unsafe { (&*grid).into() };
+    let mut g = unsafe { ScreenGrid::take_from_cgrid(&mut *grid) };
 
     GRID_HANDLE_ALLOCATOR.assign(&mut g.handle);
 
+    // SAFETY: Ownership of every grid allocation is returned exactly once.
     unsafe {
         *grid = g.to_cgrid();
     }
@@ -3754,10 +3797,11 @@ pub unsafe extern "C" fn grid_ins_lines(
     col: libc::c_int,
     width: libc::c_int,
 ) {
-    let mut g: ScreenGrid = unsafe { (&*grid).into() };
+    let mut g = unsafe { ScreenGrid::take_from_cgrid(&mut *grid) };
 
     g.ins_lines(row, line_count, end, col, width);
 
+    // SAFETY: Ownership of every grid allocation is returned exactly once.
     unsafe {
         *grid = g.to_cgrid();
     }
@@ -3776,10 +3820,11 @@ pub unsafe extern "C" fn grid_del_lines(
     col: libc::c_int,
     width: libc::c_int,
 ) {
-    let mut g: ScreenGrid = unsafe { (&*grid).into() };
+    let mut g = unsafe { ScreenGrid::take_from_cgrid(&mut *grid) };
 
     g.del_lines(row, line_count, end, col, width);
 
+    // SAFETY: Ownership of every grid allocation is returned exactly once.
     unsafe {
         *grid = g.to_cgrid();
     }
@@ -4360,11 +4405,24 @@ mod tests {
         grid.mark_dirty_column(1, 3);
 
         // SAFETY: This test transfers every allocation to `cgrid` exactly once.
-        let cgrid = unsafe { grid.to_cgrid() };
+        let mut cgrid = unsafe { grid.to_cgrid() };
         assert!(!cgrid.dirty_col.is_null());
 
-        // `cgrid` still uniquely owns all transferred allocations.
-        let grid: ScreenGrid = (&cgrid).into();
+        let original_pointers = (
+            cgrid.chars,
+            cgrid.attrs,
+            cgrid.vcols,
+            cgrid.line_offset,
+            cgrid.dirty_col,
+        );
+
+        // SAFETY: `cgrid` uniquely owns allocations created by `to_cgrid`.
+        let grid = unsafe { ScreenGrid::take_from_cgrid(&mut cgrid) };
+        assert_eq!(cgrid.chars, original_pointers.0);
+        assert_eq!(cgrid.attrs, original_pointers.1);
+        assert_eq!(cgrid.vcols, original_pointers.2);
+        assert_eq!(cgrid.line_offset, original_pointers.3);
+        assert_eq!(cgrid.dirty_col, original_pointers.4);
         assert_eq!(
             grid.dirty_columns
                 .as_ref()
@@ -4375,7 +4433,7 @@ mod tests {
 
     #[test]
     fn assigning_handle_preserves_unallocated_grid_buffers() {
-        let cgrid = CScreenGrid {
+        let mut cgrid = CScreenGrid {
             handle: 0,
             chars: std::ptr::null_mut(),
             attrs: std::ptr::null_mut(),
@@ -4399,7 +4457,8 @@ mod tests {
         };
 
         let allocator = GridHandleAllocator::new(DEFAULT_GRID_HANDLE);
-        let mut grid: ScreenGrid = (&cgrid).into();
+        // SAFETY: All buffers are null, so there are no allocations to take.
+        let mut grid = unsafe { ScreenGrid::take_from_cgrid(&mut cgrid) };
         allocator.assign(&mut grid.handle);
         let cgrid = unsafe { grid.to_cgrid() };
 

@@ -105,7 +105,8 @@ pub unsafe extern "C" fn ui_line(
     clear_attr: libc::c_int,
     wrap: bool,
 ) {
-    let g: ScreenGrid = unsafe { (&*grid).into() };
+    // SAFETY: The caller transfers exclusive ownership of the grid buffers.
+    let g = unsafe { ScreenGrid::take_from_cgrid(&mut *grid) };
     ui_line_r(
         &g,
         row,
