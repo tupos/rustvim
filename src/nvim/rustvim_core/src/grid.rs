@@ -1,5 +1,6 @@
 // vim: sw=4
 mod cell;
+mod fold_column;
 mod line_buffer;
 mod tabstops;
 mod virtual_text;
