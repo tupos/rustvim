@@ -2,6 +2,7 @@
 mod cell;
 mod fold_column;
 mod line_buffer;
+mod line_submission;
 mod tabstops;
 mod virtual_text;
 
