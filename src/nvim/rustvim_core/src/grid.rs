@@ -8,7 +8,10 @@ use std::{
     collections::BTreeMap,
     ffi::CStr,
     rc::Rc,
-    sync::atomic::{AtomicI32, AtomicUsize, Ordering},
+    sync::{
+        Mutex, MutexGuard,
+        atomic::{AtomicI32, Ordering},
+    },
 };
 
 /// if data[0] is 0xFF, then data[1..4] is a 24-bit index (in machine endianness)
@@ -132,9 +135,6 @@ impl GridHandleAllocator {
 }
 
 static GRID_HANDLE_ALLOCATOR: GridHandleAllocator = GridHandleAllocator::new(DEFAULT_GRID_HANDLE);
-
-/// Capacity shared by the four process-global line-buffer allocations.
-static LINE_BUFFER_CAPACITY: AtomicUsize = AtomicUsize::new(0);
 
 unsafe extern "C" {
     static mut full_screen: bool;
@@ -860,6 +860,16 @@ pub struct LineBuffer {
 }
 
 impl LineBuffer {
+    const fn empty() -> Self {
+        Self {
+            chars: Vec::new(),
+            attrs: Vec::new(),
+            vcols: Vec::new(),
+            scratch: Vec::new(),
+            size: 0,
+        }
+    }
+
     fn realloc(&mut self, size: usize) {
         self.size = size;
         self.chars = vec![0; size];
@@ -868,42 +878,38 @@ impl LineBuffer {
         self.scratch = vec![0; size];
     }
     fn new(cols: usize) -> Self {
-        LineBuffer {
-            chars: vec![0; cols],
-            attrs: vec![0; cols],
-            vcols: vec![0; cols],
-            scratch: vec![0; cols],
-            size: cols,
+        let mut line_buffer = Self::empty();
+        line_buffer.realloc(cols);
+        line_buffer
+    }
+
+    fn release(&mut self) {
+        *self = Self::empty();
+    }
+
+    fn c_pointer<T>(values: &mut [T]) -> *mut T {
+        if values.is_empty() {
+            std::ptr::null_mut()
+        } else {
+            values.as_mut_ptr()
         }
     }
-    /// This function is highly usafe!!!. If you are not carefull you will easily
-    /// leak memory or produce UB. It should be called only after the initial
-    /// line buffer was allocated.
-    unsafe fn from_cline_buffer_ref(clb: &CLineBufferRef<'_>) -> Self {
+
+    /// Publishes non-owning views of the Rust allocations for transitional C
+    /// callers.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that C does not access these pointers while the
+    /// vectors are resized or released. All access must remain on Neovim's
+    /// main rendering thread.
+    unsafe fn publish_c_views(&mut self) {
         unsafe {
-            let bsz = clb.capacity();
-            Self {
-                chars: Vec::from_raw_parts(*clb.chars, bsz, bsz),
-                attrs: Vec::from_raw_parts(*clb.attrs, bsz, bsz),
-                vcols: Vec::from_raw_parts(*clb.vcols, bsz, bsz),
-                scratch: Vec::from_raw_parts(*clb.scratch, bsz, bsz),
-                size: bsz,
-            }
+            linebuf_char = Self::c_pointer(&mut self.chars);
+            linebuf_attr = Self::c_pointer(&mut self.attrs);
+            linebuf_vcol = Self::c_pointer(&mut self.vcols);
+            linebuf_scratch = Self::c_pointer(&mut self.scratch);
         }
-    }
-    /// This function is highly usafe!!!. If you are not carefull you will easily
-    /// leak memory or produce UB. It should be called only after the ownership
-    /// of the existing memory was taken by the call to from_cline_buffer.
-    unsafe fn into_cline_buffer_ref(self) -> CLineBufferRef<'static> {
-        let clb = CLineBufferRef::new();
-        unsafe {
-            *clb.chars = self.chars.leak().as_mut_ptr();
-            *clb.attrs = self.attrs.leak().as_mut_ptr();
-            *clb.vcols = self.vcols.leak().as_mut_ptr();
-            *clb.scratch = self.scratch.leak().as_mut_ptr();
-            clb.set_capacity(self.size);
-        }
-        clb
     }
 
     fn invalidate_chars_and_attrs(&mut self) {
@@ -978,90 +984,51 @@ impl LineBuffer {
     }
 }
 //                                                                  abcdef           fedcba
-#[derive(Debug)]
-pub struct CLineBufferRef<'a> {
-    chars: *mut *mut VimSCharT,
-    attrs: *mut *mut VimSAttrT,
-    vcols: *mut *mut VimColNrT,
-    scratch: *mut *mut VimSScratchT,
-    capacity: &'a AtomicUsize,
+/// Exclusive access to the process-global Rust-owned line buffer.
+///
+/// Dropping the guard refreshes the temporary pointers used by the remaining
+/// C rendering code.
+struct LineBufferGuard {
+    line_buffer: MutexGuard<'static, LineBuffer>,
 }
 
-impl CLineBufferRef<'static> {
-    fn new() -> Self {
+impl LineBufferGuard {
+    /// Borrows the global line buffer for one non-reentrant rendering
+    /// operation.
+    fn acquire() -> Self {
         Self {
-            chars: &raw mut linebuf_char,
-            attrs: &raw mut linebuf_attr,
-            vcols: &raw mut linebuf_vcol,
-            scratch: &raw mut linebuf_scratch,
-            capacity: &LINE_BUFFER_CAPACITY,
+            line_buffer: LINE_BUFFER
+                .try_lock()
+                .expect("line buffer is already borrowed"),
         }
     }
 }
 
-impl CLineBufferRef<'_> {
-    /// Returns the capacity shared by all four line-buffer allocations.
-    fn capacity(&self) -> usize {
-        self.capacity.load(Ordering::Relaxed)
-    }
+impl std::ops::Deref for LineBufferGuard {
+    type Target = LineBuffer;
 
-    /// Records the capacity shared by all four line-buffer allocations.
-    fn set_capacity(&self, capacity: usize) {
-        self.capacity.store(capacity, Ordering::Relaxed);
-    }
-
-    fn alloc(&self, size: usize) {
-        let lb = LineBuffer::new(size);
-        unsafe {
-            lb.into_cline_buffer_ref();
-        }
-    }
-    fn realloc(&self, size: usize) {
-        unsafe {
-            let mut lb = LineBuffer::from_cline_buffer_ref(self);
-            lb.realloc(size);
-            lb.into_cline_buffer_ref();
-        }
-    }
-
-    /// Releases one raw vector allocation and clears its C-visible pointer.
-    ///
-    /// # Safety
-    ///
-    /// `slot` must point to a valid pointer variable. Its value must either be
-    /// null or uniquely own a Rust vector allocation with capacity `capacity`.
-    unsafe fn release_buffer<T>(slot: *mut *mut T, capacity: usize) {
-        // SAFETY: The caller guarantees that `slot` points to a writable
-        // pointer variable.
-        let buffer = unsafe { std::ptr::replace(slot, std::ptr::null_mut()) };
-        if !buffer.is_null() {
-            // SAFETY: The caller transfers unique ownership of an allocation
-            // whose capacity is `capacity`. A zero length avoids reading any
-            // potentially uninitialized line-buffer cells before deallocation.
-            drop(unsafe { Vec::from_raw_parts(buffer, 0, capacity) });
-        }
-    }
-
-    /// Releases all line-buffer allocations and clears their C-visible state.
-    ///
-    /// # Safety
-    ///
-    /// Each non-null pointer must uniquely own the corresponding Rust vector
-    /// allocation, and the recorded capacity must match each allocation. The
-    /// storage must not be accessed after this call.
-    unsafe fn release(&self) {
-        let capacity = self.capacity();
-        // SAFETY: The caller guarantees unique ownership of all four
-        // allocations and that they share the recorded capacity.
-        unsafe {
-            Self::release_buffer(self.chars, capacity);
-            Self::release_buffer(self.attrs, capacity);
-            Self::release_buffer(self.vcols, capacity);
-            Self::release_buffer(self.scratch, capacity);
-        }
-        self.set_capacity(0);
+    fn deref(&self) -> &Self::Target {
+        &self.line_buffer
     }
 }
+
+impl std::ops::DerefMut for LineBufferGuard {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.line_buffer
+    }
+}
+
+impl Drop for LineBufferGuard {
+    fn drop(&mut self) {
+        // SAFETY: Rendering is confined to Neovim's main thread. The guard
+        // provides exclusive Rust access, and C resumes after it is dropped.
+        unsafe {
+            self.line_buffer.publish_c_views();
+        }
+    }
+}
+
+static LINE_BUFFER: Mutex<LineBuffer> = Mutex::new(LineBuffer::empty());
 
 /// Grid-independent state for one buffered line operation.
 ///
@@ -1560,13 +1527,9 @@ impl CLineGrid {
 /// until the matching `grid_line_flush` call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn grid_line_start(view: *mut CGridView, row: libc::c_int) {
+    let mut line_buffer = LineBufferGuard::acquire();
     unsafe {
-        let clb = CLineBufferRef::new();
-        let mut lb = LineBuffer::from_cline_buffer_ref(&clb);
-
-        LINE_GRID.begin_view(view, row, &mut lb);
-
-        lb.into_cline_buffer_ref();
+        LINE_GRID.begin_view(view, row, &mut line_buffer);
     }
 }
 
@@ -1584,13 +1547,9 @@ pub unsafe extern "C" fn begin_raw_grid(
     row: libc::c_int,
     col: libc::c_int,
 ) {
+    let mut line_buffer = LineBufferGuard::acquire();
     unsafe {
-        let clb = CLineBufferRef::new();
-        let mut lb = LineBuffer::from_cline_buffer_ref(&clb);
-
-        LINE_GRID.begin_raw_grid(grid, row, col, &mut lb);
-
-        lb.into_cline_buffer_ref();
+        LINE_GRID.begin_raw_grid(grid, row, col, &mut line_buffer);
     }
 }
 
@@ -1617,11 +1576,9 @@ pub unsafe extern "C" fn grid_line_getchar(col: libc::c_int, attr: *mut VimSAttr
 
 #[unsafe(no_mangle)]
 pub extern "C" fn grid_line_put_schar(col: libc::c_int, schar: VimSCharT, attr: VimSAttrT) {
-    let clb = CLineBufferRef::new();
+    let mut line_buffer = LineBufferGuard::acquire();
     unsafe {
-        let mut lb = LineBuffer::from_cline_buffer_ref(&clb);
-        LINE_GRID.put_cell(col, schar, attr, &mut lb);
-        lb.into_cline_buffer_ref();
+        LINE_GRID.put_cell(col, schar, attr, &mut line_buffer);
     }
 }
 
@@ -1638,8 +1595,7 @@ pub unsafe extern "C" fn grid_line_puts(
     text_len: libc::c_int,
     attr: VimSAttrT,
 ) -> libc::c_int {
-    let clb = CLineBufferRef::new();
-    let mut lb = unsafe { LineBuffer::from_cline_buffer_ref(&clb) };
+    let mut line_buffer = LineBufferGuard::acquire();
     let len = if text_len == -1 {
         unsafe { libc::strlen(text) }
     } else {
@@ -1650,12 +1606,9 @@ pub unsafe extern "C" fn grid_line_puts(
             col,
             std::slice::from_raw_parts(text.cast::<u8>(), len),
             attr,
-            &mut lb,
+            &mut line_buffer,
         )
     };
-    unsafe {
-        lb.into_cline_buffer_ref();
-    }
     num_cells as i32
 }
 
@@ -1666,16 +1619,8 @@ pub extern "C" fn grid_line_fill(
     sc: VimSCharT,
     attr: libc::c_int,
 ) -> libc::c_int {
-    unsafe {
-        let clb = CLineBufferRef::new();
-        let mut lb = LineBuffer::from_cline_buffer_ref(&clb);
-
-        let ret = LINE_GRID.fill_cells(start_col, end_col, sc, attr, &mut lb);
-
-        lb.into_cline_buffer_ref();
-
-        ret
-    }
+    let mut line_buffer = LineBufferGuard::acquire();
+    unsafe { LINE_GRID.fill_cells(start_col, end_col, sc, attr, &mut line_buffer) }
 }
 
 #[unsafe(no_mangle)]
@@ -1700,13 +1645,9 @@ pub extern "C" fn grid_line_cursor_goto(col: libc::c_int) {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn grid_line_mirror(width: libc::c_int) {
+    let mut line_buffer = LineBufferGuard::acquire();
     unsafe {
-        let clb = CLineBufferRef::new();
-        let mut lb = LineBuffer::from_cline_buffer_ref(&clb);
-
-        LINE_GRID.mirror_cells(width, &mut lb);
-
-        lb.into_cline_buffer_ref();
+        LINE_GRID.mirror_cells(width, &mut line_buffer);
     }
 }
 
@@ -1722,11 +1663,9 @@ pub unsafe extern "C" fn linebuf_mirror(
     pclear: *mut libc::c_int,
     width: libc::c_int,
 ) {
+    let mut line_buffer = LineBufferGuard::acquire();
     unsafe {
-        let clb = CLineBufferRef::new();
-        let mut lb = LineBuffer::from_cline_buffer_ref(&clb);
-        lb.mirror(*pfirst as usize, *plast as usize, width as usize);
-        lb.into_cline_buffer_ref();
+        line_buffer.mirror(*pfirst as usize, *plast as usize, width as usize);
 
         let first = *pfirst;
         let last = *plast;
@@ -1740,13 +1679,9 @@ pub unsafe extern "C" fn linebuf_mirror(
 /// End a group of grid_line_puts calls and send the screen buffer to the UI layer.
 #[unsafe(no_mangle)]
 pub extern "C" fn grid_line_flush() {
+    let mut line_buffer = LineBufferGuard::acquire();
     unsafe {
-        let clb = CLineBufferRef::new();
-        let mut lb = LineBuffer::from_cline_buffer_ref(&clb);
-
-        LINE_GRID.flush(&mut lb);
-
-        lb.into_cline_buffer_ref();
+        LINE_GRID.flush(&mut line_buffer);
     }
 }
 
@@ -1755,13 +1690,9 @@ pub extern "C" fn grid_line_flush() {
 /// This is a stopgap until message.c has been refactored to behave
 #[unsafe(no_mangle)]
 pub extern "C" fn grid_line_flush_if_valid_row() {
+    let mut line_buffer = LineBufferGuard::acquire();
     unsafe {
-        let clb = CLineBufferRef::new();
-        let mut lb = LineBuffer::from_cline_buffer_ref(&clb);
-
-        LINE_GRID.flush_if_valid_row(&mut lb);
-
-        lb.into_cline_buffer_ref();
+        LINE_GRID.flush_if_valid_row(&mut line_buffer);
     }
 }
 
@@ -1783,8 +1714,7 @@ pub unsafe extern "C" fn grid_put_linebuf(
     last_vcol: VimColNrT,
     flags: libc::c_int,
 ) {
-    let clb = CLineBufferRef::new();
-    let mut lb = unsafe { LineBuffer::from_cline_buffer_ref(&clb) };
+    let mut line_buffer = LineBufferGuard::acquire();
     let mut g: ScreenGrid = unsafe { (&*grid).into() };
     g.put_line_buffer(
         row,
@@ -1796,11 +1726,10 @@ pub unsafe extern "C" fn grid_put_linebuf(
         clear_attr,
         last_vcol,
         flags,
-        &mut lb,
+        &mut line_buffer,
     );
     unsafe {
         *grid = g.to_cgrid();
-        lb.into_cline_buffer_ref();
     }
 }
 
@@ -1819,22 +1748,18 @@ pub unsafe extern "C" fn grid_clear(
     mut end_col: libc::c_int,
     attr: libc::c_int,
 ) {
-    let clb = CLineBufferRef::new();
-    let mut lb = unsafe { LineBuffer::from_cline_buffer_ref(&clb) };
+    let mut line_buffer = LineBufferGuard::acquire();
     for row in start_row..end_row {
         unsafe {
-            LINE_GRID.begin_view(view, row, &mut lb);
+            LINE_GRID.begin_view(view, row, &mut line_buffer);
             end_col = std::cmp::min(end_col, LINE_GRID.max_col());
             if LINE_GRID.row_reaches_grid_end() || start_col >= end_col {
                 LINE_GRID.cancel();
                 break;
             }
             LINE_GRID.set_clear_range(start_col, end_col, attr, 0);
-            LINE_GRID.flush(&mut lb);
+            LINE_GRID.flush(&mut line_buffer);
         }
-    }
-    unsafe {
-        lb.into_cline_buffer_ref();
     }
 }
 
@@ -1881,10 +1806,7 @@ pub unsafe extern "C" fn grid_draw_border_impl(
     // SAFETY: The caller transfers exclusive ownership of the grid buffers
     // into Rust for the duration of this function.
     let mut rust_grid: ScreenGrid = unsafe { (&*grid).into() };
-    let clb = CLineBufferRef::new();
-    // SAFETY: The caller guarantees exclusive access to the initialized
-    // global line buffer for the duration of this function.
-    let mut line_buffer = unsafe { LineBuffer::from_cline_buffer_ref(&clb) };
+    let mut line_buffer = LineBufferGuard::acquire();
     {
         let mut canvas = BorderCanvas {
             line_grid: LineGrid::new(&mut rust_grid),
@@ -1892,11 +1814,9 @@ pub unsafe extern "C" fn grid_draw_border_impl(
         };
         border.draw(&mut canvas);
     }
-    // SAFETY: Both owners were taken from their C representations above and
-    // are returned exactly once after all canvas borrows have ended.
+    // SAFETY: Ownership of the grid allocations is returned exactly once.
     unsafe {
         *grid = rust_grid.to_cgrid();
-        line_buffer.into_cline_buffer_ref();
     }
 }
 
@@ -2998,7 +2918,8 @@ impl<'a> ArabicShaper<'a> {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn alloc_initial_line_buffer() {
-    CLineBufferRef::new().alloc(unsafe { globals::Columns as usize });
+    let mut line_buffer = LineBufferGuard::acquire();
+    line_buffer.realloc(unsafe { globals::Columns as usize });
 }
 
 /// # Safety
@@ -3014,12 +2935,10 @@ pub unsafe extern "C" fn grid_alloc(
     copy: bool,
     valid: bool,
 ) {
+    let mut line_buffer = LineBufferGuard::acquire();
     unsafe {
-        let clb = CLineBufferRef::new();
-        let mut lb = LineBuffer::from_cline_buffer_ref(&clb);
-        let g = ScreenGrid::from_cgrid(&*grid, rows, cols, valid, copy, &mut lb);
+        let g = ScreenGrid::from_cgrid(&*grid, rows, cols, valid, copy, &mut line_buffer);
         *grid = g.to_cgrid();
-        lb.into_cline_buffer_ref();
     }
 }
 
@@ -3130,11 +3049,9 @@ pub unsafe extern "C" fn grid_free_all_mem() {
         grid_free(&raw mut msg_grid);
     }
 
-    // SAFETY: The caller guarantees that no line-buffer user remains and that
-    // the C globals still uniquely own the allocations.
-    unsafe {
-        CLineBufferRef::new().release();
-    }
+    // The caller guarantees that no line-buffer user remains.
+    let mut line_buffer = LineBufferGuard::acquire();
+    line_buffer.release();
 
     // SAFETY: The caller guarantees exclusive main-thread access. Replacing
     // the static transfers all cached allocations into a normal Rust value,
@@ -3539,47 +3456,16 @@ mod tests {
     }
 
     #[test]
-    fn line_buffer_release_clears_c_storage() {
-        let size = 4;
-        let mut chars = Vec::<VimSCharT>::with_capacity(size);
-        let mut attrs = Vec::<VimSAttrT>::with_capacity(size);
-        let mut vcols = Vec::<VimColNrT>::with_capacity(size);
-        let mut scratch = Vec::<VimSScratchT>::with_capacity(size);
+    fn line_buffer_release_clears_rust_storage() {
+        let mut line_buffer = LineBuffer::new(4);
 
-        assert_eq!(chars.capacity(), size);
-        assert_eq!(attrs.capacity(), size);
-        assert_eq!(vcols.capacity(), size);
-        assert_eq!(scratch.capacity(), size);
+        line_buffer.release();
 
-        let mut chars_ptr = chars.as_mut_ptr();
-        let mut attrs_ptr = attrs.as_mut_ptr();
-        let mut vcols_ptr = vcols.as_mut_ptr();
-        let mut scratch_ptr = scratch.as_mut_ptr();
-        std::mem::forget(chars);
-        std::mem::forget(attrs);
-        std::mem::forget(vcols);
-        std::mem::forget(scratch);
-
-        let capacity = AtomicUsize::new(size);
-        let line_buffer = CLineBufferRef {
-            chars: &raw mut chars_ptr,
-            attrs: &raw mut attrs_ptr,
-            vcols: &raw mut vcols_ptr,
-            scratch: &raw mut scratch_ptr,
-            capacity: &capacity,
-        };
-
-        // SAFETY: The four pointers uniquely own the forgotten vectors above,
-        // and each allocation has the recorded capacity.
-        unsafe {
-            line_buffer.release();
-        }
-
-        assert!(chars_ptr.is_null());
-        assert!(attrs_ptr.is_null());
-        assert!(vcols_ptr.is_null());
-        assert!(scratch_ptr.is_null());
-        assert_eq!(capacity.load(Ordering::Relaxed), 0);
+        assert!(line_buffer.chars.is_empty());
+        assert!(line_buffer.attrs.is_empty());
+        assert!(line_buffer.vcols.is_empty());
+        assert!(line_buffer.scratch.is_empty());
+        assert_eq!(line_buffer.size, 0);
     }
 
     #[test]
