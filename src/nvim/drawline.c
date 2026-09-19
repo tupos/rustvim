@@ -333,33 +333,33 @@ static void draw_virt_text(win_T *wp, buf_T *buf, int col_off, int *end_col, int
 static void draw_col_buf(win_T *wp, winlinevars_T *wlv, const char *text, size_t len, int attr,
                          const colnr_T *fold_vcol, bool inc_vcol)
 {
-  const char *ptr = text;
-  while (ptr < text + len && wlv->off < wp->w_view_width) {
-    int myattr = attr;
-    if (inc_vcol) {
-      advance_color_col(wlv, wlv->vcol);
-      if (wlv->color_cols && wlv->vcol == *wlv->color_cols) {
-        myattr = hl_combine_attr(win_hl_attr(wp, HLF_MC), myattr);
-      }
+  size_t color_cols_len = 0;
+  if (inc_vcol && wlv->color_cols) {
+    while (wlv->color_cols[color_cols_len] >= 0) {
+      color_cols_len++;
     }
+  }
 
-    int max_cells = wp->w_view_width - wlv->off;
-    int tab_cells = *ptr == TAB
-                    ? tabstop_padding(wlv->off, wp->w_buffer->b_p_ts,
-                                      wp->w_buffer->b_p_vts_array)
-                    : 0;
-    size_t bytes_consumed = 0;
-    int cells = linebuf_put_text_glyph(wlv->off, ptr, len - (size_t)(ptr - text),
-                                       max_cells, tab_cells, myattr, inc_vcol,
-                                       wlv->vcol, fold_vcol, &bytes_consumed);
-    assert(cells > 0);
+  const size_t fold_vcol_len = fold_vcol == NULL
+                               ? 0
+                               : (size_t)compute_foldcolumn(wp, 0);
+  const int color_col_attr = inc_vcol && wlv->color_cols
+                             ? win_hl_attr(wp, HLF_MC)
+                             : 0;
+  LinebufRenderTextResult result =
+    linebuf_render_text(wlv->off, text, len, wp->w_view_width, attr,
+                        inc_vcol, wlv->vcol, fold_vcol, fold_vcol_len,
+                        wlv->color_cols, color_cols_len, color_col_attr,
+                        wp->w_buffer->b_p_ts, wp->w_buffer->b_p_vts_array);
 
-    ptr += bytes_consumed;
-    wlv->off += cells;
-    if (inc_vcol) {
-      wlv->vcol += cells;
-    } else if (fold_vcol) {
-      fold_vcol += cells;
+  wlv->off = result.end_col;
+  if (inc_vcol) {
+    wlv->vcol = result.end_vcol;
+    if (wlv->color_cols) {
+      wlv->color_cols += result.color_cols_consumed;
+      if (result.color_cols_exhausted) {
+        wlv->color_cols = NULL;
+      }
     }
   }
 }

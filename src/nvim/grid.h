@@ -47,6 +47,13 @@ typedef struct {
   int footer_attr;
 } GridBorderConfig;
 
+typedef struct {
+  int end_col;
+  colnr_T end_vcol;
+  size_t color_cols_consumed;
+  bool color_cols_exhausted;
+} LinebufRenderTextResult;
+
 extern void grid_alloc(ScreenGrid *grid, int rows, int columns, bool copy, bool valid);
 extern bool grid_is_allocated(const ScreenGrid *grid);
 extern void grid_free(ScreenGrid *grid);
@@ -92,10 +99,11 @@ extern int linebuf_fill_chars_and_attrs(int start_col, int width, schar_T sc,
 extern int linebuf_put_cell(int col, schar_T sc, int attr, colnr_T vcol);
 extern int linebuf_put_rendered_glyph(int col, schar_T sc, int attr,
                                       colnr_T vcol);
-extern int linebuf_put_text_glyph(int col, const char *text, size_t text_len,
-                                  int max_cells, int tab_cells, int attr,
-                                  bool inc_vcol, colnr_T first_vcol,
-                                  const colnr_T *vcols, size_t *bytes_consumed);
+extern LinebufRenderTextResult linebuf_render_text(
+  int col, const char *text, size_t text_len, int max_col, int attr,
+  bool inc_vcol, colnr_T first_vcol, const colnr_T *vcols,
+  size_t vcols_len, const colnr_T *color_cols, size_t color_cols_len,
+  int color_col_attr, OptInt tabstop, const colnr_T *variable_tabstops);
 extern int linebuf_render_virtual_text(int col, VirtText virtual_text,
                                        int hl_mode, int max_col, colnr_T vcol,
                                        int skip_cells, bool eol_hl,
