@@ -2089,11 +2089,10 @@ Array nvim__inspect_cell(Integer grid, Integer row, Integer col, Arena *arena, E
     return ret;
   }
   ret = arena_array(arena, 3);
-  size_t off = g->line_offset[(size_t)row] + (size_t)col;
   char *sc_buf = arena_alloc(arena, MAX_SCHAR_SIZE, false);
-  schar_get(sc_buf, g->chars[off]);
+  int attr;
+  schar_get(sc_buf, grid_getchar(g, (int)row, (int)col, &attr));
   ADD_C(ret, CSTR_AS_OBJ(sc_buf));
-  int attr = g->attrs[off];
   ADD_C(ret, DICT_OBJ(hl_get_attr_by_id(attr, true, arena, err)));
   // will not work first time
   if (!highlight_use_hlstate()) {
