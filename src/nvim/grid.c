@@ -34,8 +34,6 @@
 // Per-cell attributes
 size_t linebuf_size = 0;
 
-int last_grid_handle = DEFAULT_GRID_HANDLE;
-
 #ifdef ORDER_BIG_ENDIAN
 # define schar_idx(sc) (sc & (0x00FFFFFF))
 #else

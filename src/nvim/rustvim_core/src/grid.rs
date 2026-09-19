@@ -8,6 +8,7 @@ use std::{
     collections::BTreeMap,
     ffi::CStr,
     rc::Rc,
+    sync::atomic::{AtomicI32, Ordering},
 };
 
 /// if data[0] is 0xFF, then data[1..4] is a 24-bit index (in machine endianness)
@@ -97,7 +98,40 @@ static NULL_TERMINATOR: u8 = b'\0';
 
 static mut GLYPH_MAPPING: GlyphMapping = GlyphMapping::new();
 
-static DEFAULT_GRID_HANDLE: u32 = 1;
+const DEFAULT_GRID_HANDLE: VimHandleT = 1;
+
+/// Assigns monotonically increasing handles to newly created grids.
+struct GridHandleAllocator {
+    last: AtomicI32,
+}
+
+impl GridHandleAllocator {
+    /// Creates an allocator whose next handle follows `last_assigned`.
+    const fn new(last_assigned: VimHandleT) -> Self {
+        Self {
+            last: AtomicI32::new(last_assigned),
+        }
+    }
+
+    /// Assigns the next handle when `handle` is currently unset.
+    fn assign(&self, handle: &mut VimHandleT) {
+        if *handle != 0 {
+            return;
+        }
+
+        // Relaxed ordering is sufficient because the counter only provides
+        // unique values; access to each grid is synchronized separately.
+        let previous = self
+            .last
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |last| {
+                last.checked_add(1)
+            })
+            .expect("grid handle space exhausted");
+        *handle = previous + 1;
+    }
+}
+
+static GRID_HANDLE_ALLOCATOR: GridHandleAllocator = GridHandleAllocator::new(DEFAULT_GRID_HANDLE);
 
 unsafe extern "C" {
     static mut full_screen: bool;
@@ -110,8 +144,6 @@ unsafe extern "C" {
     static mut msg_grid: CScreenGrid;
     static mut msg_grid_adj: CScreenGrid;
     static mut pum_grid: CScreenGrid;
-
-    static mut last_grid_handle: libc::c_int;
 
     static mut linebuf_char: *mut VimSCharT;
     static mut linebuf_attr: *mut VimSAttrT;
@@ -676,15 +708,6 @@ impl ScreenGrid {
                 self.mark_dirty_column(row, clear_end);
             }
         }
-    }
-
-    /// Assigns the next grid handle when this grid does not yet have one.
-    fn assign_handle(&mut self, handle: VimHandleT) -> Option<VimHandleT> {
-        if self.handle == 0 {
-            self.handle = handle + 1;
-            return Some(self.handle);
-        }
-        None
     }
 
     fn line_copy(&mut self, to: usize, from: usize, col: usize, width: usize) {
@@ -3407,11 +3430,7 @@ pub extern "C" fn schar_from_char(mut c: libc::c_int) -> VimSCharT {
 pub unsafe extern "C" fn grid_assign_handle(grid: *mut CScreenGrid) {
     let mut g: ScreenGrid = unsafe { (&*grid).into() };
 
-    unsafe {
-        if let Some(lh) = g.assign_handle(last_grid_handle) {
-            last_grid_handle = lh;
-        }
-    }
+    GRID_HANDLE_ALLOCATOR.assign(&mut g.handle);
 
     unsafe {
         *grid = g.to_cgrid();
@@ -3465,6 +3484,20 @@ pub unsafe extern "C" fn grid_del_lines(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn grid_handle_allocator_assigns_each_handle_once() {
+        let allocator = GridHandleAllocator::new(DEFAULT_GRID_HANDLE);
+        let mut first = 0;
+        let mut second = 0;
+
+        allocator.assign(&mut first);
+        allocator.assign(&mut first);
+        allocator.assign(&mut second);
+
+        assert_eq!(first, DEFAULT_GRID_HANDLE + 1);
+        assert_eq!(second, DEFAULT_GRID_HANDLE + 2);
+    }
 
     #[test]
     fn dirty_columns_track_scroll_and_clear() {
@@ -3574,8 +3607,9 @@ mod tests {
             pending_comp_index_update: true,
         };
 
+        let allocator = GridHandleAllocator::new(DEFAULT_GRID_HANDLE);
         let mut grid: ScreenGrid = (&cgrid).into();
-        assert_eq!(grid.assign_handle(1), Some(2));
+        allocator.assign(&mut grid.handle);
         let cgrid = unsafe { grid.to_cgrid() };
 
         assert_eq!(cgrid.handle, 2);
