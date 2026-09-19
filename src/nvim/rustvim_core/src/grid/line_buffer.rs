@@ -1,8 +1,100 @@
 use super::{
     GlyphMapping, Highlight, TextGlyph, TextGlyphContents, TruncationSide, VimColNrT, VimSAttrT,
     VimSCharT, VirtualColumns, VirtualTextHighlightMode, cell::GridCell, schar_cells_impl,
-    schar_from_ascii, schar_to_ascii,
+    schar_from_ascii, schar_to_ascii, tabstops::TabStops,
 };
+
+/// Source of virtual-column metadata while rendering a text run.
+#[derive(Clone, Copy)]
+pub(super) enum LineTextVirtualColumns<'a> {
+    /// Generate consecutive virtual columns and apply color-column highlighting.
+    Incrementing {
+        color_columns: Option<&'a [VimColNrT]>,
+        color_column_highlight: Highlight,
+    },
+    /// Copy virtual columns supplied by the caller.
+    Provided(&'a [VimColNrT]),
+    /// Mark rendered cells as having no virtual-column information.
+    Unavailable,
+}
+
+/// Parameters for rendering one complete text run.
+pub(super) struct LineTextRenderOptions<'a> {
+    start_col: usize,
+    max_col: usize,
+    attribute: Highlight,
+    virtual_column: VimColNrT,
+    virtual_columns: LineTextVirtualColumns<'a>,
+    tab_stops: &'a TabStops,
+}
+
+impl<'a> LineTextRenderOptions<'a> {
+    /// Creates options for a bounded text rendering operation.
+    pub(super) fn new(
+        start_col: usize,
+        max_col: usize,
+        attribute: Highlight,
+        virtual_column: VimColNrT,
+        virtual_columns: LineTextVirtualColumns<'a>,
+        tab_stops: &'a TabStops,
+    ) -> Self {
+        Self {
+            start_col,
+            max_col,
+            attribute,
+            virtual_column,
+            virtual_columns,
+            tab_stops,
+        }
+    }
+}
+
+/// State returned after rendering one complete text run.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct LineTextRenderResult {
+    pub(super) end_col: usize,
+    pub(super) end_virtual_column: VimColNrT,
+    pub(super) color_columns_consumed: usize,
+    pub(super) color_columns_exhausted: bool,
+}
+
+/// Cursor over the remaining sorted color-column values.
+struct ColorColumnCursor<'a> {
+    columns: &'a [VimColNrT],
+    next: usize,
+    inspected: bool,
+}
+
+impl<'a> ColorColumnCursor<'a> {
+    fn new(columns: &'a [VimColNrT]) -> Self {
+        Self {
+            columns,
+            next: 0,
+            inspected: false,
+        }
+    }
+
+    /// Advances past obsolete columns and reports whether `column` is active.
+    fn is_at(&mut self, column: VimColNrT) -> bool {
+        self.inspected = true;
+        while self
+            .columns
+            .get(self.next)
+            .is_some_and(|&candidate| column > candidate)
+        {
+            self.next += 1;
+        }
+        self.columns.get(self.next) == Some(&column)
+    }
+
+    fn consumed(&self) -> usize {
+        self.next
+    }
+
+    fn exhausted(&self) -> bool {
+        self.inspected && self.next == self.columns.len()
+    }
+}
 
 /// Owned temporary storage for one rendered screen line.
 #[derive(Debug)]
@@ -209,6 +301,107 @@ impl LineBuffer {
             VirtualColumns::Preserve => {}
         }
         true
+    }
+
+    /// Decodes and writes one complete text run.
+    ///
+    /// Tabs are expanded according to `options.tab_stops`. Virtual columns
+    /// are either generated, copied from a supplied slice, or marked
+    /// unavailable. Rendering stops at `options.max_col` or when an input
+    /// cannot be represented without violating line-buffer invariants.
+    pub(super) fn render_text(
+        &mut self,
+        mut text: &[u8],
+        glyph_mapping: &mut GlyphMapping,
+        options: LineTextRenderOptions<'_>,
+    ) -> LineTextRenderResult {
+        let mut col = options.start_col;
+        let mut virtual_column = options.virtual_column;
+        let mut provided_offset = 0;
+        let mut color_columns = match options.virtual_columns {
+            LineTextVirtualColumns::Incrementing {
+                color_columns: Some(columns),
+                ..
+            } => Some(ColorColumnCursor::new(columns)),
+            LineTextVirtualColumns::Incrementing {
+                color_columns: None,
+                ..
+            }
+            | LineTextVirtualColumns::Provided(_)
+            | LineTextVirtualColumns::Unavailable => None,
+        };
+
+        if col <= options.max_col && options.max_col <= self.len() {
+            while !text.is_empty() && col < options.max_col {
+                let mut attribute = options.attribute;
+                if let LineTextVirtualColumns::Incrementing {
+                    color_column_highlight,
+                    ..
+                } = options.virtual_columns
+                    && color_columns
+                        .as_mut()
+                        .is_some_and(|columns| columns.is_at(virtual_column))
+                {
+                    attribute = color_column_highlight.combine(attribute);
+                }
+
+                let max_cells = options.max_col - col;
+                let tab_cells = if text[0] == b'\t' {
+                    options.tab_stops.padding_at(col as VimColNrT)
+                } else {
+                    0
+                };
+                let Some(glyph) = TextGlyph::from_text(text, max_cells, tab_cells, glyph_mapping)
+                else {
+                    break;
+                };
+                let bytes_consumed = glyph.bytes_consumed;
+                let virtual_columns = match options.virtual_columns {
+                    LineTextVirtualColumns::Incrementing { .. } => {
+                        VirtualColumns::Incrementing(virtual_column)
+                    }
+                    LineTextVirtualColumns::Provided(columns) => {
+                        let Some(columns) = columns.get(provided_offset..) else {
+                            break;
+                        };
+                        VirtualColumns::Provided(columns)
+                    }
+                    LineTextVirtualColumns::Unavailable => VirtualColumns::Unavailable,
+                };
+                if !self.put_text_glyph(col, glyph, attribute.0, virtual_columns, max_cells, false)
+                {
+                    break;
+                }
+
+                col += glyph.width;
+                match options.virtual_columns {
+                    LineTextVirtualColumns::Incrementing { .. } => {
+                        let Ok(width) = VimColNrT::try_from(glyph.width) else {
+                            break;
+                        };
+                        let Some(next_virtual_column) = virtual_column.checked_add(width) else {
+                            break;
+                        };
+                        virtual_column = next_virtual_column;
+                    }
+                    LineTextVirtualColumns::Provided(_) => {
+                        provided_offset += glyph.width;
+                    }
+                    LineTextVirtualColumns::Unavailable => {}
+                }
+                text = &text[bytes_consumed..];
+            }
+        }
+
+        let (color_columns_consumed, color_columns_exhausted) = color_columns
+            .map(|columns| (columns.consumed(), columns.exhausted()))
+            .unwrap_or_default();
+        LineTextRenderResult {
+            end_col: col,
+            end_virtual_column: virtual_column,
+            color_columns_consumed,
+            color_columns_exhausted,
+        }
     }
 
     /// Overlays one virtual-text glyph while preserving virtual columns.
@@ -454,5 +647,151 @@ impl LineBuffer {
             }
             col += 1;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn initialized_line_buffer(len: usize) -> LineBuffer {
+        let mut line_buffer = LineBuffer::new(len);
+        line_buffer.fill(0..len, schar_from_ascii(' '), 1, 99);
+        line_buffer
+    }
+
+    fn characters(line_buffer: &LineBuffer) -> Vec<VimSCharT> {
+        line_buffer
+            .cells
+            .iter()
+            .map(|cell| cell.character)
+            .collect()
+    }
+
+    fn attributes(line_buffer: &LineBuffer) -> Vec<VimSAttrT> {
+        line_buffer
+            .cells
+            .iter()
+            .map(|cell| cell.attribute)
+            .collect()
+    }
+
+    fn virtual_columns(line_buffer: &LineBuffer) -> Vec<VimColNrT> {
+        line_buffer
+            .cells
+            .iter()
+            .map(|cell| cell.virtual_column)
+            .collect()
+    }
+
+    #[test]
+    fn renders_text_with_incrementing_virtual_columns() {
+        let mut line_buffer = initialized_line_buffer(5);
+        let mut glyph_mapping = GlyphMapping::new();
+        let tab_stops = TabStops::try_from_options(4, &[]).unwrap();
+
+        let result = line_buffer.render_text(
+            b"a\tb",
+            &mut glyph_mapping,
+            LineTextRenderOptions::new(
+                0,
+                5,
+                Highlight(0),
+                0,
+                LineTextVirtualColumns::Incrementing {
+                    color_columns: Some(&[1, 4]),
+                    color_column_highlight: Highlight(0),
+                },
+                &tab_stops,
+            ),
+        );
+
+        assert_eq!(
+            result,
+            LineTextRenderResult {
+                end_col: 5,
+                end_virtual_column: 5,
+                color_columns_consumed: 1,
+                color_columns_exhausted: false,
+            }
+        );
+        assert_eq!(
+            characters(&line_buffer),
+            [
+                schar_from_ascii('a'),
+                schar_from_ascii(' '),
+                schar_from_ascii(' '),
+                schar_from_ascii(' '),
+                schar_from_ascii('b'),
+            ]
+        );
+        assert_eq!(attributes(&line_buffer), [0; 5]);
+        assert_eq!(virtual_columns(&line_buffer), [0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn renders_text_with_provided_virtual_columns() {
+        let mut line_buffer = initialized_line_buffer(4);
+        let mut glyph_mapping = GlyphMapping::new();
+        let tab_stops = TabStops::try_from_options(8, &[]).unwrap();
+
+        let result = line_buffer.render_text(
+            b"ab",
+            &mut glyph_mapping,
+            LineTextRenderOptions::new(
+                1,
+                4,
+                Highlight(3),
+                50,
+                LineTextVirtualColumns::Provided(&[-2, -3]),
+                &tab_stops,
+            ),
+        );
+
+        assert_eq!(
+            result,
+            LineTextRenderResult {
+                end_col: 3,
+                end_virtual_column: 50,
+                color_columns_consumed: 0,
+                color_columns_exhausted: false,
+            }
+        );
+        assert_eq!(
+            characters(&line_buffer),
+            [
+                schar_from_ascii(' '),
+                schar_from_ascii('a'),
+                schar_from_ascii('b'),
+                schar_from_ascii(' '),
+            ]
+        );
+        assert_eq!(attributes(&line_buffer), [1, 3, 3, 1]);
+        assert_eq!(virtual_columns(&line_buffer), [99, -2, -3, 99]);
+    }
+
+    #[test]
+    fn renders_text_with_unavailable_virtual_columns() {
+        let mut line_buffer = initialized_line_buffer(3);
+        let mut glyph_mapping = GlyphMapping::new();
+        let tab_stops = TabStops::try_from_options(8, &[]).unwrap();
+
+        let result = line_buffer.render_text(
+            b"xy",
+            &mut glyph_mapping,
+            LineTextRenderOptions::new(
+                0,
+                3,
+                Highlight(4),
+                12,
+                LineTextVirtualColumns::Unavailable,
+                &tab_stops,
+            ),
+        );
+
+        assert_eq!(result.end_col, 2);
+        assert_eq!(result.end_virtual_column, 12);
+        assert_eq!(attributes(&line_buffer), [4, 4, 1]);
+        assert_eq!(virtual_columns(&line_buffer), [-1, -1, 99]);
     }
 }
