@@ -315,8 +315,9 @@ static void draw_virt_text(win_T *wp, buf_T *buf, int col_off, int *end_col, int
     }
     if (vt) {
       int vcol = item->draw_col - col_off;
-      int col = draw_virt_text_item(buf, item->draw_col, vt->data.virt_text,
-                                    vt->hl_mode, max_col, vcol, 0, false);
+      int col = linebuf_render_virtual_text(item->draw_col, vt->data.virt_text,
+                                            vt->hl_mode, max_col, vcol, 0, false,
+                                            buf->b_p_ts, buf->b_p_vts_array);
       if (do_eol && ((vt->pos == kVPosEndOfLine) || (vt->pos == kVPosEndOfLineRightAlign))) {
         state->eol_col = col + 1;
       }
@@ -326,66 +327,6 @@ static void draw_virt_text(win_T *wp, buf_T *buf, int col_off, int *end_col, int
       item->draw_col = INT_MIN;  // deactivate
     }
   }
-}
-
-/// @param eol_hl Extend highlight to EOL.
-static int draw_virt_text_item(buf_T *buf, int col, VirtText vt, HlMode hl_mode, int max_col,
-                               int vcol, int skip_cells, bool eol_hl)
-{
-  const char *virt_str = "";
-  int virt_attr = 0;
-  size_t virt_pos = 0;
-  eol_hl &= kv_size(vt) && *kv_A(vt, kv_size(vt) - 1).text == NUL;
-
-  while (col < max_col) {
-    // extending last highlight till the end of line
-    if (eol_hl && *virt_str == NUL && virt_pos == kv_size(vt)) {
-      virt_str = " ";
-    }
-    if (skip_cells >= 0 && *virt_str == NUL) {
-      if (virt_pos >= kv_size(vt)) {
-        break;
-      }
-      virt_attr = 0;
-      virt_str = next_virt_text_chunk(vt, &virt_pos, &virt_attr);
-      if (virt_str == NULL) {
-        break;
-      }
-    }
-    // Skip cells in the text.
-    while (skip_cells > 0 && *virt_str != NUL) {
-      int c_len = utfc_ptr2len(virt_str);
-      int cells = *virt_str == TAB
-                  ? tabstop_padding(vcol, buf->b_p_ts, buf->b_p_vts_array)
-                  : utf_ptr2cells(virt_str);
-      skip_cells -= cells;
-      vcol += cells;
-      virt_str += c_len;
-    }
-    // If a double-width char or TAB doesn't fit, pad with spaces.
-    const char *draw_str = skip_cells < 0 ? " " : virt_str;
-    if (*draw_str == NUL) {
-      continue;
-    }
-    assert(skip_cells <= 0);
-    int max_cells = max_col - col;
-    int tab_cells = *draw_str == TAB
-                    ? tabstop_padding(vcol, buf->b_p_ts, buf->b_p_vts_array)
-                    : 0;
-    size_t bytes_consumed = 0;
-    int cells = linebuf_put_virtual_text_glyph(col, draw_str, max_cells, tab_cells,
-                                               hl_mode, virt_attr, &bytes_consumed);
-    assert(cells > 0);
-    col += cells;
-
-    if (skip_cells < 0) {
-      skip_cells++;
-    } else {
-      vcol += cells;
-      virt_str = draw_str + bytes_consumed;
-    }
-  }
-  return col;
 }
 
 // TODO(bfredl): integrate with grid.c linebuf code? madness?
@@ -2915,7 +2856,9 @@ int win_line(win_T *wp, linenr_T lnum, int startrow, int endrow, int col_rows, b
       }
 
       if (kv_size(fold_vt) > 0) {
-        draw_virt_text_item(buf, win_col_offset, fold_vt, kHlModeCombine, view_width, 0, 0, false);
+        linebuf_render_virtual_text(win_col_offset, fold_vt, kHlModeCombine, view_width,
+                                    0, 0, false, buf->b_p_ts,
+                                    buf->b_p_vts_array);
       }
       draw_virt_text(wp, buf, win_col_offset, &wlv.col, wlv.row);
       // Set increasing virtual columns in grid->vcols[] to set correct curswant
@@ -3173,13 +3116,14 @@ end_check:
         if (virt_row_scroll) {
           virt_line_skip_cells = wp->w_leftcol;
         }
-        draw_virt_text_item(buf,
-                            (virt_line_flags & kVLLeftcol) ? 0 : win_col_offset,
-                            kv_A(virt_lines, virt_line_index).line,
-                            kHlModeReplace,
-                            view_width,
-                            0,
-                            virt_line_skip_cells, true);
+        linebuf_render_virtual_text((virt_line_flags & kVLLeftcol) ? 0 : win_col_offset,
+                                    kv_A(virt_lines, virt_line_index).line,
+                                    kHlModeReplace,
+                                    view_width,
+                                    0,
+                                    virt_line_skip_cells, true,
+                                    buf->b_p_ts,
+                                    buf->b_p_vts_array);
       } else if (wlv.filler_todo <= 0) {
         draw_virt_text(wp, buf, win_col_offset, &draw_col, wlv.row);
       }

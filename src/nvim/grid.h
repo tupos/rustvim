@@ -96,9 +96,10 @@ extern int linebuf_put_text_glyph(int col, const char *text, size_t text_len,
                                   int max_cells, int tab_cells, int attr,
                                   bool inc_vcol, colnr_T first_vcol,
                                   const colnr_T *vcols, size_t *bytes_consumed);
-extern int linebuf_put_virtual_text_glyph(int col, const char *text,
-                                          int max_cells, int tab_cells, int hl_mode,
-                                          int virt_attr, size_t *bytes_consumed);
+extern int linebuf_render_virtual_text(int col, VirtText virtual_text,
+                                       int hl_mode, int max_col, colnr_T vcol,
+                                       int skip_cells, bool eol_hl,
+                                       OptInt tabstop, const colnr_T *variable_tabstops);
 extern int linebuf_update_cell(int col, schar_T sc, bool replace_char, int attr,
                                colnr_T vcol);
 extern void linebuf_put_char_pair(int col, schar_T first, schar_T second);

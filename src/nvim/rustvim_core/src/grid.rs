@@ -2,8 +2,10 @@
 mod cell;
 mod line_buffer;
 mod tabstops;
+mod virtual_text;
 
 use crate::{
+    defines::OptInt,
     generated::enums::{RdbFlags, Slf},
     globals, mbyte, ui,
 };
@@ -20,6 +22,8 @@ use std::{
 
 use cell::GridCell;
 pub use line_buffer::LineBuffer;
+use tabstops::TabStops;
+use virtual_text::{VirtualText, VirtualTextChunk, VirtualTextRenderOptions};
 
 /// if data[0] is 0xFF, then data[1..4] is a 24-bit index (in machine endianness)
 /// otherwise it must be a UTF-8 string of length maximum 4 (no NUL when n=4)
@@ -1932,69 +1936,99 @@ pub unsafe extern "C" fn linebuf_put_text_glyph(
     libc::c_int::try_from(glyph.width).unwrap_or(0)
 }
 
-/// Decodes and overlays one virtual-text glyph.
+/// Copies and renders one complete virtual-text item.
 ///
-/// Invalid inputs leave the line buffer unchanged and return zero.
+/// Invalid inputs leave the line buffer unchanged and return `col`.
 ///
 /// # Safety
 ///
-/// `text` must point to a readable NUL-terminated string, and
-/// `bytes_consumed` must be a valid writable pointer. Neither pointer may alias
-/// Rust-owned line-buffer storage. This function must run on Neovim's main
-/// thread while the highlight tables are not
-/// otherwise accessed.
+/// For a nonempty `virtual_text`, its item pointer must address every
+/// initialized chunk. Each non-null chunk text pointer must address a readable
+/// NUL-terminated string. A non-null `variable_tabstops` must address a
+/// readable count followed by that many initialized widths. These allocations
+/// must remain valid for this call and must not alias Rust-owned storage.
+///
+/// The global line buffer must be initialized. This function must run on
+/// Neovim's main thread while the highlight tables are not otherwise accessed.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn linebuf_put_virtual_text_glyph(
+pub unsafe extern "C" fn linebuf_render_virtual_text(
     col: libc::c_int,
-    text: *const libc::c_char,
-    max_cells: libc::c_int,
-    tab_cells: libc::c_int,
+    virtual_text: CVirtText,
     hl_mode: libc::c_int,
-    virt_attr: VimSAttrT,
-    bytes_consumed: *mut libc::size_t,
+    max_col: libc::c_int,
+    vcol: VimColNrT,
+    skip_cells: libc::c_int,
+    eol_hl: bool,
+    tabstop: OptInt,
+    variable_tabstops: *const VimColNrT,
 ) -> libc::c_int {
-    if text.is_null() || bytes_consumed.is_null() {
-        return 0;
-    }
-    // SAFETY: The caller guarantees that this output pointer is writable.
-    unsafe {
-        *bytes_consumed = 0;
-    }
-
-    let (Ok(col), Ok(max_cells), Ok(tab_cells)) = (
+    let (Ok(start_col), Ok(max_col), Ok(skip_cells)) = (
         usize::try_from(col),
-        usize::try_from(max_cells),
-        usize::try_from(tab_cells),
+        usize::try_from(max_col),
+        usize::try_from(skip_cells),
     ) else {
-        return 0;
+        return col;
     };
-    // SAFETY: The caller guarantees a readable NUL-terminated string.
-    let text = unsafe { CStr::from_ptr(text) }.to_bytes();
-    let glyph = {
-        let mut glyph_map = lock_glyph_mapping();
-        TextGlyph::from_text(text, max_cells, tab_cells, &mut glyph_map)
+
+    // SAFETY: The caller guarantees that the vector describes initialized
+    // virtual-text chunks.
+    let Some(raw_chunks) = (unsafe { virtual_text.as_slice() }) else {
+        return col;
     };
-    let Some(glyph) = glyph else {
-        return 0;
+    let mut chunks = Vec::with_capacity(raw_chunks.len());
+    let mut highlight = Highlight::default();
+    for chunk in raw_chunks {
+        if chunk.hl_id > 0 {
+            highlight = highlight.combine(Highlight::from_group(chunk.hl_id));
+        }
+        if chunk.text.is_null() {
+            continue;
+        }
+
+        // SAFETY: The caller guarantees that each non-null text pointer
+        // addresses a readable NUL-terminated string.
+        let text = unsafe { CStr::from_ptr(chunk.text) }.to_bytes().to_vec();
+        chunks.push(VirtualTextChunk::new(text, highlight));
+        highlight = Highlight::default();
+    }
+    let virtual_text = VirtualText::new(chunks);
+
+    let variable_widths = if variable_tabstops.is_null() {
+        &[]
+    } else {
+        // SAFETY: The caller guarantees that the first value is readable.
+        let Ok(count) = usize::try_from(unsafe { *variable_tabstops }) else {
+            return col;
+        };
+        if count == 0 {
+            &[]
+        } else {
+            // SAFETY: The caller guarantees that the pointer addresses the
+            // count followed by `count` initialized widths.
+            unsafe { std::slice::from_raw_parts(variable_tabstops.add(1), count) }
+        }
     };
-    let source_is_space = text.first() == Some(&b' ');
+    let Ok(tab_stops) = TabStops::try_from_options(tabstop, variable_widths) else {
+        return col;
+    };
 
     let mut line_buffer = LineBufferGuard::acquire();
-    if !line_buffer.put_virtual_text_glyph(
-        col,
-        glyph,
-        virt_attr,
-        VirtualTextHighlightMode::from(hl_mode),
-        source_is_space,
-        max_cells,
-    ) {
-        return 0;
-    }
-    // SAFETY: The caller guarantees that this output pointer is writable.
-    unsafe {
-        *bytes_consumed = glyph.bytes_consumed;
-    }
-    libc::c_int::try_from(glyph.width).unwrap_or(0)
+    let mut glyph_mapping = lock_glyph_mapping();
+    let end_col = virtual_text.render(
+        &mut line_buffer,
+        &mut glyph_mapping,
+        VirtualTextRenderOptions::new(
+            start_col,
+            max_col,
+            vcol,
+            skip_cells,
+            eol_hl,
+            &tab_stops,
+            VirtualTextHighlightMode::from(hl_mode),
+        ),
+    );
+
+    libc::c_int::try_from(end_col).unwrap_or(col)
 }
 
 /// Updates one line-buffer cell and returns the following column.
