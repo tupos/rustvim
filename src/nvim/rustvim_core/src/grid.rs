@@ -21,6 +21,74 @@ pub type VimSScratchT = i32;
 pub type VimHandleT = libc::c_int;
 pub type VimDirtyColT = libc::c_int;
 
+/// Per-row redraw extent used while grid output is throttled.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DirtyColumns {
+    columns: Box<[VimDirtyColT]>,
+}
+
+impl DirtyColumns {
+    /// Creates clean dirty-column state for `rows` rows.
+    fn new(rows: usize) -> Self {
+        Self {
+            columns: vec![0; rows].into_boxed_slice(),
+        }
+    }
+
+    /// Resizes the state while preserving values for rows that still exist.
+    fn resize(&mut self, rows: usize) {
+        let mut columns = vec![0; rows].into_boxed_slice();
+        let copy_len = std::cmp::min(self.columns.len(), columns.len());
+        columns[..copy_len].copy_from_slice(&self.columns[..copy_len]);
+        self.columns = columns;
+    }
+
+    /// Records the furthest changed column in `row`.
+    fn mark(&mut self, row: usize, column: VimDirtyColT) {
+        if let Some(dirty_col) = self.columns.get_mut(row) {
+            *dirty_col = std::cmp::max(*dirty_col, column);
+        }
+    }
+
+    /// Scrolls the per-row state upward and clears the final row.
+    fn scroll_up(&mut self) {
+        let len = self.columns.len();
+        if len == 0 {
+            return;
+        }
+        self.columns.copy_within(1..len, 0);
+        self.columns[len - 1] = 0;
+    }
+
+    /// Returns and clears the dirty column for `row`.
+    fn take(&mut self, row: usize) -> Option<VimDirtyColT> {
+        self.columns.get_mut(row).map(std::mem::take)
+    }
+
+    /// Transfers ownership to the raw representation stored in `CScreenGrid`.
+    fn into_raw(self) -> *mut VimDirtyColT {
+        Box::into_raw(self.columns) as *mut VimDirtyColT
+    }
+
+    /// Reclaims ownership from the raw representation stored in `CScreenGrid`.
+    ///
+    /// # Safety
+    ///
+    /// `columns` must be null or uniquely own a Rust boxed slice containing
+    /// exactly `rows` initialized values.
+    unsafe fn from_raw(columns: *mut VimDirtyColT, rows: usize) -> Option<Self> {
+        if columns.is_null() {
+            return None;
+        }
+        let columns = std::ptr::slice_from_raw_parts_mut(columns, rows);
+        Some(Self {
+            // SAFETY: The caller guarantees that this is the unique pointer
+            // produced by `DirtyColumns::into_raw` with the same row count.
+            columns: unsafe { Box::from_raw(columns) },
+        })
+    }
+}
+
 /// Includes final NUL. MAX_MCO is no longer used, but at least 4*(MAX_MCO+1)+1=29
 /// ensures we can fit all composed chars which did fit before.
 static MAX_SCHAR_SIZE: usize = 32;
@@ -101,10 +169,11 @@ pub struct ScreenGrid {
     pub attrs: Vec<VimSAttrT>,
     pub vcols: Vec<VimColNrT>,
     pub line_offset: Vec<usize>,
-    /// last column that was drawn (not cleared with the default background).
-    /// only used when "throttled" is set. Not allocated by grid_alloc!
-    //dirty_col: Vec<VimDirtyColT>,
-    dirty_col: *mut VimDirtyColT,
+
+    /// Dirty-column tracking while output is throttled.
+    ///
+    /// `None` means that tracking is disabled for this grid.
+    dirty_columns: Option<DirtyColumns>,
 
     /// the size of the allocated grid.
     pub rows: i32,
@@ -161,8 +230,7 @@ impl ScreenGrid {
             attrs: vec![Self::attrs_fill(valid); num_cells],
             vcols: vec![-1; num_cells],
             line_offset: Vec::with_capacity(rows as usize),
-            dirty_col: std::ptr::null_mut(),
-            //dirty_col: Vec::new(),
+            dirty_columns: None,
             rows,
             cols,
             valid: false,
@@ -206,6 +274,9 @@ impl ScreenGrid {
         new_grid.line_offset = Vec::with_capacity(rows as usize);
         new_grid.rows = rows;
         new_grid.cols = cols;
+        if let Some(dirty_columns) = &mut new_grid.dirty_columns {
+            dirty_columns.resize(rows as usize);
+        }
 
         for i in 0..new_grid.rows as usize {
             let offset = i * new_grid.cols as usize;
@@ -245,13 +316,37 @@ impl ScreenGrid {
         self.vcols[range.clone()].copy_from_slice(&src.vcols[src_range.clone()]);
     }
 
+    /// Enables dirty-column tracking and resets every row to clean.
+    fn reset_dirty_columns(&mut self) {
+        self.dirty_columns = Some(DirtyColumns::new(self.rows as usize));
+    }
+
+    /// Records the furthest changed column in `row` when tracking is enabled.
+    fn mark_dirty_column(&mut self, row: usize, column: VimDirtyColT) {
+        if let Some(dirty_columns) = &mut self.dirty_columns {
+            dirty_columns.mark(row, column);
+        }
+    }
+
+    /// Scrolls dirty-column state upward when tracking is enabled.
+    fn scroll_dirty_columns(&mut self) {
+        if let Some(dirty_columns) = &mut self.dirty_columns {
+            dirty_columns.scroll_up();
+        }
+    }
+
+    /// Returns and clears one row's dirty column when tracking is enabled.
+    fn take_dirty_column(&mut self, row: usize) -> Option<VimDirtyColT> {
+        self.dirty_columns.as_mut()?.take(row)
+    }
+
     /// # Safety
     ///
     /// The returned `CScreenGrid` becomes the unique owner of the `chars`,
-    /// `attrs`, `vcols`, and `line_offset` allocations. The caller must not
-    /// duplicate or independently free those pointers, must access them only
-    /// within the lengths described by `rows` and `cols`, and must reconstruct
-    /// at most one `ScreenGrid` from them.
+    /// `attrs`, `vcols`, `line_offset`, and `dirty_col` allocations. The
+    /// caller must not duplicate or independently free those pointers, must
+    /// access them only within the lengths described by `rows` and `cols`, and
+    /// must reconstruct at most one `ScreenGrid` from them.
     pub unsafe fn to_cgrid(self) -> CScreenGrid {
         CScreenGrid {
             handle: self.handle,
@@ -259,8 +354,10 @@ impl ScreenGrid {
             attrs: leak_nonempty_buffer(self.attrs),
             vcols: leak_nonempty_buffer(self.vcols),
             line_offset: leak_nonempty_buffer(self.line_offset),
-            dirty_col: self.dirty_col,
-            //dirty_col: self.dirty_col.leak().as_mut_ptr(),
+            dirty_col: self
+                .dirty_columns
+                .map(DirtyColumns::into_raw)
+                .unwrap_or(std::ptr::null_mut()),
             rows: self.rows,
             cols: self.cols,
             valid: self.valid,
@@ -575,14 +672,8 @@ impl ScreenGrid {
                     clear_attr,
                     is_wrap_set,
                 );
-            } else if !self.dirty_col.is_null() {
-                // TODO(bfredl): really get rid of the extra pseudo terminal in message.c
-                // by using a linebuf_char copy for "throttled message line"
-                unsafe {
-                    if clear_end > *self.dirty_col.add(row) {
-                        *self.dirty_col.add(row) = clear_end;
-                    }
-                }
+            } else {
+                self.mark_dirty_column(row, clear_end);
             }
         }
     }
@@ -2398,14 +2489,16 @@ impl From<&CScreenGrid> for ScreenGrid {
         let attrs = init_ptr!(cgrid.attrs, num_cells);
         let vcols = init_ptr!(cgrid.vcols, num_cells);
         let line_offset = init_ptr!(cgrid.line_offset, cgrid.rows as usize);
+        // SAFETY: The `CScreenGrid` ownership contract guarantees that a
+        // non-null pointer was produced by `DirtyColumns::into_raw`.
+        let dirty_columns = unsafe { DirtyColumns::from_raw(cgrid.dirty_col, cgrid.rows as usize) };
         ScreenGrid {
             handle: cgrid.handle,
             chars,
             attrs,
             vcols,
             line_offset,
-            dirty_col: cgrid.dirty_col,
-            //dirty_col: unsafe { Vec::from_raw_parts(cgrid.dirty_col, 0, old_num_cells) },
+            dirty_columns,
             rows: cgrid.rows,
             cols: cgrid.cols,
             valid: cgrid.valid,
@@ -2855,6 +2948,82 @@ pub unsafe extern "C" fn grid_alloc(
     }
 }
 
+/// Enables dirty-column tracking and resets all rows to clean.
+///
+/// # Safety
+///
+/// `grid` must point to a valid, exclusively accessible `CScreenGrid`. Its
+/// buffers must satisfy the ownership and layout requirements of `ScreenGrid`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn grid_reset_dirty_columns(grid: *mut CScreenGrid) {
+    if grid.is_null() {
+        return;
+    }
+
+    // SAFETY: The caller transfers exclusive ownership of the grid buffers
+    // into Rust for the duration of this function.
+    let mut rust_grid: ScreenGrid = unsafe { (&*grid).into() };
+    rust_grid.reset_dirty_columns();
+
+    // SAFETY: Ownership of every grid allocation is returned exactly once.
+    unsafe {
+        *grid = rust_grid.to_cgrid();
+    }
+}
+
+/// Scrolls dirty-column state upward by one row.
+///
+/// # Safety
+///
+/// `grid` must point to a valid, exclusively accessible `CScreenGrid`. Its
+/// buffers must satisfy the ownership and layout requirements of `ScreenGrid`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn grid_scroll_dirty_columns(grid: *mut CScreenGrid) {
+    if grid.is_null() {
+        return;
+    }
+
+    // SAFETY: The caller transfers exclusive ownership of the grid buffers
+    // into Rust for the duration of this function.
+    let mut rust_grid: ScreenGrid = unsafe { (&*grid).into() };
+    rust_grid.scroll_dirty_columns();
+
+    // SAFETY: Ownership of every grid allocation is returned exactly once.
+    unsafe {
+        *grid = rust_grid.to_cgrid();
+    }
+}
+
+/// Returns and clears the dirty column for one row.
+///
+/// # Safety
+///
+/// `grid` must point to a valid, exclusively accessible `CScreenGrid`. Its
+/// buffers must satisfy the ownership and layout requirements of `ScreenGrid`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn grid_take_dirty_column(
+    grid: *mut CScreenGrid,
+    row: libc::c_int,
+) -> VimDirtyColT {
+    if grid.is_null() {
+        return 0;
+    }
+
+    // SAFETY: The caller transfers exclusive ownership of the grid buffers
+    // into Rust for the duration of this function.
+    let mut rust_grid: ScreenGrid = unsafe { (&*grid).into() };
+    let dirty_col = usize::try_from(row)
+        .ok()
+        .and_then(|row| rust_grid.take_dirty_column(row))
+        .unwrap_or_default();
+
+    // SAFETY: Ownership of every grid allocation is returned exactly once.
+    unsafe {
+        *grid = rust_grid.to_cgrid();
+    }
+    dirty_col
+}
+
 /// # Safety
 ///
 /// `grid` must point to a valid, exclusively accessible `CScreenGrid`. Its
@@ -2867,6 +3036,7 @@ pub unsafe extern "C" fn grid_free(grid: *mut CScreenGrid) {
         (*grid).attrs = std::ptr::null_mut();
         (*grid).vcols = std::ptr::null_mut();
         (*grid).line_offset = std::ptr::null_mut();
+        (*grid).dirty_col = std::ptr::null_mut();
     }
 }
 
@@ -3227,6 +3397,45 @@ pub unsafe extern "C" fn grid_del_lines(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dirty_columns_track_scroll_and_clear() {
+        let mut dirty_columns = DirtyColumns::new(3);
+
+        dirty_columns.mark(0, 2);
+        dirty_columns.mark(0, 1);
+        dirty_columns.mark(1, 3);
+        assert_eq!(&*dirty_columns.columns, [2, 3, 0]);
+
+        dirty_columns.scroll_up();
+        assert_eq!(&*dirty_columns.columns, [3, 0, 0]);
+        assert_eq!(dirty_columns.take(0), Some(3));
+        assert_eq!(&*dirty_columns.columns, [0, 0, 0]);
+        assert_eq!(dirty_columns.take(3), None);
+    }
+
+    #[test]
+    fn dirty_columns_round_trip_through_c_grid() {
+        let mut line_buffer = LineBuffer::new(4);
+        let mut grid = ScreenGrid::new(2, 4, true, &mut line_buffer);
+        assert!(grid.dirty_columns.is_none());
+
+        grid.reset_dirty_columns();
+        grid.mark_dirty_column(1, 3);
+
+        // SAFETY: This test transfers every allocation to `cgrid` exactly once.
+        let cgrid = unsafe { grid.to_cgrid() };
+        assert!(!cgrid.dirty_col.is_null());
+
+        // `cgrid` still uniquely owns all transferred allocations.
+        let grid: ScreenGrid = (&cgrid).into();
+        assert_eq!(
+            grid.dirty_columns
+                .as_ref()
+                .map(|dirty_columns| &*dirty_columns.columns),
+            Some([0, 3].as_slice())
+        );
+    }
 
     #[test]
     fn assigning_handle_preserves_unallocated_grid_buffers() {

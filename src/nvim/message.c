@@ -205,8 +205,7 @@ void msg_grid_validate(void)
     grid_alloc(&msg_grid, Rows, Columns, false, true);
     msg_grid.zindex = kZIndexMessages;
 
-    xfree(msg_grid.dirty_col);
-    msg_grid.dirty_col = xcalloc((size_t)Rows, sizeof(*msg_grid.dirty_col));
+    grid_reset_dirty_columns(&msg_grid);
 
     // Tricky: allow resize while pager or ex mode is active
     int pos = (State & MODE_ASKMORE) ? 0 : MAX(max_rows - msg_scrolled, 0);
@@ -222,7 +221,6 @@ void msg_grid_validate(void)
   } else if (!should_alloc && msg_grid.chars) {
     ui_comp_remove_grid(&msg_grid);
     grid_free(&msg_grid);
-    XFREE_CLEAR(msg_grid.dirty_col);
     ui_call_grid_destroy(msg_grid.handle);
     msg_grid.throttled = false;
     msg_grid_adj.row_offset = 0;
@@ -2641,9 +2639,7 @@ void msg_scroll_up(bool may_throttle, bool zerocmd)
     }
   } else {
     grid_del_lines(&msg_grid, 0, 1, msg_grid.rows, 0, msg_grid.cols);
-    memmove(msg_grid.dirty_col, msg_grid.dirty_col + 1,
-            (size_t)(msg_grid.rows - 1) * sizeof(*msg_grid.dirty_col));
-    msg_grid.dirty_col[msg_grid.rows - 1] = 0;
+    grid_scroll_dirty_columns(&msg_grid);
   }
 
   grid_clear(&msg_grid_adj, Rows - 1, Rows, 0, Columns, HL_ATTR(HLF_MSG));
@@ -2690,9 +2686,9 @@ void msg_scroll_flush(void)
     for (int i = MAX(Rows - MAX(delta, 1), 0); i < Rows; i++) {
       int row = i - msg_grid_pos;
       assert(row >= 0);
-      ui_line(&msg_grid, row, false, 0, msg_grid.dirty_col[row], msg_grid.cols,
+      int dirty_col = grid_take_dirty_column(&msg_grid, row);
+      ui_line(&msg_grid, row, false, 0, dirty_col, msg_grid.cols,
               HL_ATTR(HLF_MSG), false);
-      msg_grid.dirty_col[row] = 0;
     }
   }
   msg_scrolled_at_flush = msg_scrolled;

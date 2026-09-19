@@ -50,8 +50,9 @@ struct ScreenGrid {
   colnr_T *vcols;
   size_t *line_offset;
 
-  // last column that was drawn (not cleared with the default background).
-  // only used when "throttled" is set. Not allocated by grid_alloc!
+  // Rust-owned storage for the last column drawn without the default
+  // background in each row. C code must use the grid dirty-column functions
+  // to access it. Only allocated for grids that enable throttling.
   int *dirty_col;
 
   // the size of the allocated grid.
