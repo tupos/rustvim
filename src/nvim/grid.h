@@ -24,6 +24,8 @@ EXTERN GridView default_gridview INIT( = { .target = &default_grid });
 /// While resizing the screen this flag is set.
 EXTERN bool resizing_screen INIT( = 0);
 
+// Temporary buffers for rendering a single screen line so it can be compared
+// with its previous contents to calculate the smallest delta.
 EXTERN schar_T *linebuf_char INIT( = NULL);
 EXTERN sattr_T *linebuf_attr INIT( = NULL);
 EXTERN colnr_T *linebuf_vcol INIT( = NULL);

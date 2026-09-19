@@ -29,11 +29,6 @@
 
 #include "grid.c.generated.h"
 
-// temporary buffer for rendering a single screenline, so it can be
-// compared with previous contents to calculate smallest delta.
-// Per-cell attributes
-size_t linebuf_size = 0;
-
 #ifdef ORDER_BIG_ENDIAN
 # define schar_idx(sc) (sc & (0x00FFFFFF))
 #else

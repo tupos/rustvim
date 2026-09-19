@@ -8,7 +8,7 @@ use std::{
     collections::BTreeMap,
     ffi::CStr,
     rc::Rc,
-    sync::atomic::{AtomicI32, Ordering},
+    sync::atomic::{AtomicI32, AtomicUsize, Ordering},
 };
 
 /// if data[0] is 0xFF, then data[1..4] is a 24-bit index (in machine endianness)
@@ -133,6 +133,9 @@ impl GridHandleAllocator {
 
 static GRID_HANDLE_ALLOCATOR: GridHandleAllocator = GridHandleAllocator::new(DEFAULT_GRID_HANDLE);
 
+/// Capacity shared by the four process-global line-buffer allocations.
+static LINE_BUFFER_CAPACITY: AtomicUsize = AtomicUsize::new(0);
+
 unsafe extern "C" {
     static mut full_screen: bool;
     static mut rdb_flags: libc::c_uint;
@@ -149,7 +152,6 @@ unsafe extern "C" {
     static mut linebuf_attr: *mut VimSAttrT;
     static mut linebuf_vcol: *mut VimColNrT;
     static mut linebuf_scratch: *mut VimSScratchT;
-    static mut linebuf_size: libc::size_t;
 
     fn decor_check_invalid_glyphs();
     fn check_chars_options() -> bool;
@@ -877,9 +879,9 @@ impl LineBuffer {
     /// This function is highly usafe!!!. If you are not carefull you will easily
     /// leak memory or produce UB. It should be called only after the initial
     /// line buffer was allocated.
-    unsafe fn from_cline_buffer_ref(clb: &CLineBufferRef) -> Self {
+    unsafe fn from_cline_buffer_ref(clb: &CLineBufferRef<'_>) -> Self {
         unsafe {
-            let bsz = *clb.size;
+            let bsz = clb.capacity();
             Self {
                 chars: Vec::from_raw_parts(*clb.chars, bsz, bsz),
                 attrs: Vec::from_raw_parts(*clb.attrs, bsz, bsz),
@@ -892,14 +894,14 @@ impl LineBuffer {
     /// This function is highly usafe!!!. If you are not carefull you will easily
     /// leak memory or produce UB. It should be called only after the ownership
     /// of the existing memory was taken by the call to from_cline_buffer.
-    unsafe fn into_cline_buffer_ref(self) -> CLineBufferRef {
+    unsafe fn into_cline_buffer_ref(self) -> CLineBufferRef<'static> {
         let clb = CLineBufferRef::new();
         unsafe {
             *clb.chars = self.chars.leak().as_mut_ptr();
             *clb.attrs = self.attrs.leak().as_mut_ptr();
             *clb.vcols = self.vcols.leak().as_mut_ptr();
             *clb.scratch = self.scratch.leak().as_mut_ptr();
-            *clb.size = self.size;
+            clb.set_capacity(self.size);
         }
         clb
     }
@@ -978,24 +980,37 @@ impl LineBuffer {
 }
 //                                                                  abcdef           fedcba
 #[derive(Debug)]
-pub struct CLineBufferRef {
+pub struct CLineBufferRef<'a> {
     chars: *mut *mut VimSCharT,
     attrs: *mut *mut VimSAttrT,
     vcols: *mut *mut VimColNrT,
     scratch: *mut *mut VimSScratchT,
-    size: *mut libc::size_t,
+    capacity: &'a AtomicUsize,
 }
 
-impl CLineBufferRef {
+impl CLineBufferRef<'static> {
     fn new() -> Self {
         Self {
             chars: &raw mut linebuf_char,
             attrs: &raw mut linebuf_attr,
             vcols: &raw mut linebuf_vcol,
             scratch: &raw mut linebuf_scratch,
-            size: &raw mut linebuf_size,
+            capacity: &LINE_BUFFER_CAPACITY,
         }
     }
+}
+
+impl CLineBufferRef<'_> {
+    /// Returns the capacity shared by all four line-buffer allocations.
+    fn capacity(&self) -> usize {
+        self.capacity.load(Ordering::Relaxed)
+    }
+
+    /// Records the capacity shared by all four line-buffer allocations.
+    fn set_capacity(&self, capacity: usize) {
+        self.capacity.store(capacity, Ordering::Relaxed);
+    }
+
     fn alloc(&self, size: usize) {
         let lb = LineBuffer::new(size);
         unsafe {
@@ -1033,21 +1048,19 @@ impl CLineBufferRef {
     /// # Safety
     ///
     /// Each non-null pointer must uniquely own the corresponding Rust vector
-    /// allocation, and `size` must be its capacity. The storage must not be
-    /// accessed after this call.
+    /// allocation, and the recorded capacity must match each allocation. The
+    /// storage must not be accessed after this call.
     unsafe fn release(&self) {
-        // SAFETY: The caller guarantees that `size` remains valid throughout
-        // the operation.
-        let size = unsafe { *self.size };
+        let capacity = self.capacity();
         // SAFETY: The caller guarantees unique ownership of all four
         // allocations and that they share the recorded capacity.
         unsafe {
-            Self::release_buffer(self.chars, size);
-            Self::release_buffer(self.attrs, size);
-            Self::release_buffer(self.vcols, size);
-            Self::release_buffer(self.scratch, size);
-            *self.size = 0;
+            Self::release_buffer(self.chars, capacity);
+            Self::release_buffer(self.attrs, capacity);
+            Self::release_buffer(self.vcols, capacity);
+            Self::release_buffer(self.scratch, capacity);
         }
+        self.set_capacity(0);
     }
 }
 
@@ -3537,13 +3550,13 @@ mod tests {
         std::mem::forget(vcols);
         std::mem::forget(scratch);
 
-        let mut raw_size = size;
+        let capacity = AtomicUsize::new(size);
         let line_buffer = CLineBufferRef {
             chars: &raw mut chars_ptr,
             attrs: &raw mut attrs_ptr,
             vcols: &raw mut vcols_ptr,
             scratch: &raw mut scratch_ptr,
-            size: &raw mut raw_size,
+            capacity: &capacity,
         };
 
         // SAFETY: The four pointers uniquely own the forgotten vectors above,
@@ -3556,7 +3569,7 @@ mod tests {
         assert!(attrs_ptr.is_null());
         assert!(vcols_ptr.is_null());
         assert!(scratch_ptr.is_null());
-        assert_eq!(raw_size, 0);
+        assert_eq!(capacity.load(Ordering::Relaxed), 0);
     }
 
     #[test]
