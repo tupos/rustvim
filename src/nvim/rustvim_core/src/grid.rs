@@ -7,10 +7,9 @@ use crate::{
     globals, mbyte, ui,
 };
 use std::{
-    borrow::{Borrow, Cow},
+    borrow::Cow,
     collections::BTreeMap,
     ffi::CStr,
-    rc::Rc,
     sync::{
         Mutex, MutexGuard,
         atomic::{AtomicI32, Ordering},
@@ -3074,28 +3073,26 @@ impl GlyphBuff {
 //
 // The maximum byte size of a glyph is MAX_SCHAR_SIZE (including the final NUL).
 struct GlyphMapping {
-    /// Stores mapping of `VimSCharT` to the bytes. The key type is composed
-    /// of (in machine endianness) 4 bytes where the first byte is 0xFF and the
-    /// subsequent 3 bytes are used as a key in glyph cache.
-    /// This is possible as an escape char 0xFF is an invalid UTF-8.
-    dict: BTreeMap<VimSCharT, Rc<GlyphBuff>>,
-    /// The map is used to quickly search the key for insertion into the
-    /// glyph cache.
-    index: BTreeMap<Rc<GlyphBuff>, VimSCharT>,
-    /// Is used to determine the next mapping when a new glyph is inserted.
-    /// It is a counter that is incremented by an insertion into the dict.
-    next_free: VimSCharT,
+    /// Interned glyphs in the order in which they were inserted.
+    ///
+    /// A glyph's position is the index encoded in its `VimSCharT` reference.
+    glyphs: Vec<GlyphBuff>,
+    /// Finds an existing encoded reference without scanning `glyphs`.
+    index: BTreeMap<GlyphBuff, VimSCharT>,
 }
 
 impl GlyphMapping {
+    /// Number of cached glyphs after which screen users must clear the cache.
+    const CLEAR_THRESHOLD: usize = 1 << 21;
+
     /// Constructs a new empty `GlyphMapping`
     const fn new() -> Self {
         Self {
-            dict: BTreeMap::new(),
+            glyphs: Vec::new(),
             index: BTreeMap::new(),
-            next_free: Self::to_schart(0),
         }
     }
+
     /// Converts 3 bytes index into the 4 bytes schart value
     const fn to_schart(idx: VimSCharT) -> VimSCharT {
         if cfg!(target_endian = "big") {
@@ -3104,13 +3101,7 @@ impl GlyphMapping {
             0xFF + (idx << 8)
         }
     }
-    /// Increments a 3 byte index stored in `next_free` and return a 4 byte
-    /// schart with the 0xFF byte set.
-    const fn get_next_free(&self) -> VimSCharT {
-        let mut idx = Self::extract_index(self.next_free);
-        idx += 1;
-        Self::to_schart(idx)
-    }
+
     /// Extracts a 3 bytes index from the schart which is stored as data[1..3(including)]
     const fn extract_index(val: VimSCharT) -> VimSCharT {
         if cfg!(target_endian = "big") {
@@ -3119,6 +3110,7 @@ impl GlyphMapping {
             val >> 8
         }
     }
+
     /// Determines if the given schart is used as a mapping into glyph cache
     /// or it is a normal UTF-8 character.
     fn is_glyph_mapping_schart(c: VimSCharT) -> bool {
@@ -3127,21 +3119,25 @@ impl GlyphMapping {
     /// Inserts into the cache. Returns the mapping of `VimSCharT` to bytes,
     /// that are used in the grid to draw an actual content of the cell.
     fn insert(&mut self, val: &[u8]) -> VimSCharT {
-        let k = Rc::new(GlyphBuff::from_bytes(val));
-        if let Some(idx) = self.index.get(&k) {
-            return *idx;
+        let glyph = GlyphBuff::from_bytes(val);
+        if let Some(&mapping) = self.index.get(&glyph) {
+            return mapping;
         }
 
-        let new_mapping = self.next_free;
-        assert!(new_mapping < 0xFFFFFFFF);
-        self.dict.insert(new_mapping, k.clone());
-        self.index.insert(k, new_mapping);
-        self.next_free = self.get_next_free();
+        let glyph_index =
+            VimSCharT::try_from(self.glyphs.len()).expect("glyph index must fit in VimSCharT");
+        let new_mapping = Self::to_schart(glyph_index);
+        assert!(new_mapping < VimSCharT::MAX);
+
+        self.glyphs.push(glyph.clone());
+        self.index.insert(glyph, new_mapping);
         new_mapping
     }
+
     /// Returns the bytes from the mapping schart -> bytes
     fn get_bytes(&self, c: VimSCharT) -> Option<&GlyphBuff> {
-        self.dict.get(&c).map(|glyph_buff| glyph_buff.borrow())
+        let index = usize::try_from(Self::extract_index(c)).ok()?;
+        self.glyphs.get(index)
     }
 
     /// Resolves an inline screen character or a glyph-cache index to its
@@ -3168,26 +3164,32 @@ impl GlyphMapping {
 
     /// Returns the length of the bytes from the mapping schart -> bytes
     fn get_len(&self, c: VimSCharT) -> Option<usize> {
-        self.dict.get(&c).map(|glyph_buff| glyph_buff.len as usize)
+        self.get_bytes(c).map(|glyph| glyph.len as usize)
     }
-    /// Clears mapping if the mapping is full. Empties `dict`, `index` and
-    /// resets the `next_free`
+
+    /// Clears the mapping unless it has reached the cache-clear threshold.
     fn clear_if_full(&mut self) {
         if self.is_full() {
             return;
         }
         self.clear();
     }
+
     /// Checks if the mapping is full. Technically the mapping is full when
     /// we stored 2**24 - 1 values. However we check for 2**21
     fn is_full(&self) -> bool {
-        Self::extract_index(self.next_free) >= (1 << 21)
+        Self::has_reached_clear_threshold(self.glyphs.len())
     }
+
+    /// Checks the cache-clear threshold without requiring an allocated cache.
+    const fn has_reached_clear_threshold(glyph_count: usize) -> bool {
+        glyph_count >= Self::CLEAR_THRESHOLD
+    }
+
     /// Clears the contents of the mapping
     fn clear(&mut self) {
-        self.dict.clear();
+        self.glyphs.clear();
         self.index.clear();
-        self.next_free = Self::to_schart(0);
     }
 }
 
@@ -4455,35 +4457,37 @@ mod tests {
         }
     }
     #[test]
-    fn glyph_mapping_get_next_free() {
-        let gc = GlyphMapping::new();
-        if cfg!(target_endian = "big") {
-            assert_eq!(gc.get_next_free(), 0xFF000001);
-        } else {
-            assert_eq!(gc.get_next_free(), 0x01FF);
-        }
-    }
-    #[test]
     fn glyph_mapping_insert() {
         let mut gm = GlyphMapping::new();
         let bytes = [0x73, 0xcc, 0xb8, 0xcc, 0x89, 0xcc, 0xbf];
 
         let mapping = gm.insert(&bytes);
-        assert!(gm.dict.contains_key(&mapping));
         assert_eq!(mapping, GlyphMapping::to_schart(0));
-        assert_eq!(gm.next_free, GlyphMapping::to_schart(1));
+        assert_eq!(gm.get_bytes(mapping), Some(&GlyphBuff::from_bytes(&bytes)));
 
         let existing_mapping = gm.insert(&bytes);
         assert_eq!(mapping, existing_mapping);
-        assert_eq!(gm.dict.len(), 1);
+        assert_eq!(gm.glyphs.len(), 1);
         assert_eq!(gm.index.len(), 1);
+
+        let next_mapping = gm.insert(b"another");
+        assert_eq!(next_mapping, GlyphMapping::to_schart(1));
+
+        gm.clear();
+        assert!(gm.glyphs.is_empty());
+        assert!(gm.index.is_empty());
+        assert_eq!(gm.insert(&bytes), GlyphMapping::to_schart(0));
     }
     #[test]
-    fn glyph_mapping_is_full() {
-        let mut gm = GlyphMapping::new();
+    fn glyph_mapping_fullness_threshold() {
+        let gm = GlyphMapping::new();
         assert!(!gm.is_full());
-        gm.next_free = VimSCharT::from_le_bytes([0xFF, 0x00, 0x00, 0x20]);
-        assert!(gm.is_full());
+        assert!(!GlyphMapping::has_reached_clear_threshold(
+            GlyphMapping::CLEAR_THRESHOLD - 1
+        ));
+        assert!(GlyphMapping::has_reached_clear_threshold(
+            GlyphMapping::CLEAR_THRESHOLD
+        ));
     }
     #[test]
     fn schar_from_bytes() {
