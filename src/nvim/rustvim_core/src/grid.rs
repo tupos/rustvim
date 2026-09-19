@@ -964,6 +964,30 @@ impl LineBuffer {
         true
     }
 
+    /// Fills a virtual-column range with consecutive values.
+    ///
+    /// Returns whether the complete range belongs to the initialized buffer
+    /// and every generated virtual column is representable.
+    fn fill_vcols_from(&mut self, range: std::ops::Range<usize>, first_vcol: VimColNrT) -> bool {
+        let Some(vcols) = self.vcols.get_mut(range) else {
+            return false;
+        };
+        let Some(last_offset) = vcols.len().checked_sub(1) else {
+            return true;
+        };
+        let Ok(last_offset) = VimColNrT::try_from(last_offset) else {
+            return false;
+        };
+        if first_vcol.checked_add(last_offset).is_none() {
+            return false;
+        }
+
+        for (offset, vcol) in vcols.iter_mut().enumerate() {
+            *vcol = first_vcol + offset as VimColNrT;
+        }
+        true
+    }
+
     /// Fills character and attribute cells while preserving virtual columns.
     ///
     /// Returns whether the complete range belongs to the initialized buffer.
@@ -1891,6 +1915,27 @@ pub extern "C" fn linebuf_update_cell(
     } else {
         col
     }
+}
+
+/// Fills a line-buffer range with consecutive virtual columns.
+///
+/// Negative positions, negative widths, integer overflow, and out-of-bounds
+/// ranges leave the line buffer unchanged.
+#[unsafe(no_mangle)]
+pub extern "C" fn linebuf_fill_vcols_from(
+    start_col: libc::c_int,
+    width: libc::c_int,
+    first_vcol: VimColNrT,
+) {
+    if start_col < 0 || width < 0 {
+        return;
+    }
+    let Some(end_col) = start_col.checked_add(width) else {
+        return;
+    };
+
+    let mut line_buffer = LineBufferGuard::acquire();
+    line_buffer.fill_vcols_from(start_col as usize..end_col as usize, first_vcol);
 }
 
 /// Writes a two-cell character sequence without changing cell metadata.
@@ -3807,6 +3852,24 @@ mod tests {
         assert_eq!(line_buffer.attrs, [1, 20, 30]);
         assert_eq!(line_buffer.vcols, [4, 50, 60]);
         assert!(!line_buffer.update_cell(3, Some(0), 0, 0));
+    }
+
+    #[test]
+    fn line_buffer_fills_consecutive_virtual_columns() {
+        let mut line_buffer = LineBuffer::new(5);
+        line_buffer.chars.fill(schar_from_ascii('x'));
+        line_buffer.attrs.fill(7);
+        line_buffer.vcols.fill(9);
+
+        assert!(line_buffer.fill_vcols_from(1..4, 20));
+
+        assert_eq!(line_buffer.chars, [schar_from_ascii('x'); 5]);
+        assert_eq!(line_buffer.attrs, [7; 5]);
+        assert_eq!(line_buffer.vcols, [9, 20, 21, 22, 9]);
+
+        assert!(!line_buffer.fill_vcols_from(4..6, 0));
+        assert!(!line_buffer.fill_vcols_from(0..2, VimColNrT::MAX));
+        assert_eq!(line_buffer.vcols, [9, 20, 21, 22, 9]);
     }
 
     #[test]

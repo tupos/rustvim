@@ -2907,9 +2907,7 @@ int win_line(win_T *wp, linenr_T lnum, int startrow, int endrow, int col_rows, b
         decor_redraw_eol(wp, &decor_state, &wlv.line_attr, wlv.col + eol_skip);
       }
 
-      for (int i = wlv.col; i < view_width; i++) {
-        linebuf_vcol[wlv.off + (i - wlv.col)] = wlv.vcol + (i - wlv.col);
-      }
+      linebuf_fill_vcols_from(wlv.off, view_width - wlv.col, wlv.vcol);
 
       if (((wp->w_p_cuc
             && wp->w_virtcol >= vcol_hlc(wlv) - eol_hl_off
