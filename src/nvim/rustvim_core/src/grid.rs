@@ -1,6 +1,7 @@
 // vim: sw=4
 mod cell;
 mod line_buffer;
+mod tabstops;
 
 use crate::{
     generated::enums::{RdbFlags, Slf},
