@@ -151,7 +151,6 @@ unsafe extern "C" {
     static mut linebuf_char: *mut VimSCharT;
     static mut linebuf_attr: *mut VimSAttrT;
     static mut linebuf_vcol: *mut VimColNrT;
-    static mut linebuf_scratch: *mut VimSScratchT;
 
     fn decor_check_invalid_glyphs();
     fn check_chars_options() -> bool;
@@ -908,7 +907,6 @@ impl LineBuffer {
             linebuf_char = Self::c_pointer(&mut self.chars);
             linebuf_attr = Self::c_pointer(&mut self.attrs);
             linebuf_vcol = Self::c_pointer(&mut self.vcols);
-            linebuf_scratch = Self::c_pointer(&mut self.scratch);
         }
     }
 

@@ -29,7 +29,6 @@ EXTERN bool resizing_screen INIT( = 0);
 EXTERN schar_T *linebuf_char INIT( = NULL);
 EXTERN sattr_T *linebuf_attr INIT( = NULL);
 EXTERN colnr_T *linebuf_vcol INIT( = NULL);
-EXTERN char *linebuf_scratch INIT( = NULL);
 
 /// flags for grid_put_linebuf()
 enum {
