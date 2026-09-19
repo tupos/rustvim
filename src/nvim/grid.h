@@ -95,6 +95,10 @@ extern int linebuf_fill_chars_and_attrs(int start_col, int width, schar_T sc,
 extern int linebuf_put_cell(int col, schar_T sc, int attr, colnr_T vcol);
 extern int linebuf_put_rendered_glyph(int col, schar_T sc, int attr,
                                       colnr_T vcol);
+extern int linebuf_put_text_glyph(int col, const char *text, size_t text_len,
+                                  int max_cells, int tab_cells, int attr,
+                                  bool inc_vcol, colnr_T first_vcol,
+                                  const colnr_T *vcols, size_t *bytes_consumed);
 extern int linebuf_update_cell(int col, schar_T sc, bool replace_char, int attr,
                                colnr_T vcol);
 extern void linebuf_put_char_pair(int col, schar_T first, schar_T second);

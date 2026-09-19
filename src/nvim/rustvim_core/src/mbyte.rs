@@ -12,6 +12,9 @@ unsafe extern "C" {
     #[link_name = "utf_ptr2char"]
     fn utf_ptr2char_ffi(p_in: *const libc::c_char) -> libc::c_int;
 
+    #[link_name = "utf_iscomposing_first"]
+    fn utf_iscomposing_first_ffi(c: libc::c_int) -> bool;
+
     #[link_name = "utf_ptr2len"]
     fn utf_ptr2len_ffi(p_in: *const libc::c_char) -> libc::c_int;
 
@@ -40,6 +43,31 @@ pub fn utf_ptr2char(p_in: &CStr) -> libc::c_int {
     // SAFETY: CStr guarantees a non-null pointer to a readable,
     // NUL-terminated byte sequence for the duration of this call.
     unsafe { utf_ptr2char_ffi(p_in.as_ptr()) }
+}
+
+/// Returns the first codepoint in a bounded byte slice.
+///
+/// The local trailing NUL gives Neovim's extended UTF-8 decoder enough
+/// readable input for every supported sequence without requiring the source
+/// slice itself to be NUL-terminated.
+pub(crate) fn first_codepoint(text: &[u8]) -> libc::c_int {
+    if text.is_empty() {
+        return 0;
+    }
+
+    const MAX_UTF8_BYTES: usize = 6;
+    let mut terminated = [0; MAX_UTF8_BYTES + 1];
+    let copy_len = text.len().min(MAX_UTF8_BYTES);
+    terminated[..copy_len].copy_from_slice(&text[..copy_len]);
+    let input =
+        CStr::from_bytes_until_nul(&terminated).expect("local UTF-8 input is NUL-terminated");
+    utf_ptr2char(input)
+}
+
+/// Returns whether a codepoint needs a leading space in a screen cell.
+pub(crate) fn is_composing_first(codepoint: libc::c_int) -> bool {
+    // SAFETY: The C function is pure and accepts every integer value.
+    unsafe { utf_iscomposing_first_ffi(codepoint) }
 }
 
 /// Returns the byte length of the first codepoint using Neovim's UTF-8 rules.

@@ -858,6 +858,101 @@ enum TruncationSide {
     Right,
 }
 
+/// Screen-cell contents produced from one text glyph.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TextGlyphContents {
+    /// One screen character, with an empty continuation cell when it is wide.
+    Character(VimSCharT),
+    /// A run of spaces produced by a tab or a glyph clipped at the line edge.
+    Spaces,
+}
+
+/// One text glyph prepared for insertion into a line buffer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TextGlyph {
+    contents: TextGlyphContents,
+    width: usize,
+    bytes_consumed: usize,
+}
+
+impl TextGlyph {
+    /// Decodes the first glyph in `text` using Neovim's screen-cell rules.
+    ///
+    /// Tabs become a bounded run of spaces. A non-tab glyph that does not fit
+    /// becomes one space without consuming input, matching `line_putchar()`.
+    fn from_text(
+        text: &[u8],
+        max_cells: usize,
+        tab_cells: usize,
+        glyph_map: &mut GlyphMapping,
+    ) -> Option<Self> {
+        if text.is_empty() || max_cells == 0 {
+            return None;
+        }
+        let bytes_consumed = mbyte::first_cluster_len(text);
+        if bytes_consumed == 0 {
+            return None;
+        }
+
+        if text[0] == b'\t' {
+            if tab_cells == 0 {
+                return None;
+            }
+            return Some(Self {
+                contents: TextGlyphContents::Spaces,
+                width: tab_cells.min(max_cells),
+                bytes_consumed,
+            });
+        }
+
+        let width = usize::try_from(mbyte::first_char_cells(text)).ok()?;
+        if width == 0 {
+            return None;
+        }
+        if width > max_cells {
+            return Some(Self {
+                contents: TextGlyphContents::Spaces,
+                width: 1,
+                bytes_consumed: 0,
+            });
+        }
+
+        Some(Self {
+            contents: TextGlyphContents::Character(Self::screen_character(text, glyph_map)),
+            width,
+            bytes_consumed,
+        })
+    }
+
+    /// Converts the first text cluster to the representation stored in a cell.
+    fn screen_character(text: &[u8], glyph_map: &mut GlyphMapping) -> VimSCharT {
+        let prepend_space = mbyte::is_composing_first(mbyte::first_codepoint(text));
+        let max_text_len = MAX_SCHAR_SIZE - 1 - usize::from(prepend_space);
+        let bounded_text = &text[..text.len().min(max_text_len)];
+        let glyph_len = mbyte::first_cluster_len(bounded_text);
+
+        if glyph_len == 1 && text[0] >= 0x80 {
+            return 0;
+        }
+
+        let prefix_len = usize::from(prepend_space);
+        let mut bytes = [0; MAX_SCHAR_SIZE - 1];
+        if prepend_space {
+            bytes[0] = b' ';
+        }
+        bytes[prefix_len..prefix_len + glyph_len].copy_from_slice(&text[..glyph_len]);
+        schar_from_bytes(&bytes[..prefix_len + glyph_len], glyph_map)
+    }
+}
+
+/// Source of virtual columns for a line-buffer glyph.
+#[derive(Clone, Copy)]
+enum VirtualColumns<'a> {
+    Incrementing(VimColNrT),
+    Provided(&'a [VimColNrT]),
+    Unavailable,
+}
+
 #[derive(Debug)]
 pub struct LineBuffer {
     chars: Vec<VimSCharT>,
@@ -985,24 +1080,91 @@ impl LineBuffer {
         } else {
             1
         };
-        let continuation_vcol = if width > 1 {
-            Some(vcol.checked_add(1)?)
-        } else {
-            None
+        let glyph = TextGlyph {
+            contents: TextGlyphContents::Character(character),
+            width,
+            bytes_consumed: 0,
         };
-        let end_col = col.checked_add(width)?;
-        let chars = self.chars.get_mut(col..end_col)?;
-        let attrs = self.attrs.get_mut(col..end_col)?;
-        let vcols = self.vcols.get_mut(col..end_col)?;
 
-        chars[0] = character;
-        attrs.fill(attr);
-        vcols[0] = vcol;
-        if let Some(continuation_vcol) = continuation_vcol {
-            chars[1] = 0;
-            vcols[1] = continuation_vcol;
+        self.put_text_glyph(col, glyph, attr, VirtualColumns::Incrementing(vcol), width)
+            .then_some(width)
+    }
+
+    /// Writes one prepared text glyph and its cell metadata.
+    ///
+    /// When the glyph overwrites the left half of a following double-width
+    /// character, that continuation cell is cleared. The complete write is
+    /// validated before any line-buffer state is changed.
+    fn put_text_glyph(
+        &mut self,
+        col: usize,
+        glyph: TextGlyph,
+        attr: VimSAttrT,
+        virtual_columns: VirtualColumns<'_>,
+        max_cells: usize,
+    ) -> bool {
+        if glyph.width == 0 || glyph.width > max_cells {
+            return false;
         }
-        Some(width)
+        let Some(line_end) = col.checked_add(max_cells) else {
+            return false;
+        };
+        let Some(end_col) = col.checked_add(glyph.width) else {
+            return false;
+        };
+
+        match virtual_columns {
+            VirtualColumns::Incrementing(first) => {
+                let Ok(last_offset) = VimColNrT::try_from(glyph.width - 1) else {
+                    return false;
+                };
+                if first.checked_add(last_offset).is_none() {
+                    return false;
+                }
+            }
+            VirtualColumns::Provided(values) if values.len() < glyph.width => return false,
+            VirtualColumns::Provided(_) | VirtualColumns::Unavailable => {}
+        }
+
+        let Some(line_chars) = self.chars.get_mut(col..line_end) else {
+            return false;
+        };
+        let Some(attrs) = self.attrs.get_mut(col..end_col) else {
+            return false;
+        };
+        let Some(vcols) = self.vcols.get_mut(col..end_col) else {
+            return false;
+        };
+        if line_chars[0] == 0 {
+            return false;
+        }
+
+        if glyph.width < max_cells && line_chars[glyph.width] == 0 {
+            line_chars[glyph.width] = schar_from_ascii(' ');
+        }
+        let chars = &mut line_chars[..glyph.width];
+        match glyph.contents {
+            TextGlyphContents::Character(character) => {
+                chars[0] = character;
+                if glyph.width > 1 {
+                    chars[1] = 0;
+                }
+            }
+            TextGlyphContents::Spaces => chars.fill(schar_from_ascii(' ')),
+        }
+        attrs.fill(attr);
+        match virtual_columns {
+            VirtualColumns::Incrementing(first) => {
+                for (offset, vcol) in vcols.iter_mut().enumerate() {
+                    *vcol = first + offset as VimColNrT;
+                }
+            }
+            VirtualColumns::Provided(values) => {
+                vcols.copy_from_slice(&values[..glyph.width]);
+            }
+            VirtualColumns::Unavailable => vcols.fill(-1),
+        }
+        true
     }
 
     /// Fills a virtual-column range with one value.
@@ -2005,6 +2167,77 @@ pub unsafe extern "C" fn linebuf_put_rendered_glyph(
         .put_rendered_glyph(col, sc, attr, vcol, glyph_map)
         .and_then(|width| libc::c_int::try_from(width).ok())
         .unwrap_or(0)
+}
+
+/// Decodes and writes one text glyph, returning its screen-cell width.
+///
+/// Invalid inputs leave the line buffer unchanged and return zero. When a
+/// non-tab glyph does not fit, one space is written and no input is consumed.
+///
+/// # Safety
+///
+/// `text` must point to `text_len` readable bytes, and `bytes_consumed` must be
+/// a valid writable pointer. When `inc_vcol` is false and `vcols` is non-null,
+/// `vcols` must point to at least as many readable values as the returned
+/// screen-cell width. The pointers must not alias Rust-owned line-buffer
+/// storage. This function must run on Neovim's main thread while the global
+/// glyph mapping is not otherwise accessed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn linebuf_put_text_glyph(
+    col: libc::c_int,
+    text: *const libc::c_char,
+    text_len: libc::size_t,
+    max_cells: libc::c_int,
+    tab_cells: libc::c_int,
+    attr: VimSAttrT,
+    inc_vcol: bool,
+    first_vcol: VimColNrT,
+    explicit_vcols: *const VimColNrT,
+    bytes_consumed: *mut libc::size_t,
+) -> libc::c_int {
+    if text.is_null() || bytes_consumed.is_null() {
+        return 0;
+    }
+    // SAFETY: The caller guarantees that this output pointer is writable.
+    unsafe {
+        *bytes_consumed = 0;
+    }
+
+    let (Ok(col), Ok(max_cells), Ok(tab_cells)) = (
+        usize::try_from(col),
+        usize::try_from(max_cells),
+        usize::try_from(tab_cells),
+    ) else {
+        return 0;
+    };
+    // SAFETY: The caller guarantees that `text` covers `text_len` bytes.
+    let text = unsafe { std::slice::from_raw_parts(text.cast::<u8>(), text_len) };
+    // SAFETY: The caller guarantees exclusive main-thread access to the glyph
+    // mapping for the duration of the conversion.
+    let glyph_map = unsafe { &mut GLYPH_MAPPING };
+    let Some(glyph) = TextGlyph::from_text(text, max_cells, tab_cells, glyph_map) else {
+        return 0;
+    };
+
+    let virtual_columns = if inc_vcol {
+        VirtualColumns::Incrementing(first_vcol)
+    } else if explicit_vcols.is_null() {
+        VirtualColumns::Unavailable
+    } else {
+        // SAFETY: The caller guarantees that the input covers the glyph width.
+        let values = unsafe { std::slice::from_raw_parts(explicit_vcols, glyph.width) };
+        VirtualColumns::Provided(values)
+    };
+
+    let mut line_buffer = LineBufferGuard::acquire();
+    if !line_buffer.put_text_glyph(col, glyph, attr, virtual_columns, max_cells) {
+        return 0;
+    }
+    // SAFETY: The caller guarantees that this output pointer is writable.
+    unsafe {
+        *bytes_consumed = glyph.bytes_consumed;
+    }
+    libc::c_int::try_from(glyph.width).unwrap_or(0)
 }
 
 /// Updates one line-buffer cell and returns the following column.
@@ -4061,6 +4294,92 @@ mod tests {
             None
         );
         assert_eq!(format!("{line_buffer:?}"), original);
+    }
+
+    #[test]
+    fn text_glyph_decodes_characters_tabs_and_clipping() {
+        let mut glyph_map = GlyphMapping::new();
+
+        assert_eq!(
+            TextGlyph::from_text(b"x", 4, 0, &mut glyph_map),
+            Some(TextGlyph {
+                contents: TextGlyphContents::Character(schar_from_ascii('x')),
+                width: 1,
+                bytes_consumed: 1,
+            })
+        );
+        assert_eq!(
+            TextGlyph::from_text(b"\t", 2, 4, &mut glyph_map),
+            Some(TextGlyph {
+                contents: TextGlyphContents::Spaces,
+                width: 2,
+                bytes_consumed: 1,
+            })
+        );
+
+        let wide = super::schar_from_bytes("界".as_bytes(), &mut glyph_map);
+        assert_eq!(
+            TextGlyph::from_text("界".as_bytes(), 2, 0, &mut glyph_map),
+            Some(TextGlyph {
+                contents: TextGlyphContents::Character(wide),
+                width: 2,
+                bytes_consumed: "界".len(),
+            })
+        );
+        assert_eq!(
+            TextGlyph::from_text("界".as_bytes(), 1, 0, &mut glyph_map),
+            Some(TextGlyph {
+                contents: TextGlyphContents::Spaces,
+                width: 1,
+                bytes_consumed: 0,
+            })
+        );
+
+        let combining = TextGlyph::screen_character("\u{301}".as_bytes(), &mut glyph_map);
+        assert_eq!(
+            glyph_map.resolve(combining).as_bytes(),
+            " \u{301}".as_bytes()
+        );
+    }
+
+    #[test]
+    fn line_buffer_puts_text_glyph_with_provided_virtual_columns() {
+        let glyph = schar_from_ascii('w');
+        let mut line_buffer = LineBuffer::new(5);
+        line_buffer.chars = vec![
+            schar_from_ascii(' '),
+            schar_from_ascii(' '),
+            schar_from_ascii(' '),
+            0,
+            schar_from_ascii('x'),
+        ];
+        line_buffer.attrs.copy_from_slice(&[1, 2, 3, 4, 5]);
+        line_buffer.vcols.copy_from_slice(&[6, 7, 8, 9, 10]);
+
+        assert!(line_buffer.put_text_glyph(
+            1,
+            TextGlyph {
+                contents: TextGlyphContents::Character(glyph),
+                width: 2,
+                bytes_consumed: 1,
+            },
+            20,
+            VirtualColumns::Provided(&[30, 40]),
+            3,
+        ));
+
+        assert_eq!(
+            line_buffer.chars,
+            [
+                schar_from_ascii(' '),
+                glyph,
+                0,
+                schar_from_ascii(' '),
+                schar_from_ascii('x')
+            ]
+        );
+        assert_eq!(line_buffer.attrs, [1, 20, 20, 4, 5]);
+        assert_eq!(line_buffer.vcols, [6, 30, 40, 9, 10]);
     }
 
     #[test]

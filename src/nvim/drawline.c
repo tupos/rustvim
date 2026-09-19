@@ -454,8 +454,6 @@ static void draw_col_buf(win_T *wp, winlinevars_T *wlv, const char *text, size_t
 {
   const char *ptr = text;
   while (ptr < text + len && wlv->off < wp->w_view_width) {
-    int cells = line_putchar(wp->w_buffer, &ptr, &linebuf_char[wlv->off],
-                             wp->w_view_width - wlv->off, wlv->off);
     int myattr = attr;
     if (inc_vcol) {
       advance_color_col(wlv, wlv->vcol);
@@ -463,10 +461,24 @@ static void draw_col_buf(win_T *wp, winlinevars_T *wlv, const char *text, size_t
         myattr = hl_combine_attr(win_hl_attr(wp, HLF_MC), myattr);
       }
     }
-    for (int c = 0; c < cells; c++) {
-      linebuf_attr[wlv->off] = myattr;
-      linebuf_vcol[wlv->off] = inc_vcol ? wlv->vcol++ : fold_vcol ? *(fold_vcol++) : -1;
-      wlv->off++;
+
+    int max_cells = wp->w_view_width - wlv->off;
+    int tab_cells = *ptr == TAB
+                    ? tabstop_padding(wlv->off, wp->w_buffer->b_p_ts,
+                                      wp->w_buffer->b_p_vts_array)
+                    : 0;
+    size_t bytes_consumed = 0;
+    int cells = linebuf_put_text_glyph(wlv->off, ptr, len - (size_t)(ptr - text),
+                                       max_cells, tab_cells, myattr, inc_vcol,
+                                       wlv->vcol, fold_vcol, &bytes_consumed);
+    assert(cells > 0);
+
+    ptr += bytes_consumed;
+    wlv->off += cells;
+    if (inc_vcol) {
+      wlv->vcol += cells;
+    } else if (fold_vcol) {
+      fold_vcol += cells;
     }
   }
 }
