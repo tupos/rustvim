@@ -1537,7 +1537,8 @@ static int pc_col;
 
 void edit_putchar(int c, bool highlight)
 {
-  if (curwin->w_grid_alloc.chars == NULL && default_grid.chars == NULL) {
+  if (!grid_is_allocated(&curwin->w_grid_alloc)
+      && !grid_is_allocated(&default_grid)) {
     return;
   }
 

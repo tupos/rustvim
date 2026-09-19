@@ -667,7 +667,7 @@ void pum_redraw(void)
   pum_invalid = false;
   must_redraw_pum = false;
 
-  if (!pum_grid.chars || pum_grid.rows != pum_height + border_width
+  if (!grid_is_allocated(&pum_grid) || pum_grid.rows != pum_height + border_width
       || pum_grid.cols != grid_width + border_width) {
     grid_alloc(&pum_grid, pum_height + border_width, grid_width + border_width,
                !invalid_grid, false);

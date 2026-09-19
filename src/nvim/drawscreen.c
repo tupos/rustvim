@@ -184,7 +184,7 @@ bool default_grid_alloc(void)
 
   // Allocation of the screen buffers is done only when the size changes and
   // when Rows and Columns have been set.
-  if ((default_grid.chars != NULL
+  if ((grid_is_allocated(&default_grid)
        && Rows == default_grid.rows
        && Columns == default_grid.cols)
       || Rows == 0 || Columns == 0) {
@@ -221,7 +221,7 @@ void screenclear(void)
 {
   msg_check_for_delay(false);
 
-  if (starting == NO_SCREEN || default_grid.chars == NULL) {
+  if (starting == NO_SCREEN || !grid_is_allocated(&default_grid)) {
     return;
   }
 
@@ -258,7 +258,7 @@ void screenclear(void)
   msg_reset_scroll();     // can't scroll back
   msg_didany = false;
   msg_didout = false;
-  if (HL_ATTR(HLF_MSG) > 0 && msg_use_grid() && msg_grid.chars) {
+  if (HL_ATTR(HLF_MSG) > 0 && msg_use_grid() && grid_is_allocated(&msg_grid)) {
     grid_invalidate(&msg_grid);
     msg_grid_validate();
     msg_grid_invalid = false;
@@ -331,7 +331,7 @@ void screen_resize(int width, int height)
     // win_new_screensize will recompute floats position, but tell the
     // compositor to not redraw them yet
     ui_comp_set_screen_valid(false);
-    if (msg_grid.chars) {
+    if (grid_is_allocated(&msg_grid)) {
       msg_grid_invalid = true;
     }
 
@@ -375,7 +375,7 @@ void screen_resize(int width, int height)
       if (State & MODE_CMDLINE) {
         update_screen();
       }
-      if (msg_grid.chars) {
+      if (grid_is_allocated(&msg_grid)) {
         msg_grid_validate();
       }
       // TODO(bfredl): sometimes messes up the output. Implement clear+redraw
@@ -449,7 +449,7 @@ int update_screen(void)
   // Don't do anything if the screen structures are (not yet) valid.
   // A VimResized autocmd can invoke redrawing in the middle of a resize,
   // which would bypass the checks in screen_resize for popupmenu etc.
-  if (resizing_autocmd || !default_grid.chars) {
+  if (resizing_autocmd || !grid_is_allocated(&default_grid)) {
     return FAIL;
   }
 
@@ -510,7 +510,7 @@ int update_screen(void)
   if (msg_scrolled || msg_grid_invalid) {
     clear_cmdline = true;
     int valid = MAX(Rows - msg_scrollsize(), 0);
-    if (msg_grid.chars) {
+    if (grid_is_allocated(&msg_grid)) {
       // non-displayed part of msg_grid is considered invalid.
       for (int i = 0; i < MIN(msg_scrollsize(), msg_grid.rows); i++) {
         grid_clear_row(&msg_grid, i, msg_grid.cols, i < p_ch);
@@ -629,7 +629,7 @@ int update_screen(void)
   }
 
   FOR_ALL_WINDOWS_IN_TAB(wp, curtab) {
-    if (wp->w_config.hide && wp->w_grid_alloc.chars) {
+    if (wp->w_config.hide && grid_is_allocated(&wp->w_grid_alloc)) {
       continue;  // Skip hidden windows unless not allocated yet.
     }
     // Correct stored syntax highlighting info for changes in each displayed
@@ -656,7 +656,7 @@ int update_screen(void)
   screen_search_hl.rm.regprog = NULL;
 
   FOR_ALL_WINDOWS_IN_TAB(wp, curtab) {
-    if (wp->w_config.hide && wp->w_grid_alloc.chars) {
+    if (wp->w_config.hide && grid_is_allocated(&wp->w_grid_alloc)) {
       if (wp == curwin && global_stl_height() > 0) {
         win_redr_status(wp);
       }
@@ -664,7 +664,8 @@ int update_screen(void)
       continue;  // Skip hidden windows unless not allocated yet.
     }
 
-    if (wp->w_redr_type == UPD_CLEAR && wp->w_floating && wp->w_grid_alloc.chars) {
+    if (wp->w_redr_type == UPD_CLEAR && wp->w_floating
+        && grid_is_allocated(&wp->w_grid_alloc)) {
       grid_invalidate(&wp->w_grid_alloc);
       wp->w_redr_type = UPD_NOT_VALID;
     }

@@ -2382,6 +2382,12 @@ pub struct CScreenGrid {
     pending_comp_index_update: bool,
 }
 
+impl CScreenGrid {
+    fn is_allocated(&self) -> bool {
+        !self.chars.is_null()
+    }
+}
+
 #[repr(C)]
 #[derive(Debug)]
 pub struct CGridView {
@@ -3394,6 +3400,19 @@ impl<'a> ArabicShaper<'a> {
 pub extern "C" fn alloc_initial_line_buffer() {
     let mut line_buffer = LineBufferGuard::acquire();
     line_buffer.realloc(unsafe { globals::Columns as usize });
+}
+
+/// Reports whether a C screen grid currently owns cell buffers.
+///
+/// # Safety
+///
+/// `grid` must be null or point to a valid, readable `CScreenGrid`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn grid_is_allocated(grid: *const CScreenGrid) -> bool {
+    // SAFETY: The caller guarantees that a non-null pointer is valid and
+    // readable. `as_ref` converts a null pointer to `None`.
+    let grid = unsafe { grid.as_ref() };
+    grid.is_some_and(CScreenGrid::is_allocated)
 }
 
 /// # Safety
@@ -4540,6 +4559,23 @@ mod tests {
         assert_eq!(grid.get_vcol(1, 2), Some(12));
         assert_eq!(grid.get_vcol(2, 0), None);
         assert_eq!(grid.get_vcol(0, 3), None);
+    }
+
+    #[test]
+    fn c_grid_reports_whether_cell_buffers_are_allocated() {
+        let mut line_buffer = LineBuffer::new(1);
+        let grid = ScreenGrid::new(1, 1, true, &mut line_buffer);
+        // SAFETY: Ownership of every grid allocation is transferred to
+        // `cgrid`.
+        let mut cgrid = unsafe { grid.to_cgrid() };
+
+        // SAFETY: `cgrid` is valid and remains readable for this call.
+        assert!(unsafe { grid_is_allocated(&raw const cgrid) });
+        // SAFETY: `grid_is_allocated` explicitly accepts a null pointer.
+        assert!(!unsafe { grid_is_allocated(std::ptr::null()) });
+
+        // SAFETY: `cgrid` still uniquely owns every transferred allocation.
+        let _grid = unsafe { ScreenGrid::take_from_cgrid(&mut cgrid) };
     }
 
     #[test]

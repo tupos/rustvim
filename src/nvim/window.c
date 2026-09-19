@@ -900,7 +900,8 @@ void ui_ext_win_position(win_T *wp, bool validate)
       if (win != NULL) {
         // When a floating window is anchored to another window,
         // update the position of its anchored window first.
-        if (win->w_pos_changed && win->w_grid_alloc.chars != NULL && win_valid(win)) {
+        if (win->w_pos_changed && grid_is_allocated(&win->w_grid_alloc)
+            && win_valid(win)) {
           ui_ext_win_position(win, validate);
         }
         int row_off = 0;
@@ -7904,7 +7905,7 @@ void win_ui_flush(bool validate)
 {
   FOR_ALL_TAB_WINDOWS(tp, wp) {
     if ((wp->w_pos_changed || wp->w_grid_alloc.pending_comp_index_update)
-        && wp->w_grid_alloc.chars != NULL) {
+        && grid_is_allocated(&wp->w_grid_alloc)) {
       if (tp == curtab) {
         ui_ext_win_position(wp, validate);
       } else {

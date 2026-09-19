@@ -48,6 +48,7 @@ typedef struct {
 } GridBorderConfig;
 
 extern void grid_alloc(ScreenGrid *grid, int rows, int columns, bool copy, bool valid);
+extern bool grid_is_allocated(const ScreenGrid *grid);
 extern void grid_free(ScreenGrid *grid);
 extern void grid_free_all_mem(void);
 extern void grid_reset_dirty_columns(ScreenGrid *grid);

@@ -183,14 +183,14 @@ void msg_grid_set_pos(int row, bool scrolled)
     msg_grid_pos_at_flush = row;
   }
   msg_grid_pos = row;
-  if (msg_grid.chars) {
+  if (grid_is_allocated(&msg_grid)) {
     msg_grid_adj.row_offset = -row;
   }
 }
 
 bool msg_use_grid(void)
 {
-  return default_grid.chars && !ui_has(kUIMessages);
+  return grid_is_allocated(&default_grid) && !ui_has(kUIMessages);
 }
 
 void msg_grid_validate(void)
@@ -199,7 +199,7 @@ void msg_grid_validate(void)
   bool should_alloc = msg_use_grid();
   int max_rows = Rows - (int)p_ch;
   if (should_alloc && (msg_grid.rows != Rows || msg_grid.cols != Columns
-                       || !msg_grid.chars)) {
+                       || !grid_is_allocated(&msg_grid))) {
     // TODO(bfredl): eventually should be set to "invalid". I e all callers
     // will use the grid including clear to EOS if necessary.
     grid_alloc(&msg_grid, Rows, Columns, false, true);
@@ -218,7 +218,7 @@ void msg_grid_validate(void)
     msg_scrolled_at_flush = msg_scrolled;
     msg_grid.mouse_enabled = false;
     msg_grid_adj.target = &msg_grid;
-  } else if (!should_alloc && msg_grid.chars) {
+  } else if (!should_alloc && grid_is_allocated(&msg_grid)) {
     ui_comp_remove_grid(&msg_grid);
     grid_free(&msg_grid);
     ui_call_grid_destroy(msg_grid.handle);
@@ -226,7 +226,7 @@ void msg_grid_validate(void)
     msg_grid_adj.row_offset = 0;
     msg_grid_adj.target = &default_grid;
     redraw_cmdline = true;
-  } else if (msg_grid.chars && !msg_scrolled && msg_grid_pos != max_rows) {
+  } else if (grid_is_allocated(&msg_grid) && !msg_scrolled && msg_grid_pos != max_rows) {
     int diff = msg_grid_pos - max_rows;
     msg_grid_set_pos(max_rows, false);
     if (diff > 0) {
@@ -234,7 +234,7 @@ void msg_grid_validate(void)
     }
   }
 
-  if (msg_grid.chars && !msg_scrolled && cmdline_row < msg_grid_pos) {
+  if (grid_is_allocated(&msg_grid) && !msg_scrolled && cmdline_row < msg_grid_pos) {
     // TODO(bfredl): this should already be the case, but fails in some
     // "batched" executions where compute_cmdrow() use stale positions or
     // something.
@@ -2390,7 +2390,7 @@ void msg_puts_len(const char *const str, const ptrdiff_t len, int hl_id, bool hi
       msg_col = saved_msg_col;
     }
   }
-  if (!msg_use_printf() || (headless_mode && default_grid.chars)) {
+  if (!msg_use_printf() || (headless_mode && grid_is_allocated(&default_grid))) {
     msg_puts_display(str, (int)len, hl_id, false);
   }
 
@@ -2634,7 +2634,7 @@ void msg_scroll_up(bool may_throttle, bool zerocmd)
 
     // When displaying the first line with cmdheight=0, we need to draw over
     // the existing last line of the screen.
-    if (zerocmd && msg_grid.chars) {
+    if (zerocmd && grid_is_allocated(&msg_grid)) {
       grid_clear_row(&msg_grid, 0, msg_grid.cols, false);
     }
   } else {
@@ -2708,7 +2708,7 @@ void msg_reset_scroll(void)
   // "nvim -o has_swap also_has_swap"
   msg_grid_set_pos(Rows - (int)p_ch, false);
   clear_cmdline = true;
-  if (msg_grid.chars) {
+  if (grid_is_allocated(&msg_grid)) {
     // non-displayed part of msg_grid is considered invalid.
     for (int i = 0; i < MIN(msg_scrollsize(), msg_grid.rows); i++) {
       grid_clear_row(&msg_grid, i, msg_grid.cols, false);
@@ -2721,7 +2721,7 @@ void msg_reset_scroll(void)
 
 void msg_ui_refresh(void)
 {
-  if (ui_has(kUIMultigrid) && msg_grid.chars) {
+  if (ui_has(kUIMultigrid) && grid_is_allocated(&msg_grid)) {
     ui_call_grid_resize(msg_grid.handle, msg_grid.cols, msg_grid.rows);
     ui_ext_msg_set_pos(msg_grid_pos, msg_scrolled);
   }
@@ -2729,7 +2729,8 @@ void msg_ui_refresh(void)
 
 void msg_ui_flush(void)
 {
-  if (ui_has(kUIMultigrid) && msg_grid.chars && msg_grid.pending_comp_index_update) {
+  if (ui_has(kUIMultigrid) && grid_is_allocated(&msg_grid)
+      && msg_grid.pending_comp_index_update) {
     ui_ext_msg_set_pos(msg_grid_pos, msg_scrolled);
   }
 }
@@ -3314,7 +3315,7 @@ void msg_clr_eos_force(void)
 
   // TODO(bfredl): ugly, this state should already been validated at this
   // point. But msg_clr_eos() is called in a lot of places.
-  if (msg_grid.chars && msg_row < msg_grid_pos) {
+  if (grid_is_allocated(&msg_grid) && msg_row < msg_grid_pos) {
     msg_grid_validate();
     if (msg_row < msg_grid_pos) {
       msg_row = msg_grid_pos;

@@ -1847,7 +1847,7 @@ static win_T *mouse_find_grid_win(int *gridp, int *rowp, int *colp)
     *gridp = DEFAULT_GRID_HANDLE;
   } else if (*gridp > 1) {
     win_T *wp = get_win_by_grid_handle(*gridp);
-    if (wp && wp->w_grid_alloc.chars
+    if (wp && grid_is_allocated(&wp->w_grid_alloc)
         && !(wp->w_floating && !wp->w_config.mouse)) {
       *rowp = MIN(*rowp - wp->w_grid.row_offset, wp->w_view_height - 1);
       *colp = MIN(*colp - wp->w_grid.col_offset, wp->w_view_width - 1);
@@ -1994,7 +1994,7 @@ static void mouse_check_grid(colnr_T *vcolp, int *flagsp)
   int start_row = 0;
   int start_col = 0;
   ScreenGrid *gp = grid_adjust(&curwin->w_grid, &start_row, &start_col);
-  if (gp->handle != click_grid || gp->chars == NULL) {
+  if (gp->handle != click_grid || !grid_is_allocated(gp)) {
     return;
   }
   click_row += start_row;
