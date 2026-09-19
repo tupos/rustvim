@@ -579,8 +579,7 @@ static void draw_sign(bool nrcol, win_T *wp, winlinevars_T *wlv, int sign_idx)
     draw_col_fill(wlv, schar_from_ascii(' '), fill, attr);
     int sign_pos = wlv->off - SIGN_WIDTH - (int)nrcol;
     assert(sign_pos >= 0);
-    linebuf_char[sign_pos] = sattr.text[0];
-    linebuf_char[sign_pos + 1] = sattr.text[1];
+    linebuf_put_char_pair(sign_pos, sattr.text[0], sattr.text[1]);
   } else {
     assert(!nrcol);  // handled in draw_lnum_col()
     draw_col_fill(wlv, schar_from_ascii(' '), SIGN_WIDTH, scl_attr);

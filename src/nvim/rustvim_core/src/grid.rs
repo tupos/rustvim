@@ -959,6 +959,21 @@ impl LineBuffer {
         true
     }
 
+    /// Copies screen characters into the buffer without changing their
+    /// attributes or virtual columns.
+    ///
+    /// Returns whether the complete character slice fits in the buffer.
+    fn put_chars(&mut self, start_col: usize, chars: &[VimSCharT]) -> bool {
+        let Some(end_col) = start_col.checked_add(chars.len()) else {
+            return false;
+        };
+        let Some(destination) = self.chars.get_mut(start_col..end_col) else {
+            return false;
+        };
+        destination.copy_from_slice(chars);
+        true
+    }
+
     /// Writes a truncation marker at one edge of a line-buffer range.
     ///
     /// When the marker replaces one half of a double-width character, the
@@ -1823,6 +1838,18 @@ pub extern "C" fn linebuf_put_cell(
     } else {
         col
     }
+}
+
+/// Writes a two-cell character sequence without changing cell metadata.
+///
+/// A negative or out-of-bounds column leaves the line buffer unchanged.
+#[unsafe(no_mangle)]
+pub extern "C" fn linebuf_put_char_pair(col: libc::c_int, first: VimSCharT, second: VimSCharT) {
+    let Ok(col) = usize::try_from(col) else {
+        return;
+    };
+    let mut line_buffer = LineBufferGuard::acquire();
+    line_buffer.put_chars(col, &[first, second]);
 }
 
 /// # Safety
@@ -3677,6 +3704,29 @@ mod tests {
         assert_eq!(line_buffer.vcols, [1, 2, 3, 4, 5]);
 
         assert!(!line_buffer.fill_chars_and_attrs(4..6, 0, 0));
+    }
+
+    #[test]
+    fn line_buffer_puts_chars_without_changing_metadata() {
+        let mut line_buffer = LineBuffer::new(4);
+        line_buffer.chars.fill(schar_from_ascii(' '));
+        line_buffer.attrs.copy_from_slice(&[1, 2, 3, 4]);
+        line_buffer.vcols.copy_from_slice(&[5, 6, 7, 8]);
+
+        assert!(line_buffer.put_chars(1, &[schar_from_ascii('S'), schar_from_ascii('G')],));
+
+        assert_eq!(
+            line_buffer.chars,
+            [
+                schar_from_ascii(' '),
+                schar_from_ascii('S'),
+                schar_from_ascii('G'),
+                schar_from_ascii(' '),
+            ]
+        );
+        assert_eq!(line_buffer.attrs, [1, 2, 3, 4]);
+        assert_eq!(line_buffer.vcols, [5, 6, 7, 8]);
+        assert!(!line_buffer.put_chars(3, &[1, 2]));
     }
 
     #[test]
