@@ -862,17 +862,17 @@ pub struct LineBuffer {
 impl LineBuffer {
     fn realloc(&mut self, size: usize) {
         self.size = size;
-        self.chars = Vec::with_capacity(size);
-        self.attrs = Vec::with_capacity(size);
-        self.vcols = Vec::with_capacity(size);
-        self.scratch = Vec::with_capacity(size);
+        self.chars = vec![0; size];
+        self.attrs = vec![0; size];
+        self.vcols = vec![0; size];
+        self.scratch = vec![0; size];
     }
     fn new(cols: usize) -> Self {
         LineBuffer {
-            chars: Vec::with_capacity(cols),
-            attrs: Vec::with_capacity(cols),
-            vcols: Vec::with_capacity(cols),
-            scratch: Vec::with_capacity(cols),
+            chars: vec![0; cols],
+            attrs: vec![0; cols],
+            vcols: vec![0; cols],
+            scratch: vec![0; cols],
             size: cols,
         }
     }
@@ -3525,6 +3525,17 @@ mod tests {
         assert_eq!(dirty_columns.take(0), Some(3));
         assert_eq!(&*dirty_columns.columns, [0, 0, 0]);
         assert_eq!(dirty_columns.take(3), None);
+    }
+
+    #[test]
+    fn line_buffer_allocates_initialized_storage() {
+        let line_buffer = LineBuffer::new(4);
+
+        assert_eq!(line_buffer.chars, [0; 4]);
+        assert_eq!(line_buffer.attrs, [0; 4]);
+        assert_eq!(line_buffer.vcols, [0; 4]);
+        assert_eq!(line_buffer.scratch, [0; 4]);
+        assert_eq!(line_buffer.size, 4);
     }
 
     #[test]
