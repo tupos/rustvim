@@ -227,8 +227,7 @@ void screenclear(void)
 
   // blank out the default grid
   for (int i = 0; i < default_grid.rows; i++) {
-    grid_clear_line(&default_grid, default_grid.line_offset[i],
-                    default_grid.cols, true);
+    grid_clear_row(&default_grid, i, default_grid.cols, true);
   }
 
   ui_call_grid_clear(1);  // clear the display
@@ -514,8 +513,7 @@ int update_screen(void)
     if (msg_grid.chars) {
       // non-displayed part of msg_grid is considered invalid.
       for (int i = 0; i < MIN(msg_scrollsize(), msg_grid.rows); i++) {
-        grid_clear_line(&msg_grid, msg_grid.line_offset[i],
-                        msg_grid.cols, i < p_ch);
+        grid_clear_row(&msg_grid, i, msg_grid.cols, i < p_ch);
       }
     }
     msg_grid.throttled = false;
@@ -525,8 +523,7 @@ int update_screen(void)
     if (type == UPD_NOT_VALID && !ui_has(kUIMultigrid) && msg_scrolled) {
       was_invalidated = ui_comp_set_screen_valid(false);
       for (int i = valid; i < Rows - p_ch; i++) {
-        grid_clear_line(&default_grid, default_grid.line_offset[i],
-                        Columns, false);
+        grid_clear_row(&default_grid, i, Columns, false);
       }
       FOR_ALL_WINDOWS_IN_TAB(wp, curtab) {
         if (wp->w_floating) {

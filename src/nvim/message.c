@@ -2635,7 +2635,7 @@ void msg_scroll_up(bool may_throttle, bool zerocmd)
     // When displaying the first line with cmdheight=0, we need to draw over
     // the existing last line of the screen.
     if (zerocmd && msg_grid.chars) {
-      grid_clear_line(&msg_grid, msg_grid.line_offset[0], msg_grid.cols, false);
+      grid_clear_row(&msg_grid, 0, msg_grid.cols, false);
     }
   } else {
     grid_del_lines(&msg_grid, 0, 1, msg_grid.rows, 0, msg_grid.cols);
@@ -2711,8 +2711,7 @@ void msg_reset_scroll(void)
   if (msg_grid.chars) {
     // non-displayed part of msg_grid is considered invalid.
     for (int i = 0; i < MIN(msg_scrollsize(), msg_grid.rows); i++) {
-      grid_clear_line(&msg_grid, msg_grid.line_offset[i],
-                      msg_grid.cols, false);
+      grid_clear_row(&msg_grid, i, msg_grid.cols, false);
     }
   }
   msg_scrolled = 0;

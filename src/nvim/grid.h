@@ -53,7 +53,7 @@ extern void grid_free_all_mem(void);
 extern void grid_reset_dirty_columns(ScreenGrid *grid);
 extern void grid_scroll_dirty_columns(ScreenGrid *grid);
 extern int grid_take_dirty_column(ScreenGrid *grid, int row);
-extern void grid_clear_line(ScreenGrid *grid, size_t off, int width, bool valid);
+extern void grid_clear_row(ScreenGrid *grid, int row, int width, bool valid);
 extern ScreenGrid *grid_adjust(GridView *grid, int *row_off, int *col_off);
 extern void grid_invalidate(ScreenGrid *grid);
 extern schar_T schar_from_str(const char *str);

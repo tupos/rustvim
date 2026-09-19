@@ -497,6 +497,20 @@ impl ScreenGrid {
         self.vcols[range.clone()].fill(-1);
     }
 
+    /// Clears cells from the beginning of one logical grid row.
+    fn clear_row(&mut self, row: usize, width: usize, valid: bool) {
+        let Some(&offset) = self.line_offset.get(row) else {
+            return;
+        };
+        let Some(end) = offset.checked_add(width) else {
+            return;
+        };
+        if end > self.chars.len() || end > self.attrs.len() || end > self.vcols.len() {
+            return;
+        }
+        self.clear_line(offset, width, valid);
+    }
+
     fn attrs_fill(valid: bool) -> VimSAttrT {
         if valid { 0 } else { -1 }
     }
@@ -3507,23 +3521,30 @@ pub unsafe extern "C" fn grid_free_all_mem() {
     drop(glyph_mapping);
 }
 
-/// clear a line in the grid starting at `offset` until `width` characters
-/// are cleared. `valid` is used to fill attributes. See `ScreenGrid::attrs_fill`
+/// Clears `width` cells from the beginning of a logical grid row.
 ///
 /// # Safety
 ///
 /// `grid` must point to a valid, exclusively accessible `CScreenGrid` whose
-/// buffers contain the requested range.
+/// buffers satisfy the ownership and layout requirements of `ScreenGrid`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn grid_clear_line(
+pub unsafe extern "C" fn grid_clear_row(
     grid: *mut CScreenGrid,
-    offset: libc::size_t,
+    row: libc::c_int,
     width: libc::c_int,
     valid: bool,
 ) {
+    if grid.is_null() {
+        return;
+    }
+    let (Ok(row), Ok(width)) = (usize::try_from(row), usize::try_from(width)) else {
+        return;
+    };
+
     // SAFETY: The caller transfers exclusive ownership of the grid buffers.
     let mut g = unsafe { ScreenGrid::take_from_cgrid(&mut *grid) };
-    g.clear_line(offset, width as usize, valid);
+    g.clear_row(row, width, valid);
+
     // SAFETY: Ownership of every grid allocation is returned exactly once.
     unsafe {
         *grid = g.to_cgrid();
@@ -4393,6 +4414,29 @@ mod tests {
         assert_eq!(attributes(&line_buffer), [7, 7, 7, 42, 42, 42, 7]);
 
         assert!(!line_buffer.put_smoothscroll_marker(8, false, 0));
+    }
+
+    #[test]
+    fn clearing_row_follows_logical_line_offsets() {
+        let mut line_buffer = LineBuffer::new(3);
+        let mut grid = ScreenGrid::new(2, 3, true, &mut line_buffer);
+        grid.chars = ['a', 'b', 'c', 'd', 'e', 'f']
+            .map(schar_from_ascii)
+            .to_vec();
+        grid.attrs = vec![1, 2, 3, 4, 5, 6];
+        grid.vcols = vec![1, 2, 3, 4, 5, 6];
+        grid.line_offset.swap(0, 1);
+
+        grid.clear_row(0, 2, false);
+
+        assert_eq!(
+            grid.chars,
+            ['a', 'b', 'c', ' ', ' ', 'f']
+                .map(schar_from_ascii)
+                .to_vec()
+        );
+        assert_eq!(grid.attrs, [1, 2, 3, -1, -1, 6]);
+        assert_eq!(grid.vcols, [1, 2, 3, -1, -1, 6]);
     }
 
     #[test]
