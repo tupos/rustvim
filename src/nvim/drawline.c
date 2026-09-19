@@ -558,9 +558,7 @@ void fill_foldcolumn(win_T *wp, foldinfo_T foldinfo, linenr_T lnum, int attr, in
       out_vcol[i] = vcol;
       out_buffer[i] = symbol;
     } else {
-      linebuf_vcol[*wlv_off] = vcol;
-      linebuf_attr[*wlv_off] = attr;
-      linebuf_char[(*wlv_off)++] = symbol;
+      *wlv_off = linebuf_put_cell(*wlv_off, symbol, attr, vcol);
     }
   }
 }

@@ -1798,6 +1798,33 @@ pub extern "C" fn linebuf_fill_chars_and_attrs(
     }
 }
 
+/// Writes one complete line-buffer cell and returns the following column.
+///
+/// A negative or out-of-bounds column leaves both the line buffer and returned
+/// column unchanged.
+#[unsafe(no_mangle)]
+pub extern "C" fn linebuf_put_cell(
+    col: libc::c_int,
+    sc: VimSCharT,
+    attr: VimSAttrT,
+    vcol: VimColNrT,
+) -> libc::c_int {
+    if col < 0 {
+        return col;
+    }
+    let Some(next_col) = col.checked_add(1) else {
+        return col;
+    };
+
+    let mut line_buffer = LineBufferGuard::acquire();
+    if next_col as usize <= line_buffer.size {
+        line_buffer.fill(col as usize..next_col as usize, sc, attr, vcol);
+        next_col
+    } else {
+        col
+    }
+}
+
 /// # Safety
 ///
 /// `pfirst`, `plast`, and `pclear` must point to valid, properly aligned

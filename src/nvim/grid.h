@@ -92,6 +92,7 @@ extern void grid_line_mirror(int width);
 extern void linebuf_reset(int width);
 extern int linebuf_fill_chars_and_attrs(int start_col, int width, schar_T sc,
                                         int attr);
+extern int linebuf_put_cell(int col, schar_T sc, int attr, colnr_T vcol);
 extern void linebuf_mirror(int *firstp, int *lastp, int *clearp, int width);
 extern void grid_line_flush(void);
 extern void grid_line_flush_if_valid_row(void);
