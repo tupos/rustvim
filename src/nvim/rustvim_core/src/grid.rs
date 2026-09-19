@@ -102,7 +102,14 @@ static MAX_SCHAR_SIZE: usize = 32;
 
 static NULL_TERMINATOR: u8 = b'\0';
 
-static mut GLYPH_MAPPING: GlyphMapping = GlyphMapping::new();
+static GLYPH_MAPPING: Mutex<GlyphMapping> = Mutex::new(GlyphMapping::new());
+
+/// Acquires access to the process-global glyph mapping.
+fn lock_glyph_mapping() -> MutexGuard<'static, GlyphMapping> {
+    GLYPH_MAPPING
+        .lock()
+        .expect("glyph mapping mutex must not be poisoned")
+}
 
 const DEFAULT_GRID_HANDLE: VimHandleT = 1;
 
@@ -538,13 +545,13 @@ impl ScreenGrid {
             clear_width = col;
         }
 
+        // SAFETY: Screen updates access these C option globals on Neovim's
+        // main thread.
         unsafe {
             if p_arshape != 0 && p_tbidi == 0 && endcol > col {
-                // SAFETY: Screen updates run on Neovim's main thread, so this
-                // is the only active borrow of the global glyph mapping.
-                let glyph_map_ptr = &raw mut GLYPH_MAPPING;
-                let glyph_map = &mut *glyph_map_ptr;
-                ArabicShaper::new(glyph_map).shape(&mut lb.cells[col as usize..endcol as usize]);
+                let mut glyph_map = lock_glyph_mapping();
+                ArabicShaper::new(&mut glyph_map)
+                    .shape(&mut lb.cells[col as usize..endcol as usize]);
             }
         }
 
@@ -1732,13 +1739,8 @@ pub extern "C" fn linebuf_put_cell(
 ///
 /// Invalid positions, insufficient space, and virtual-column overflow leave
 /// the line buffer unchanged and return zero.
-///
-/// # Safety
-///
-/// Must be called on Neovim's main thread while the global glyph mapping is
-/// not being mutated.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn linebuf_put_rendered_glyph(
+pub extern "C" fn linebuf_put_rendered_glyph(
     col: libc::c_int,
     sc: VimSCharT,
     attr: VimSAttrT,
@@ -1747,13 +1749,11 @@ pub unsafe extern "C" fn linebuf_put_rendered_glyph(
     let Ok(col) = usize::try_from(col) else {
         return 0;
     };
-    // SAFETY: The caller guarantees main-thread access and that the global
-    // glyph mapping is not mutated for this borrow.
-    let glyph_map = unsafe { &GLYPH_MAPPING };
     let mut line_buffer = LineBufferGuard::acquire();
+    let glyph_map = lock_glyph_mapping();
 
     line_buffer
-        .put_rendered_glyph(col, sc, attr, vcol, glyph_map)
+        .put_rendered_glyph(col, sc, attr, vcol, &glyph_map)
         .and_then(|width| libc::c_int::try_from(width).ok())
         .unwrap_or(0)
 }
@@ -1769,8 +1769,7 @@ pub unsafe extern "C" fn linebuf_put_rendered_glyph(
 /// a valid writable pointer. When `inc_vcol` is false and `vcols` is non-null,
 /// `vcols` must point to at least as many readable values as the returned
 /// screen-cell width. The pointers must not alias Rust-owned line-buffer
-/// storage. This function must run on Neovim's main thread while the global
-/// glyph mapping is not otherwise accessed.
+/// storage.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn linebuf_put_text_glyph(
     col: libc::c_int,
@@ -1801,10 +1800,11 @@ pub unsafe extern "C" fn linebuf_put_text_glyph(
     };
     // SAFETY: The caller guarantees that `text` covers `text_len` bytes.
     let text = unsafe { std::slice::from_raw_parts(text.cast::<u8>(), text_len) };
-    // SAFETY: The caller guarantees exclusive main-thread access to the glyph
-    // mapping for the duration of the conversion.
-    let glyph_map = unsafe { &mut GLYPH_MAPPING };
-    let Some(glyph) = TextGlyph::from_text(text, max_cells, tab_cells, glyph_map) else {
+    let glyph = {
+        let mut glyph_map = lock_glyph_mapping();
+        TextGlyph::from_text(text, max_cells, tab_cells, &mut glyph_map)
+    };
+    let Some(glyph) = glyph else {
         return 0;
     };
 
@@ -1838,7 +1838,7 @@ pub unsafe extern "C" fn linebuf_put_text_glyph(
 /// `text` must point to a readable NUL-terminated string, and
 /// `bytes_consumed` must be a valid writable pointer. Neither pointer may alias
 /// Rust-owned line-buffer storage. This function must run on Neovim's main
-/// thread while the global glyph mapping and highlight tables are not
+/// thread while the highlight tables are not
 /// otherwise accessed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn linebuf_put_virtual_text_glyph(
@@ -1867,10 +1867,11 @@ pub unsafe extern "C" fn linebuf_put_virtual_text_glyph(
     };
     // SAFETY: The caller guarantees a readable NUL-terminated string.
     let text = unsafe { CStr::from_ptr(text) }.to_bytes();
-    // SAFETY: The caller guarantees exclusive main-thread access to the glyph
-    // mapping for the duration of the conversion.
-    let glyph_map = unsafe { &mut GLYPH_MAPPING };
-    let Some(glyph) = TextGlyph::from_text(text, max_cells, tab_cells, glyph_map) else {
+    let glyph = {
+        let mut glyph_map = lock_glyph_mapping();
+        TextGlyph::from_text(text, max_cells, tab_cells, &mut glyph_map)
+    };
+    let Some(glyph) = glyph else {
         return 0;
     };
     let source_is_space = text.first() == Some(&b' ');
@@ -2108,7 +2109,7 @@ pub unsafe extern "C" fn grid_clear(
 /// virtual-text vectors satisfy the requirements of `Border::from_c`. A
 /// non-null `adjustments` must point to four initialized integers. The global
 /// line buffer must be initialized, and this function must run on Neovim's
-/// main thread with exclusive access to the line-buffer and glyph-map globals.
+/// main thread.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn grid_draw_border_impl(
     grid: *mut CScreenGrid,
@@ -2121,21 +2122,21 @@ pub unsafe extern "C" fn grid_draw_border_impl(
         return;
     }
 
-    // SAFETY: The caller guarantees exclusive main-thread access to the
-    // global glyph mapping for the duration of border conversion.
-    let glyph_map_ptr = &raw mut GLYPH_MAPPING;
-    let glyph_map = unsafe { &mut *glyph_map_ptr };
-    // SAFETY: The pointer and all nested border data satisfy the contract
-    // documented on this function.
-    let Some(border) = (unsafe {
-        Border::from_c(
-            &*config,
-            adjustments,
-            winbl,
-            Highlight(win_hl_attr_normal),
-            glyph_map,
-        )
-    }) else {
+    let border = {
+        let mut glyph_map = lock_glyph_mapping();
+        // SAFETY: The pointer and all nested border data satisfy the contract
+        // documented on this function.
+        unsafe {
+            Border::from_c(
+                &*config,
+                adjustments,
+                winbl,
+                Highlight(win_hl_attr_normal),
+                &mut glyph_map,
+            )
+        }
+    };
+    let Some(border) = border else {
         return;
     };
 
@@ -3443,11 +3444,13 @@ pub unsafe extern "C" fn grid_free_all_mem() {
     // The caller guarantees that no line-buffer user remains.
     let mut line_buffer = LineBufferGuard::acquire();
     line_buffer.release();
+    drop(line_buffer);
 
-    // SAFETY: The caller guarantees exclusive main-thread access. Replacing
-    // the static transfers all cached allocations into a normal Rust value,
-    // whose destructor releases them.
-    let glyph_mapping = unsafe { std::ptr::replace(&raw mut GLYPH_MAPPING, GlyphMapping::new()) };
+    // Moving the mapping out of the mutex releases all of its allocations.
+    let glyph_mapping = {
+        let mut mapping = lock_glyph_mapping();
+        std::mem::replace(&mut *mapping, GlyphMapping::new())
+    };
     drop(glyph_mapping);
 }
 
@@ -3484,10 +3487,8 @@ pub extern "C" fn schar_from_buf(buf: *const libc::c_char, len: libc::size_t) ->
     } else {
         unsafe { std::slice::from_raw_parts(buf, len) }
     };
-    unsafe {
-        let p = &raw mut GLYPH_MAPPING;
-        schar_from_bytes(s, &mut *p)
-    }
+    let mut glyph_mapping = lock_glyph_mapping();
+    schar_from_bytes(s, &mut glyph_mapping)
 }
 
 /// # Safety
@@ -3513,25 +3514,20 @@ pub unsafe extern "C" fn schar_from_str(buf: *const libc::c_char) -> VimSCharT {
 /// and you need to use UPD_CLEAR
 #[unsafe(no_mangle)]
 pub extern "C" fn schar_cache_clear_if_full() -> bool {
-    unsafe {
-        let gm = &mut GLYPH_MAPPING;
-        if gm.is_full() {
-            schar_cache_clear();
-            return true;
-        }
-        false
+    let is_full = lock_glyph_mapping().is_full();
+    if is_full {
+        schar_cache_clear();
+        return true;
     }
+    false
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn schar_cache_clear() {
-    unsafe {
-        decor_check_invalid_glyphs();
-        let gm = &mut GLYPH_MAPPING;
-        gm.clear();
-        if check_chars_options() {
-            panic!("Erroc checking chars options");
-        }
+    unsafe { decor_check_invalid_glyphs() };
+    lock_glyph_mapping().clear();
+    if unsafe { check_chars_options() } {
+        panic!("Erroc checking chars options");
     }
 }
 
@@ -3551,8 +3547,8 @@ pub unsafe extern "C" fn schar_get_adv(
     buf_out: *mut *mut libc::c_char,
     sc: VimSCharT,
 ) -> libc::size_t {
-    let gm = unsafe { &mut GLYPH_MAPPING };
-    let glyph = gm.resolve(sc);
+    let glyph_mapping = lock_glyph_mapping();
+    let glyph = glyph_mapping.resolve(sc);
     let bytes = glyph.as_bytes();
     let len = bytes.len();
     let slice = unsafe { std::slice::from_raw_parts_mut((*buf_out).cast::<u8>(), len) };
@@ -3578,42 +3574,28 @@ pub unsafe extern "C" fn schar_get(mut buf_out: *mut libc::c_char, sc: VimSCharT
     }
 }
 
-/// # Safety
-///
-/// Must be called on Neovim's main thread while the global glyph mapping is
-/// not being mutated.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn schar_cells(sc: VimSCharT) -> libc::c_int {
-    // SAFETY: The caller guarantees exclusive main-thread access to Neovim's
-    // global screen state. This function borrows the mapping only for the
-    // duration of this call and does not mutate it.
-    let glyph_map = unsafe { &GLYPH_MAPPING };
-    schar_cells_impl(sc, glyph_map)
+pub extern "C" fn schar_cells(sc: VimSCharT) -> libc::c_int {
+    let glyph_mapping = lock_glyph_mapping();
+    schar_cells_impl(sc, &glyph_mapping)
 }
 
-/// # Safety
-///
-/// Must be called on Neovim's main thread while the global glyph mapping is
-/// not being mutated.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn schar_get_first_codepoint(sc: VimSCharT) -> libc::c_int {
-    // SAFETY: The caller guarantees exclusive main-thread access to Neovim's
-    // global screen state. This function borrows the mapping only for the
-    // duration of this call and does not mutate it.
-    let glyph_map = unsafe { &GLYPH_MAPPING };
-    schar_get_first_codepoint_impl(sc, glyph_map)
+pub extern "C" fn schar_get_first_codepoint(sc: VimSCharT) -> libc::c_int {
+    let glyph_mapping = lock_glyph_mapping();
+    schar_get_first_codepoint_impl(sc, &glyph_mapping)
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn schar_len(sc: VimSCharT) -> libc::size_t {
-    let gm = unsafe { &mut GLYPH_MAPPING };
-    schar_len_impl(sc, gm)
+    let glyph_mapping = lock_glyph_mapping();
+    schar_len_impl(sc, &glyph_mapping)
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn schar_in_arabic_block(sc: VimSCharT) -> bool {
-    let gm = unsafe { &mut GLYPH_MAPPING };
-    schar_in_arabic_block_impl(sc, gm)
+    let glyph_mapping = lock_glyph_mapping();
+    schar_in_arabic_block_impl(sc, &glyph_mapping)
 }
 
 /// Shape `cols` screen characters for Arabic display.
@@ -3622,8 +3604,6 @@ pub extern "C" fn schar_in_arabic_block(sc: VimSCharT) -> bool {
 ///
 /// For a positive `cols`, `buf` must point to `cols` initialized screen
 /// characters that are exclusively writable for the duration of this call.
-/// The function must run on Neovim's main thread while the global glyph
-/// mapping is not otherwise accessed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn line_do_arabic_shape(buf: *mut VimSCharT, cols: libc::c_int) {
     if buf.is_null() || cols <= 0 {
@@ -3633,11 +3613,8 @@ pub unsafe extern "C" fn line_do_arabic_shape(buf: *mut VimSCharT, cols: libc::c
     // SAFETY: The caller guarantees that `buf` references `cols` initialized,
     // exclusively writable elements. `cols` was checked to be positive.
     let buf = unsafe { std::slice::from_raw_parts_mut(buf, cols as usize) };
-    // SAFETY: The caller guarantees main-thread access and therefore unique
-    // access to the global glyph mapping for the duration of this call.
-    let glyph_map_ptr = &raw mut GLYPH_MAPPING;
-    let glyph_map = unsafe { &mut *glyph_map_ptr };
-    ArabicShaper::new(glyph_map).shape(buf);
+    let mut glyph_mapping = lock_glyph_mapping();
+    ArabicShaper::new(&mut glyph_mapping).shape(buf);
 }
 
 /// @return ascii char or NULL_TERMINATOR if not ascii
