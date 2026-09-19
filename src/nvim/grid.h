@@ -96,6 +96,7 @@ extern int linebuf_put_cell(int col, schar_T sc, int attr, colnr_T vcol);
 extern int linebuf_update_cell(int col, schar_T sc, bool replace_char, int attr,
                                colnr_T vcol);
 extern void linebuf_put_char_pair(int col, schar_T first, schar_T second);
+extern void linebuf_fill_vcols(int start_col, int width, colnr_T vcol);
 extern void linebuf_fill_vcols_from(int start_col, int width, colnr_T first_vcol);
 extern void linebuf_mirror(int *firstp, int *lastp, int *clearp, int width);
 extern void grid_line_flush(void);

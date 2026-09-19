@@ -964,6 +964,17 @@ impl LineBuffer {
         true
     }
 
+    /// Fills a virtual-column range with one value.
+    ///
+    /// Returns whether the complete range belongs to the initialized buffer.
+    fn fill_vcols(&mut self, range: std::ops::Range<usize>, vcol: VimColNrT) -> bool {
+        let Some(vcols) = self.vcols.get_mut(range) else {
+            return false;
+        };
+        vcols.fill(vcol);
+        true
+    }
+
     /// Fills a virtual-column range with consecutive values.
     ///
     /// Returns whether the complete range belongs to the initialized buffer
@@ -1915,6 +1926,23 @@ pub extern "C" fn linebuf_update_cell(
     } else {
         col
     }
+}
+
+/// Fills a line-buffer range with one virtual column.
+///
+/// Negative positions, negative widths, integer overflow, and out-of-bounds
+/// ranges leave the line buffer unchanged.
+#[unsafe(no_mangle)]
+pub extern "C" fn linebuf_fill_vcols(start_col: libc::c_int, width: libc::c_int, vcol: VimColNrT) {
+    if start_col < 0 || width < 0 {
+        return;
+    }
+    let Some(end_col) = start_col.checked_add(width) else {
+        return;
+    };
+
+    let mut line_buffer = LineBufferGuard::acquire();
+    line_buffer.fill_vcols(start_col as usize..end_col as usize, vcol);
 }
 
 /// Fills a line-buffer range with consecutive virtual columns.
@@ -3870,6 +3898,21 @@ mod tests {
         assert!(!line_buffer.fill_vcols_from(4..6, 0));
         assert!(!line_buffer.fill_vcols_from(0..2, VimColNrT::MAX));
         assert_eq!(line_buffer.vcols, [9, 20, 21, 22, 9]);
+    }
+
+    #[test]
+    fn line_buffer_fills_constant_virtual_columns() {
+        let mut line_buffer = LineBuffer::new(5);
+        line_buffer.chars.fill(schar_from_ascii('x'));
+        line_buffer.attrs.fill(7);
+        line_buffer.vcols.fill(9);
+
+        assert!(line_buffer.fill_vcols(1..4, 20));
+
+        assert_eq!(line_buffer.chars, [schar_from_ascii('x'); 5]);
+        assert_eq!(line_buffer.attrs, [7; 5]);
+        assert_eq!(line_buffer.vcols, [9, 20, 20, 20, 9]);
+        assert!(!line_buffer.fill_vcols(4..6, 0));
     }
 
     #[test]

@@ -3212,20 +3212,15 @@ end_check:
 
       int draw_col = wlv.col - wlv.boguscols;
 
-      for (int i = draw_col; i < view_width; i++) {
-        linebuf_vcol[wlv.off + (i - draw_col)] = wlv.vcol - 1;
-      }
+      linebuf_fill_vcols(wlv.off, view_width - draw_col, wlv.vcol - 1);
 
       // Apply 'cursorline' highlight.
       if (wlv.boguscols != 0 && (wlv.line_attr_lowprio != 0 || wlv.line_attr != 0)) {
         int attr = hl_combine_attr(wlv.line_attr_lowprio, wlv.line_attr);
-        while (draw_col < view_width) {
-          linebuf_char[wlv.off] = schar_from_char(' ');
-          linebuf_attr[wlv.off] = attr;
-          // linebuf_vcol[] already filled by the for loop above
-          wlv.off++;
-          draw_col++;
-        }
+        int start_off = wlv.off;
+        wlv.off = linebuf_fill_chars_and_attrs(wlv.off, view_width - draw_col,
+                                               schar_from_char(' '), attr);
+        draw_col += wlv.off - start_off;
       }
 
       if (has_virt_line) {
