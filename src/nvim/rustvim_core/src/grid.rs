@@ -1,4 +1,5 @@
 // vim: sw=4
+mod cell;
 mod line_buffer;
 
 use crate::{
@@ -16,9 +17,8 @@ use std::{
     },
 };
 
+use cell::GridCell;
 pub use line_buffer::LineBuffer;
-#[cfg(test)]
-use line_buffer::LineCell;
 
 /// if data[0] is 0xFF, then data[1..4] is a 24-bit index (in machine endianness)
 /// otherwise it must be a UTF-8 string of length maximum 4 (no NUL when n=4)
@@ -336,7 +336,7 @@ impl ScreenGrid {
 
     fn realloc_line_buffer(&self, line_buffer: &mut LineBuffer) {
         let ucols = self.cols as usize;
-        if ucols <= line_buffer.size {
+        if ucols <= line_buffer.len() {
             return;
         }
         line_buffer.realloc(ucols);
@@ -461,11 +461,11 @@ impl ScreenGrid {
     fn is_char_needs_redraw(&self, col: usize, off_to: usize, cols: i32, lb: &LineBuffer) -> bool {
         unsafe {
             cols > 0
-                && ((lb.chars[col] != self.chars[off_to]
-                    || lb.attrs[col] != self.attrs[off_to]
+                && ((lb.cells[col].character != self.chars[off_to]
+                    || lb.cells[col].attribute != self.attrs[off_to]
                     || (cols > 1
-                        && lb.chars[col + 1] == 0
-                        && lb.chars[col + 1] != self.chars[off_to + 1]))
+                        && lb.cells[col + 1].character == 0
+                        && lb.cells[col + 1].character != self.chars[off_to + 1]))
                     || (rdb_flags & RdbFlags::Nodelta as u32 != 0))
         }
     }
@@ -525,8 +525,9 @@ impl ScreenGrid {
         // When at the start of the text and overwriting the right half of a
         // two-cell character in the same grid, truncate that into a '>'.
         if col > 0 && self.chars[offset_to + col as usize] == 0 {
-            lb.chars[col as usize - 1] = schar_from_ascii('>');
-            lb.attrs[col as usize - 1] = self.attrs[offset_to + col as usize - 1];
+            let cell = &mut lb.cells[col as usize - 1];
+            cell.character = schar_from_ascii('>');
+            cell.attribute = self.attrs[offset_to + col as usize - 1];
             col -= 1;
         }
 
@@ -544,13 +545,14 @@ impl ScreenGrid {
                 // is the only active borrow of the global glyph mapping.
                 let glyph_map_ptr = &raw mut GLYPH_MAPPING;
                 let glyph_map = &mut *glyph_map_ptr;
-                ArabicShaper::new(glyph_map).shape(&mut lb.chars[col as usize..endcol as usize]);
+                ArabicShaper::new(glyph_map).shape(&mut lb.cells[col as usize..endcol as usize]);
             }
         }
 
         if bg_attr != 0 {
             for c in col as usize..endcol as usize {
-                lb.attrs[c] = unsafe { hl_combine_attr(bg_attr, lb.attrs[c]) };
+                let cell = &mut lb.cells[c];
+                cell.attribute = unsafe { hl_combine_attr(bg_attr, cell.attribute) };
             }
         }
         let mut redraw_next =
@@ -561,7 +563,7 @@ impl ScreenGrid {
         while col < endcol {
             // 1: normal char
             // 2: occupies two display cells
-            let char_cells = if col + 1 < endcol && lb.chars[col as usize + 1] == 0 {
+            let char_cells = if col + 1 < endcol && lb.cells[col as usize + 1].character == 0 {
                 2
             } else {
                 1
@@ -595,22 +597,23 @@ impl ScreenGrid {
                     clear_next = true;
                 }
 
-                self.chars[offset] = lb.chars[col as usize];
+                let cell = lb.cells[col as usize];
+                self.chars[offset] = cell.character;
                 if char_cells == 2 {
-                    self.chars[offset + 1] = lb.chars[col as usize + 1];
+                    self.chars[offset + 1] = lb.cells[col as usize + 1].character;
                 }
 
-                self.attrs[offset] = lb.attrs[col as usize];
+                self.attrs[offset] = cell.attribute;
                 // For simplicity set the attributes of second half of a
                 // double-wide character equal to the first half.
                 if char_cells == 2 {
-                    self.attrs[offset + 1] = lb.attrs[col as usize];
+                    self.attrs[offset + 1] = cell.attribute;
                 }
             }
 
-            self.vcols[offset] = lb.vcols[col as usize];
+            self.vcols[offset] = lb.cells[col as usize].virtual_column;
             if char_cells == 2 {
-                self.vcols[offset + 1] = lb.vcols[col as usize + 1];
+                self.vcols[offset + 1] = lb.cells[col as usize + 1].virtual_column;
             }
 
             col += char_cells;
@@ -1051,7 +1054,7 @@ impl LineState {
         self.active = true;
         self.row = row;
         self.col_offset = col;
-        self.first = line_buf.size as i32;
+        self.first = line_buf.len() as i32;
         self.max_col = std::cmp::min(cols, cols - self.col_offset);
         self.last = 0;
         self.clear_to = 0;
@@ -1059,7 +1062,7 @@ impl LineState {
         self.clear_attr = 0;
         self.flags = 0;
 
-        assert!(self.max_col <= line_buf.size as i32);
+        assert!(self.max_col <= line_buf.len() as i32);
 
         unsafe {
             if full_screen && (rdb_flags & RdbFlags::Invalid as u32 != 0) {
@@ -1091,13 +1094,12 @@ impl LineState {
         if col >= self.max_col {
             return;
         }
-        lb.chars[col as usize] = sc;
-        lb.attrs[col as usize] = attr;
+        lb.cells[col as usize] = GridCell::new(sc, attr, -1);
         self.first = std::cmp::min(self.first, col);
         // TODO(bfredl): Y U NO DOUBLEWIDTH?
         self.last = std::cmp::max(self.last, col + 1);
-        lb.vcols[col as usize] = -1;
     }
+
     /// Buffers text at `col` without crossing the current line boundary.
     ///
     /// Returns the number of occupied screen cells.
@@ -1138,18 +1140,18 @@ impl LineState {
 
             // When at the start of the text and overwriting the right half of a
             // two-cell character in the same grid, truncate that into a '>'.
-            if i == 0 && col > self.first && col < self.last && lb.chars[col as usize] == 0 {
-                lb.chars[col as usize - 1] = schar_from_ascii('>');
+            if i == 0
+                && col > self.first
+                && col < self.last
+                && lb.cells[col as usize].character == 0
+            {
+                lb.cells[col as usize - 1].character = schar_from_ascii('>');
             }
 
             let ucol = col as usize;
-            lb.chars[ucol] = schar;
-            lb.attrs[ucol] = attr;
-            lb.vcols[ucol] = -1;
+            lb.cells[ucol] = GridCell::new(schar, attr, -1);
             if mbyte_cells == 2 {
-                lb.chars[ucol + 1] = 0;
-                lb.attrs[ucol + 1] = attr;
-                lb.vcols[ucol + 1] = -1;
+                lb.cells[ucol + 1] = GridCell::new(0, attr, -1);
             }
             col += mbyte_cells;
             for _ in 0..mbyte_blen - 1 {
@@ -1670,7 +1672,7 @@ pub extern "C" fn linebuf_reset(width: libc::c_int) {
         return;
     };
     let mut line_buffer = LineBufferGuard::acquire();
-    if width <= line_buffer.size {
+    if width <= line_buffer.len() {
         line_buffer.fill(0..width, schar_from_ascii(' '), 0, -1);
     }
 }
@@ -3189,6 +3191,32 @@ impl GlyphMapping {
     }
 }
 
+/// A screen cell whose character can participate in Arabic shaping.
+trait ArabicShapeCell {
+    fn character(&self) -> VimSCharT;
+    fn set_character(&mut self, character: VimSCharT);
+}
+
+impl ArabicShapeCell for VimSCharT {
+    fn character(&self) -> VimSCharT {
+        *self
+    }
+
+    fn set_character(&mut self, character: VimSCharT) {
+        *self = character;
+    }
+}
+
+impl ArabicShapeCell for GridCell {
+    fn character(&self) -> VimSCharT {
+        self.character
+    }
+
+    fn set_character(&mut self, character: VimSCharT) {
+        self.character = character;
+    }
+}
+
 /// Applies Arabic presentation shaping to a sequence of screen cells.
 ///
 /// Glyph lookup and reinterning remain internal, so callers provide only a
@@ -3204,20 +3232,20 @@ impl<'a> ArabicShaper<'a> {
     }
 
     /// Shapes all Arabic cells in place, leaving other cells unchanged.
-    fn shape(&mut self, cells: &mut [VimSCharT]) {
+    fn shape<Cell: ArabicShapeCell>(&mut self, cells: &mut [Cell]) {
         let Some(start) = cells
             .iter()
-            .position(|cell| schar_in_arabic_block_impl(*cell, self.glyph_map))
+            .position(|cell| schar_in_arabic_block_impl(cell.character(), self.glyph_map))
         else {
             return;
         };
 
         let mut before = 0;
-        let mut current = self.glyph_map.codepoints(cells[start]);
+        let mut current = self.glyph_map.codepoints(cells[start].character());
         for index in start..cells.len() {
             let after = cells
                 .get(index + 1)
-                .map(|cell| self.glyph_map.codepoints(*cell))
+                .map(|cell| self.glyph_map.codepoints(cell.character()))
                 .unwrap_or_default();
 
             self.shape_cell(&mut cells[index], current, after, before);
@@ -3227,9 +3255,9 @@ impl<'a> ArabicShaper<'a> {
     }
 
     /// Shapes and reinterns one cell when its base is Arabic.
-    fn shape_cell(
+    fn shape_cell<Cell: ArabicShapeCell>(
         &mut self,
-        cell: &mut VimSCharT,
+        cell: &mut Cell,
         current: CellCodepoints,
         after: CellCodepoints,
         before: i32,
@@ -3243,9 +3271,9 @@ impl<'a> ArabicShaper<'a> {
             return;
         }
 
-        let glyph = self.glyph_map.resolve(*cell);
+        let glyph = self.glyph_map.resolve(cell.character());
         let shaped = glyph.replace_first_two_codepoints(current, replacement);
-        *cell = schar_from_bytes(shaped.as_bytes(), self.glyph_map);
+        cell.set_character(schar_from_bytes(shaped.as_bytes(), self.glyph_map));
     }
 
     /// Calls the remaining C shaping primitive for one cell.
@@ -3766,6 +3794,51 @@ pub unsafe extern "C" fn grid_del_lines(
 mod tests {
     use super::*;
 
+    fn characters(line_buffer: &LineBuffer) -> Vec<VimSCharT> {
+        line_buffer
+            .cells
+            .iter()
+            .map(|cell| cell.character)
+            .collect()
+    }
+
+    fn attributes(line_buffer: &LineBuffer) -> Vec<VimSAttrT> {
+        line_buffer
+            .cells
+            .iter()
+            .map(|cell| cell.attribute)
+            .collect()
+    }
+
+    fn virtual_columns(line_buffer: &LineBuffer) -> Vec<VimColNrT> {
+        line_buffer
+            .cells
+            .iter()
+            .map(|cell| cell.virtual_column)
+            .collect()
+    }
+
+    fn set_characters(line_buffer: &mut LineBuffer, characters: &[VimSCharT]) {
+        assert_eq!(line_buffer.len(), characters.len());
+        for (cell, &character) in line_buffer.cells.iter_mut().zip(characters) {
+            cell.character = character;
+        }
+    }
+
+    fn set_attributes(line_buffer: &mut LineBuffer, attributes: &[VimSAttrT]) {
+        assert_eq!(line_buffer.len(), attributes.len());
+        for (cell, &attribute) in line_buffer.cells.iter_mut().zip(attributes) {
+            cell.attribute = attribute;
+        }
+    }
+
+    fn set_virtual_columns(line_buffer: &mut LineBuffer, virtual_columns: &[VimColNrT]) {
+        assert_eq!(line_buffer.len(), virtual_columns.len());
+        for (cell, &virtual_column) in line_buffer.cells.iter_mut().zip(virtual_columns) {
+            cell.virtual_column = virtual_column;
+        }
+    }
+
     #[test]
     fn grid_handle_allocator_assigns_each_handle_once() {
         let allocator = GridHandleAllocator::new(DEFAULT_GRID_HANDLE);
@@ -3800,26 +3873,24 @@ mod tests {
     fn line_buffer_allocates_initialized_storage() {
         let line_buffer = LineBuffer::new(4);
 
-        assert_eq!(line_buffer.chars, [0; 4]);
-        assert_eq!(line_buffer.attrs, [0; 4]);
-        assert_eq!(line_buffer.vcols, [0; 4]);
-        assert_eq!(line_buffer.mirror_scratch, [LineCell::default(); 4]);
-        assert_eq!(line_buffer.size, 4);
+        assert_eq!(line_buffer.cells, [GridCell::default(); 4]);
+        assert_eq!(line_buffer.mirror_scratch, [GridCell::default(); 4]);
+        assert_eq!(line_buffer.len(), 4);
     }
 
     #[test]
     fn line_buffer_fill_resets_visible_prefix() {
         let mut line_buffer = LineBuffer::new(5);
-        line_buffer.chars.fill(schar_from_ascii('x'));
-        line_buffer.attrs.fill(7);
-        line_buffer.vcols.fill(9);
-        let scratch_cell = LineCell::new(11, 11, 11);
+        set_characters(&mut line_buffer, &[schar_from_ascii('x'); 5]);
+        set_attributes(&mut line_buffer, &[7; 5]);
+        set_virtual_columns(&mut line_buffer, &[9; 5]);
+        let scratch_cell = GridCell::new(11, 11, 11);
         line_buffer.mirror_scratch.fill(scratch_cell);
 
         line_buffer.fill(0..3, schar_from_ascii(' '), 0, -1);
 
         assert_eq!(
-            line_buffer.chars,
+            characters(&line_buffer),
             [
                 schar_from_ascii(' '),
                 schar_from_ascii(' '),
@@ -3828,22 +3899,22 @@ mod tests {
                 schar_from_ascii('x'),
             ]
         );
-        assert_eq!(line_buffer.attrs, [0, 0, 0, 7, 7]);
-        assert_eq!(line_buffer.vcols, [-1, -1, -1, 9, 9]);
+        assert_eq!(attributes(&line_buffer), [0, 0, 0, 7, 7]);
+        assert_eq!(virtual_columns(&line_buffer), [-1, -1, -1, 9, 9]);
         assert_eq!(line_buffer.mirror_scratch, [scratch_cell; 5]);
     }
 
     #[test]
     fn line_buffer_fills_chars_and_attrs_without_changing_vcols() {
         let mut line_buffer = LineBuffer::new(5);
-        line_buffer.chars.fill(schar_from_ascii('x'));
-        line_buffer.attrs.fill(7);
-        line_buffer.vcols.copy_from_slice(&[1, 2, 3, 4, 5]);
+        set_characters(&mut line_buffer, &[schar_from_ascii('x'); 5]);
+        set_attributes(&mut line_buffer, &[7; 5]);
+        set_virtual_columns(&mut line_buffer, &[1, 2, 3, 4, 5]);
 
         assert!(line_buffer.fill_chars_and_attrs(1..4, schar_from_ascii(' '), 42,));
 
         assert_eq!(
-            line_buffer.chars,
+            characters(&line_buffer),
             [
                 schar_from_ascii('x'),
                 schar_from_ascii(' '),
@@ -3852,8 +3923,8 @@ mod tests {
                 schar_from_ascii('x'),
             ]
         );
-        assert_eq!(line_buffer.attrs, [7, 42, 42, 42, 7]);
-        assert_eq!(line_buffer.vcols, [1, 2, 3, 4, 5]);
+        assert_eq!(attributes(&line_buffer), [7, 42, 42, 42, 7]);
+        assert_eq!(virtual_columns(&line_buffer), [1, 2, 3, 4, 5]);
 
         assert!(!line_buffer.fill_chars_and_attrs(4..6, 0, 0));
     }
@@ -3861,14 +3932,14 @@ mod tests {
     #[test]
     fn line_buffer_puts_chars_without_changing_metadata() {
         let mut line_buffer = LineBuffer::new(4);
-        line_buffer.chars.fill(schar_from_ascii(' '));
-        line_buffer.attrs.copy_from_slice(&[1, 2, 3, 4]);
-        line_buffer.vcols.copy_from_slice(&[5, 6, 7, 8]);
+        set_characters(&mut line_buffer, &[schar_from_ascii(' '); 4]);
+        set_attributes(&mut line_buffer, &[1, 2, 3, 4]);
+        set_virtual_columns(&mut line_buffer, &[5, 6, 7, 8]);
 
         assert!(line_buffer.put_chars(1, &[schar_from_ascii('S'), schar_from_ascii('G')],));
 
         assert_eq!(
-            line_buffer.chars,
+            characters(&line_buffer),
             [
                 schar_from_ascii(' '),
                 schar_from_ascii('S'),
@@ -3876,35 +3947,38 @@ mod tests {
                 schar_from_ascii(' '),
             ]
         );
-        assert_eq!(line_buffer.attrs, [1, 2, 3, 4]);
-        assert_eq!(line_buffer.vcols, [5, 6, 7, 8]);
+        assert_eq!(attributes(&line_buffer), [1, 2, 3, 4]);
+        assert_eq!(virtual_columns(&line_buffer), [5, 6, 7, 8]);
         assert!(!line_buffer.put_chars(3, &[1, 2]));
     }
 
     #[test]
     fn line_buffer_updates_cell_with_optional_character() {
         let mut line_buffer = LineBuffer::new(3);
-        line_buffer.chars.copy_from_slice(&[
-            schar_from_ascii('a'),
-            schar_from_ascii('b'),
-            schar_from_ascii('c'),
-        ]);
-        line_buffer.attrs.copy_from_slice(&[1, 2, 3]);
-        line_buffer.vcols.copy_from_slice(&[4, 5, 6]);
+        set_characters(
+            &mut line_buffer,
+            &[
+                schar_from_ascii('a'),
+                schar_from_ascii('b'),
+                schar_from_ascii('c'),
+            ],
+        );
+        set_attributes(&mut line_buffer, &[1, 2, 3]);
+        set_virtual_columns(&mut line_buffer, &[4, 5, 6]);
 
         assert!(line_buffer.update_cell(1, Some(schar_from_ascii('x')), 20, 50));
         assert!(line_buffer.update_cell(2, None, 30, 60));
 
         assert_eq!(
-            line_buffer.chars,
+            characters(&line_buffer),
             [
                 schar_from_ascii('a'),
                 schar_from_ascii('x'),
                 schar_from_ascii('c'),
             ]
         );
-        assert_eq!(line_buffer.attrs, [1, 20, 30]);
-        assert_eq!(line_buffer.vcols, [4, 50, 60]);
+        assert_eq!(attributes(&line_buffer), [1, 20, 30]);
+        assert_eq!(virtual_columns(&line_buffer), [4, 50, 60]);
         assert!(!line_buffer.update_cell(3, Some(0), 0, 0));
     }
 
@@ -3912,24 +3986,24 @@ mod tests {
     fn line_buffer_puts_single_width_rendered_glyph() {
         let glyph_map = GlyphMapping::new();
         let mut line_buffer = LineBuffer::new(3);
-        line_buffer.chars.fill(schar_from_ascii(' '));
-        line_buffer.attrs.copy_from_slice(&[1, 2, 3]);
-        line_buffer.vcols.copy_from_slice(&[4, 5, 6]);
+        set_characters(&mut line_buffer, &[schar_from_ascii(' '); 3]);
+        set_attributes(&mut line_buffer, &[1, 2, 3]);
+        set_virtual_columns(&mut line_buffer, &[4, 5, 6]);
 
         assert_eq!(
             line_buffer.put_rendered_glyph(1, schar_from_ascii('x'), 20, 50, &glyph_map,),
             Some(1)
         );
         assert_eq!(
-            line_buffer.chars,
+            characters(&line_buffer),
             [
                 schar_from_ascii(' '),
                 schar_from_ascii('x'),
                 schar_from_ascii(' '),
             ]
         );
-        assert_eq!(line_buffer.attrs, [1, 20, 3]);
-        assert_eq!(line_buffer.vcols, [4, 50, 6]);
+        assert_eq!(attributes(&line_buffer), [1, 20, 3]);
+        assert_eq!(virtual_columns(&line_buffer), [4, 50, 6]);
     }
 
     #[test]
@@ -3937,20 +4011,20 @@ mod tests {
         let mut glyph_map = GlyphMapping::new();
         let glyph = super::schar_from_bytes("界".as_bytes(), &mut glyph_map);
         let mut line_buffer = LineBuffer::new(4);
-        line_buffer.chars.fill(schar_from_ascii(' '));
-        line_buffer.attrs.copy_from_slice(&[1, 2, 3, 4]);
-        line_buffer.vcols.copy_from_slice(&[5, 6, 7, 8]);
+        set_characters(&mut line_buffer, &[schar_from_ascii(' '); 4]);
+        set_attributes(&mut line_buffer, &[1, 2, 3, 4]);
+        set_virtual_columns(&mut line_buffer, &[5, 6, 7, 8]);
 
         assert_eq!(
             line_buffer.put_rendered_glyph(1, glyph, 20, 50, &glyph_map),
             Some(2)
         );
         assert_eq!(
-            line_buffer.chars,
+            characters(&line_buffer),
             [schar_from_ascii(' '), glyph, 0, schar_from_ascii(' '),]
         );
-        assert_eq!(line_buffer.attrs, [1, 20, 20, 4]);
-        assert_eq!(line_buffer.vcols, [5, 50, 51, 8]);
+        assert_eq!(attributes(&line_buffer), [1, 20, 20, 4]);
+        assert_eq!(virtual_columns(&line_buffer), [5, 50, 51, 8]);
 
         let original = format!("{line_buffer:?}");
         assert_eq!(
@@ -4010,15 +4084,18 @@ mod tests {
     fn line_buffer_puts_text_glyph_with_provided_virtual_columns() {
         let glyph = schar_from_ascii('w');
         let mut line_buffer = LineBuffer::new(5);
-        line_buffer.chars = vec![
-            schar_from_ascii(' '),
-            schar_from_ascii(' '),
-            schar_from_ascii(' '),
-            0,
-            schar_from_ascii('x'),
-        ];
-        line_buffer.attrs.copy_from_slice(&[1, 2, 3, 4, 5]);
-        line_buffer.vcols.copy_from_slice(&[6, 7, 8, 9, 10]);
+        set_characters(
+            &mut line_buffer,
+            &[
+                schar_from_ascii(' '),
+                schar_from_ascii(' '),
+                schar_from_ascii(' '),
+                0,
+                schar_from_ascii('x'),
+            ],
+        );
+        set_attributes(&mut line_buffer, &[1, 2, 3, 4, 5]);
+        set_virtual_columns(&mut line_buffer, &[6, 7, 8, 9, 10]);
 
         assert!(line_buffer.put_text_glyph(
             1,
@@ -4034,7 +4111,7 @@ mod tests {
         ));
 
         assert_eq!(
-            line_buffer.chars,
+            characters(&line_buffer),
             [
                 schar_from_ascii(' '),
                 glyph,
@@ -4043,8 +4120,8 @@ mod tests {
                 schar_from_ascii('x')
             ]
         );
-        assert_eq!(line_buffer.attrs, [1, 20, 20, 4, 5]);
-        assert_eq!(line_buffer.vcols, [6, 30, 40, 9, 10]);
+        assert_eq!(attributes(&line_buffer), [1, 20, 20, 4, 5]);
+        assert_eq!(virtual_columns(&line_buffer), [6, 30, 40, 9, 10]);
     }
 
     #[test]
@@ -4052,9 +4129,12 @@ mod tests {
         let first = schar_from_ascii('w');
         let second = schar_from_ascii('x');
         let mut line_buffer = LineBuffer::new(5);
-        line_buffer.chars = vec![first, 0, schar_from_ascii('c'), second, 0];
-        line_buffer.attrs.copy_from_slice(&[1, 2, 3, 4, 5]);
-        line_buffer.vcols.copy_from_slice(&[6, 7, 8, 9, 10]);
+        set_characters(
+            &mut line_buffer,
+            &[first, 0, schar_from_ascii('c'), second, 0],
+        );
+        set_attributes(&mut line_buffer, &[1, 2, 3, 4, 5]);
+        set_virtual_columns(&mut line_buffer, &[6, 7, 8, 9, 10]);
         let glyph = |character| TextGlyph {
             contents: TextGlyphContents::Character(character),
             width: 1,
@@ -4079,7 +4159,7 @@ mod tests {
         ));
 
         assert_eq!(
-            line_buffer.chars,
+            characters(&line_buffer),
             [
                 schar_from_ascii(' '),
                 schar_from_ascii('a'),
@@ -4088,40 +4168,40 @@ mod tests {
                 schar_from_ascii(' '),
             ]
         );
-        assert_eq!(line_buffer.attrs, [1, 20, 3, 30, 5]);
-        assert_eq!(line_buffer.vcols, [6, 7, 8, 9, 10]);
+        assert_eq!(attributes(&line_buffer), [1, 20, 3, 30, 5]);
+        assert_eq!(virtual_columns(&line_buffer), [6, 7, 8, 9, 10]);
     }
 
     #[test]
     fn line_buffer_fills_consecutive_virtual_columns() {
         let mut line_buffer = LineBuffer::new(5);
-        line_buffer.chars.fill(schar_from_ascii('x'));
-        line_buffer.attrs.fill(7);
-        line_buffer.vcols.fill(9);
+        set_characters(&mut line_buffer, &[schar_from_ascii('x'); 5]);
+        set_attributes(&mut line_buffer, &[7; 5]);
+        set_virtual_columns(&mut line_buffer, &[9; 5]);
 
         assert!(line_buffer.fill_vcols_from(1..4, 20));
 
-        assert_eq!(line_buffer.chars, [schar_from_ascii('x'); 5]);
-        assert_eq!(line_buffer.attrs, [7; 5]);
-        assert_eq!(line_buffer.vcols, [9, 20, 21, 22, 9]);
+        assert_eq!(characters(&line_buffer), [schar_from_ascii('x'); 5]);
+        assert_eq!(attributes(&line_buffer), [7; 5]);
+        assert_eq!(virtual_columns(&line_buffer), [9, 20, 21, 22, 9]);
 
         assert!(!line_buffer.fill_vcols_from(4..6, 0));
         assert!(!line_buffer.fill_vcols_from(0..2, VimColNrT::MAX));
-        assert_eq!(line_buffer.vcols, [9, 20, 21, 22, 9]);
+        assert_eq!(virtual_columns(&line_buffer), [9, 20, 21, 22, 9]);
     }
 
     #[test]
     fn line_buffer_fills_constant_virtual_columns() {
         let mut line_buffer = LineBuffer::new(5);
-        line_buffer.chars.fill(schar_from_ascii('x'));
-        line_buffer.attrs.fill(7);
-        line_buffer.vcols.fill(9);
+        set_characters(&mut line_buffer, &[schar_from_ascii('x'); 5]);
+        set_attributes(&mut line_buffer, &[7; 5]);
+        set_virtual_columns(&mut line_buffer, &[9; 5]);
 
         assert!(line_buffer.fill_vcols(1..4, 20));
 
-        assert_eq!(line_buffer.chars, [schar_from_ascii('x'); 5]);
-        assert_eq!(line_buffer.attrs, [7; 5]);
-        assert_eq!(line_buffer.vcols, [9, 20, 20, 20, 9]);
+        assert_eq!(characters(&line_buffer), [schar_from_ascii('x'); 5]);
+        assert_eq!(attributes(&line_buffer), [7; 5]);
+        assert_eq!(virtual_columns(&line_buffer), [9, 20, 20, 20, 9]);
         assert!(!line_buffer.fill_vcols(4..6, 0));
     }
 
@@ -4131,29 +4211,29 @@ mod tests {
 
         line_buffer.release();
 
-        assert!(line_buffer.chars.is_empty());
-        assert!(line_buffer.attrs.is_empty());
-        assert!(line_buffer.vcols.is_empty());
+        assert!(line_buffer.is_empty());
         assert!(line_buffer.mirror_scratch.is_empty());
-        assert_eq!(line_buffer.size, 0);
     }
 
     #[test]
     fn line_buffer_places_left_truncation_marker() {
         let mut line_buffer = LineBuffer::new(5);
-        line_buffer.chars = vec![
-            schar_from_ascii('a'),
-            schar_from_ascii('w'),
-            0,
-            schar_from_ascii('b'),
-            schar_from_ascii('c'),
-        ];
-        line_buffer.attrs.fill(7);
+        set_characters(
+            &mut line_buffer,
+            &[
+                schar_from_ascii('a'),
+                schar_from_ascii('w'),
+                0,
+                schar_from_ascii('b'),
+                schar_from_ascii('c'),
+            ],
+        );
+        set_attributes(&mut line_buffer, &[7; 5]);
 
         line_buffer.put_truncation_marker(1..4, TruncationSide::Left, None, 42);
 
         assert_eq!(
-            line_buffer.chars,
+            characters(&line_buffer),
             [
                 schar_from_ascii('a'),
                 schar_from_ascii('<'),
@@ -4162,27 +4242,30 @@ mod tests {
                 schar_from_ascii('c'),
             ]
         );
-        assert_eq!(line_buffer.attrs, [7, 42, 7, 7, 7]);
+        assert_eq!(attributes(&line_buffer), [7, 42, 7, 7, 7]);
 
         // A marker at the left edge must not inspect or modify the preceding
         // cell, even when the marker cell initially contains NUL.
-        line_buffer.chars[1] = 0;
+        line_buffer.cells[1].character = 0;
         line_buffer.put_truncation_marker(1..4, TruncationSide::Left, None, 42);
-        assert_eq!(line_buffer.chars[0], schar_from_ascii('a'));
-        assert_eq!(line_buffer.chars[1], schar_from_ascii('<'));
+        assert_eq!(line_buffer.cells[0].character, schar_from_ascii('a'));
+        assert_eq!(line_buffer.cells[1].character, schar_from_ascii('<'));
     }
 
     #[test]
     fn line_buffer_places_right_truncation_marker() {
         let mut line_buffer = LineBuffer::new(5);
-        line_buffer.chars = vec![
-            schar_from_ascii('a'),
-            schar_from_ascii('b'),
-            schar_from_ascii('w'),
-            0,
-            schar_from_ascii('c'),
-        ];
-        line_buffer.attrs.fill(7);
+        set_characters(
+            &mut line_buffer,
+            &[
+                schar_from_ascii('a'),
+                schar_from_ascii('b'),
+                schar_from_ascii('w'),
+                0,
+                schar_from_ascii('c'),
+            ],
+        );
+        set_attributes(&mut line_buffer, &[7; 5]);
 
         line_buffer.put_truncation_marker(
             1..4,
@@ -4192,7 +4275,7 @@ mod tests {
         );
 
         assert_eq!(
-            line_buffer.chars,
+            characters(&line_buffer),
             [
                 schar_from_ascii('a'),
                 schar_from_ascii('b'),
@@ -4201,26 +4284,29 @@ mod tests {
                 schar_from_ascii('c'),
             ]
         );
-        assert_eq!(line_buffer.attrs, [7, 7, 7, 42, 7]);
+        assert_eq!(attributes(&line_buffer), [7, 7, 7, 42, 7]);
     }
 
     #[test]
     fn line_buffer_puts_smoothscroll_marker() {
         let mut line_buffer = LineBuffer::new(5);
-        line_buffer.chars = vec![
-            schar_from_ascii('a'),
-            schar_from_ascii('b'),
-            schar_from_ascii('w'),
-            0,
-            schar_from_ascii('c'),
-        ];
-        line_buffer.attrs.fill(7);
-        line_buffer.vcols.copy_from_slice(&[1, 2, 3, 4, 5]);
+        set_characters(
+            &mut line_buffer,
+            &[
+                schar_from_ascii('a'),
+                schar_from_ascii('b'),
+                schar_from_ascii('w'),
+                0,
+                schar_from_ascii('c'),
+            ],
+        );
+        set_attributes(&mut line_buffer, &[7; 5]);
+        set_virtual_columns(&mut line_buffer, &[1, 2, 3, 4, 5]);
 
         assert!(line_buffer.put_smoothscroll_marker(5, false, 42));
 
         assert_eq!(
-            line_buffer.chars,
+            characters(&line_buffer),
             [
                 schar_from_ascii('<'),
                 schar_from_ascii('<'),
@@ -4229,28 +4315,31 @@ mod tests {
                 schar_from_ascii('c'),
             ]
         );
-        assert_eq!(line_buffer.attrs, [42, 42, 42, 7, 7]);
-        assert_eq!(line_buffer.vcols, [1, 2, 3, 4, 5]);
+        assert_eq!(attributes(&line_buffer), [42, 42, 42, 7, 7]);
+        assert_eq!(virtual_columns(&line_buffer), [1, 2, 3, 4, 5]);
     }
 
     #[test]
     fn line_buffer_puts_smoothscroll_marker_after_line_number() {
         let mut line_buffer = LineBuffer::new(7);
-        line_buffer.chars = vec![
-            schar_from_ascii('1'),
-            schar_from_ascii('2'),
-            schar_from_ascii('3'),
-            schar_from_ascii('w'),
-            0,
-            schar_from_ascii('c'),
-            schar_from_ascii('d'),
-        ];
-        line_buffer.attrs.fill(7);
+        set_characters(
+            &mut line_buffer,
+            &[
+                schar_from_ascii('1'),
+                schar_from_ascii('2'),
+                schar_from_ascii('3'),
+                schar_from_ascii('w'),
+                0,
+                schar_from_ascii('c'),
+                schar_from_ascii('d'),
+            ],
+        );
+        set_attributes(&mut line_buffer, &[7; 7]);
 
         assert!(line_buffer.put_smoothscroll_marker(7, true, 42));
 
         assert_eq!(
-            line_buffer.chars,
+            characters(&line_buffer),
             [
                 schar_from_ascii('1'),
                 schar_from_ascii('2'),
@@ -4261,7 +4350,7 @@ mod tests {
                 schar_from_ascii('d'),
             ]
         );
-        assert_eq!(line_buffer.attrs, [7, 7, 7, 42, 42, 42, 7]);
+        assert_eq!(attributes(&line_buffer), [7, 7, 7, 42, 42, 42, 7]);
 
         assert!(!line_buffer.put_smoothscroll_marker(8, false, 0));
     }
@@ -4522,13 +4611,14 @@ mod tests {
     #[test]
     fn line_buffer_mirrors_a_nonzero_range() {
         let mut lb = LineBuffer::new(8);
-        lb.chars = vec![9, 8, 1, 0, 2, 3, 7, 6];
-        lb.attrs = vec![10, 20, 30, 40, 50, 60, 70, 80];
-        lb.vcols = vec![1, 2, 3, 4, 5, 6, 7, 8];
+        set_characters(&mut lb, &[9, 8, 1, 0, 2, 3, 7, 6]);
+        set_attributes(&mut lb, &[10, 20, 30, 40, 50, 60, 70, 80]);
+        set_virtual_columns(&mut lb, &[1, 2, 3, 4, 5, 6, 7, 8]);
+
         lb.mirror(2, 6, 8);
 
-        assert_eq!(lb.chars, [9, 8, 3, 2, 1, 0, 7, 6]);
-        assert_eq!(lb.attrs, [10, 20, 60, 50, 40, 30, 70, 80]);
-        assert_eq!(lb.vcols, [1, 2, 6, 5, 4, 3, 7, 8]);
+        assert_eq!(characters(&lb), [9, 8, 3, 2, 1, 0, 7, 6]);
+        assert_eq!(attributes(&lb), [10, 20, 60, 50, 40, 30, 70, 80]);
+        assert_eq!(virtual_columns(&lb), [1, 2, 6, 5, 4, 3, 7, 8]);
     }
 }

@@ -1,58 +1,37 @@
 use super::{
     GlyphMapping, Highlight, TextGlyph, TextGlyphContents, TruncationSide, VimColNrT, VimSAttrT,
-    VimSCharT, VirtualColumns, VirtualTextHighlightMode, schar_cells_impl, schar_from_ascii,
-    schar_to_ascii,
+    VimSCharT, VirtualColumns, VirtualTextHighlightMode, cell::GridCell, schar_cells_impl,
+    schar_from_ascii, schar_to_ascii,
 };
 
-/// Complete contents of one temporary rendered screen cell.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(super) struct LineCell {
-    pub(super) character: VimSCharT,
-    pub(super) attribute: VimSAttrT,
-    pub(super) virtual_column: VimColNrT,
-}
-
-impl LineCell {
-    /// Creates a cell containing its character and rendering metadata.
-    pub(super) const fn new(
-        character: VimSCharT,
-        attribute: VimSAttrT,
-        virtual_column: VimColNrT,
-    ) -> Self {
-        Self {
-            character,
-            attribute,
-            virtual_column,
-        }
-    }
-}
-
+/// Owned temporary storage for one rendered screen line.
 #[derive(Debug)]
 pub struct LineBuffer {
-    pub(super) chars: Vec<VimSCharT>,
-    pub(super) attrs: Vec<VimSAttrT>,
-    pub(super) vcols: Vec<VimColNrT>,
-    pub(super) mirror_scratch: Vec<LineCell>,
-    pub(super) size: usize,
+    pub(super) cells: Vec<GridCell>,
+    pub(super) mirror_scratch: Vec<GridCell>,
 }
 
 impl LineBuffer {
     pub(super) const fn empty() -> Self {
         Self {
-            chars: Vec::new(),
-            attrs: Vec::new(),
-            vcols: Vec::new(),
+            cells: Vec::new(),
             mirror_scratch: Vec::new(),
-            size: 0,
         }
     }
 
     pub(super) fn realloc(&mut self, size: usize) {
-        self.size = size;
-        self.chars = vec![0; size];
-        self.attrs = vec![0; size];
-        self.vcols = vec![0; size];
-        self.mirror_scratch = vec![LineCell::default(); size];
+        self.cells = vec![GridCell::default(); size];
+        self.mirror_scratch = vec![GridCell::default(); size];
+    }
+
+    /// Returns the number of initialized screen cells.
+    pub(super) fn len(&self) -> usize {
+        self.cells.len()
+    }
+
+    /// Returns whether the buffer has no initialized screen cells.
+    pub(super) fn is_empty(&self) -> bool {
+        self.cells.is_empty()
     }
 
     pub(super) fn new(cols: usize) -> Self {
@@ -66,8 +45,10 @@ impl LineBuffer {
     }
 
     pub(super) fn invalidate_chars_and_attrs(&mut self) {
-        self.chars.fill(0xFF);
-        self.attrs.fill(0xFF);
+        for cell in &mut self.cells {
+            cell.character = 0xFF;
+            cell.attribute = 0xFF;
+        }
     }
 
     pub(super) fn fill(
@@ -77,11 +58,7 @@ impl LineBuffer {
         attr: VimSAttrT,
         vcol: VimColNrT,
     ) {
-        for i in range {
-            self.chars[i] = sc;
-            self.attrs[i] = attr;
-            self.vcols[i] = vcol;
-        }
+        self.cells[range].fill(GridCell::new(sc, attr, vcol));
     }
 
     /// Updates a cell's metadata and optionally replaces its character.
@@ -94,19 +71,15 @@ impl LineBuffer {
         attr: VimSAttrT,
         vcol: VimColNrT,
     ) -> bool {
-        let (Some(char_cell), Some(attr_cell), Some(vcol_cell)) = (
-            self.chars.get_mut(col),
-            self.attrs.get_mut(col),
-            self.vcols.get_mut(col),
-        ) else {
+        let Some(cell) = self.cells.get_mut(col) else {
             return false;
         };
 
         if let Some(character) = character {
-            *char_cell = character;
+            cell.character = character;
         }
-        *attr_cell = attr;
-        *vcol_cell = vcol;
+        cell.attribute = attr;
+        cell.virtual_column = vcol;
         true
     }
 
@@ -168,10 +141,6 @@ impl LineBuffer {
         let Some(line_end) = col.checked_add(max_cells) else {
             return false;
         };
-        let Some(end_col) = col.checked_add(glyph.width) else {
-            return false;
-        };
-
         match virtual_columns {
             VirtualColumns::Incrementing(first) => {
                 let Ok(last_offset) = VimColNrT::try_from(glyph.width - 1) else {
@@ -187,46 +156,56 @@ impl LineBuffer {
             | VirtualColumns::Preserve => {}
         }
 
-        if line_end > self.chars.len() || end_col > self.attrs.len() || end_col > self.vcols.len() {
+        let Some(line_cells) = self.cells.get_mut(col..line_end) else {
             return false;
-        }
-        let starts_in_continuation = self.chars[col] == 0;
+        };
+        let starts_in_continuation = line_cells[0].character == 0;
         if starts_in_continuation && (!repair_leading_continuation || col == 0) {
             return false;
         }
 
         if starts_in_continuation {
-            self.chars[col - 1] = schar_from_ascii(' ');
-            self.chars[col] = schar_from_ascii(' ');
+            self.cells[col - 1].character = schar_from_ascii(' ');
+            self.cells[col].character = schar_from_ascii(' ');
         }
-        let line_chars = &mut self.chars[col..line_end];
-        let attrs = &mut self.attrs[col..end_col];
-        let vcols = &mut self.vcols[col..end_col];
 
-        if glyph.width < max_cells && line_chars[glyph.width] == 0 {
-            line_chars[glyph.width] = schar_from_ascii(' ');
+        let line_cells = &mut self.cells[col..line_end];
+        if glyph.width < max_cells && line_cells[glyph.width].character == 0 {
+            line_cells[glyph.width].character = schar_from_ascii(' ');
         }
-        let chars = &mut line_chars[..glyph.width];
+        let glyph_cells = &mut line_cells[..glyph.width];
         match glyph.contents {
             TextGlyphContents::Character(character) => {
-                chars[0] = character;
+                glyph_cells[0].character = character;
                 if glyph.width > 1 {
-                    chars[1] = 0;
+                    glyph_cells[1].character = 0;
                 }
             }
-            TextGlyphContents::Spaces => chars.fill(schar_from_ascii(' ')),
+            TextGlyphContents::Spaces => {
+                for cell in glyph_cells.iter_mut() {
+                    cell.character = schar_from_ascii(' ');
+                }
+            }
         }
-        attrs.fill(attr);
+        for cell in glyph_cells.iter_mut() {
+            cell.attribute = attr;
+        }
         match virtual_columns {
             VirtualColumns::Incrementing(first) => {
-                for (offset, vcol) in vcols.iter_mut().enumerate() {
-                    *vcol = first + offset as VimColNrT;
+                for (offset, cell) in glyph_cells.iter_mut().enumerate() {
+                    cell.virtual_column = first + offset as VimColNrT;
                 }
             }
             VirtualColumns::Provided(values) => {
-                vcols.copy_from_slice(&values[..glyph.width]);
+                for (cell, &virtual_column) in glyph_cells.iter_mut().zip(&values[..glyph.width]) {
+                    cell.virtual_column = virtual_column;
+                }
             }
-            VirtualColumns::Unavailable => vcols.fill(-1),
+            VirtualColumns::Unavailable => {
+                for cell in glyph_cells.iter_mut() {
+                    cell.virtual_column = -1;
+                }
+            }
             VirtualColumns::Preserve => {}
         }
         true
@@ -252,10 +231,10 @@ impl LineBuffer {
         let Some(end_col) = col.checked_add(glyph.width) else {
             return false;
         };
-        let Some(&background_attr) = self.attrs.get(col) else {
+        let Some(background_attr) = self.cells.get(col).map(|cell| cell.attribute) else {
             return false;
         };
-        if end_col > self.attrs.len() {
+        if end_col > self.cells.len() {
             return false;
         }
 
@@ -270,7 +249,9 @@ impl LineBuffer {
             }
         };
         if through {
-            self.attrs[col..end_col].fill(attr.0);
+            for cell in &mut self.cells[col..end_col] {
+                cell.attribute = attr.0;
+            }
             true
         } else {
             self.put_text_glyph(
@@ -288,10 +269,12 @@ impl LineBuffer {
     ///
     /// Returns whether the complete range belongs to the initialized buffer.
     pub(super) fn fill_vcols(&mut self, range: std::ops::Range<usize>, vcol: VimColNrT) -> bool {
-        let Some(vcols) = self.vcols.get_mut(range) else {
+        let Some(cells) = self.cells.get_mut(range) else {
             return false;
         };
-        vcols.fill(vcol);
+        for cell in cells {
+            cell.virtual_column = vcol;
+        }
         true
     }
 
@@ -304,10 +287,10 @@ impl LineBuffer {
         range: std::ops::Range<usize>,
         first_vcol: VimColNrT,
     ) -> bool {
-        let Some(vcols) = self.vcols.get_mut(range) else {
+        let Some(cells) = self.cells.get_mut(range) else {
             return false;
         };
-        let Some(last_offset) = vcols.len().checked_sub(1) else {
+        let Some(last_offset) = cells.len().checked_sub(1) else {
             return true;
         };
         let Ok(last_offset) = VimColNrT::try_from(last_offset) else {
@@ -317,8 +300,8 @@ impl LineBuffer {
             return false;
         }
 
-        for (offset, vcol) in vcols.iter_mut().enumerate() {
-            *vcol = first_vcol + offset as VimColNrT;
+        for (offset, cell) in cells.iter_mut().enumerate() {
+            cell.virtual_column = first_vcol + offset as VimColNrT;
         }
         true
     }
@@ -332,15 +315,14 @@ impl LineBuffer {
         sc: VimSCharT,
         attr: VimSAttrT,
     ) -> bool {
-        let Some(chars) = self.chars.get_mut(range.clone()) else {
-            return false;
-        };
-        let Some(attrs) = self.attrs.get_mut(range) else {
+        let Some(cells) = self.cells.get_mut(range) else {
             return false;
         };
 
-        chars.fill(sc);
-        attrs.fill(attr);
+        for cell in cells {
+            cell.character = sc;
+            cell.attribute = attr;
+        }
         true
     }
 
@@ -352,10 +334,12 @@ impl LineBuffer {
         let Some(end_col) = start_col.checked_add(chars.len()) else {
             return false;
         };
-        let Some(destination) = self.chars.get_mut(start_col..end_col) else {
+        let Some(destination) = self.cells.get_mut(start_col..end_col) else {
             return false;
         };
-        destination.copy_from_slice(chars);
+        for (cell, &character) in destination.iter_mut().zip(chars) {
+            cell.character = character;
+        }
         true
     }
 
@@ -371,13 +355,10 @@ impl LineBuffer {
         marker: Option<VimSCharT>,
         attr: VimSAttrT,
     ) {
-        let Some(chars) = self.chars.get_mut(range.clone()) else {
+        let Some(cells) = self.cells.get_mut(range) else {
             return;
         };
-        let Some(attrs) = self.attrs.get_mut(range) else {
-            return;
-        };
-        if chars.is_empty() {
+        if cells.is_empty() {
             return;
         }
 
@@ -389,23 +370,23 @@ impl LineBuffer {
         });
         let marker_col = match side {
             TruncationSide::Left => 0,
-            TruncationSide::Right => chars.len() - 1,
+            TruncationSide::Right => cells.len() - 1,
         };
 
         match side {
             TruncationSide::Left => {
-                if chars.len() > 1 && chars[marker_col + 1] == 0 {
-                    chars[marker_col + 1] = schar_from_ascii(' ');
+                if cells.len() > 1 && cells[marker_col + 1].character == 0 {
+                    cells[marker_col + 1].character = schar_from_ascii(' ');
                 }
             }
             TruncationSide::Right => {
-                if chars.len() > 1 && chars[marker_col] == 0 {
-                    chars[marker_col - 1] = schar_from_ascii(' ');
+                if cells.len() > 1 && cells[marker_col].character == 0 {
+                    cells[marker_col - 1].character = schar_from_ascii(' ');
                 }
             }
         }
-        chars[marker_col] = marker;
-        attrs[marker_col] = attr;
+        cells[marker_col].character = marker;
+        cells[marker_col].attribute = attr;
     }
 
     /// Places the three-cell marker used for a smooth-scrolled line.
@@ -421,15 +402,15 @@ impl LineBuffer {
         preserve_line_number: bool,
         attr: VimSAttrT,
     ) -> bool {
-        if width > self.chars.len() || width > self.attrs.len() {
+        if width > self.cells.len() {
             return false;
         }
 
         let marker_start = if preserve_line_number {
-            self.chars[..width]
+            self.cells[..width]
                 .iter()
-                .take_while(|&&character| {
-                    schar_to_ascii(character).is_some_and(|c| c.is_ascii_digit())
+                .take_while(|cell| {
+                    schar_to_ascii(cell.character).is_some_and(|c| c.is_ascii_digit())
                 })
                 .count()
         } else {
@@ -454,15 +435,10 @@ impl LineBuffer {
             width
         );
 
-        for col in first..last {
-            self.mirror_scratch[col] =
-                LineCell::new(self.chars[col], self.attrs[col], self.vcols[col]);
-        }
+        self.mirror_scratch[first..last].copy_from_slice(&self.cells[first..last]);
 
         for (source, destination) in (first..last).zip((width - last..width - first).rev()) {
-            let cell = self.mirror_scratch[source];
-            self.attrs[destination] = cell.attribute;
-            self.vcols[destination] = cell.virtual_column;
+            self.cells[destination] = self.mirror_scratch[source];
         }
 
         let mirror = width - 1;
@@ -470,11 +446,11 @@ impl LineBuffer {
         while col < last {
             let rev = mirror - col;
             if col + 1 < last && self.mirror_scratch[col + 1].character == 0 {
-                self.chars[rev - 1] = self.mirror_scratch[col].character;
-                self.chars[rev] = 0;
+                self.cells[rev - 1].character = self.mirror_scratch[col].character;
+                self.cells[rev].character = 0;
                 col += 1;
             } else {
-                self.chars[rev] = self.mirror_scratch[col].character;
+                self.cells[rev].character = self.mirror_scratch[col].character;
             }
             col += 1;
         }
