@@ -2934,8 +2934,6 @@ int win_line(win_T *wp, linenr_T lnum, int startrow, int endrow, int col_rows, b
         }
 
         while (wlv.col < view_width) {
-          linebuf_char[wlv.off] = schar_from_ascii(' ');
-
           advance_color_col(&wlv, vcol_hlc(wlv));
 
           int col_attr = base_attr;
@@ -2953,9 +2951,8 @@ int win_line(win_T *wp, linenr_T lnum, int startrow, int endrow, int col_rows, b
 
           col_attr = hl_combine_attr(col_attr, wlv.line_attr);
 
-          linebuf_attr[wlv.off] = col_attr;
-          // linebuf_vcol[] already filled by the for loop above
-          wlv.off++;
+          wlv.off = linebuf_fill_chars_and_attrs(wlv.off, 1, schar_from_ascii(' '),
+                                                 col_attr);
           wlv.col++;
           wlv.vcol++;
 
