@@ -1,15 +1,38 @@
 use super::{
     GlyphMapping, Highlight, TextGlyph, TextGlyphContents, TruncationSide, VimColNrT, VimSAttrT,
-    VimSCharT, VimSScratchT, VirtualColumns, VirtualTextHighlightMode, schar_cells_impl,
-    schar_from_ascii, schar_to_ascii,
+    VimSCharT, VirtualColumns, VirtualTextHighlightMode, schar_cells_impl, schar_from_ascii,
+    schar_to_ascii,
 };
+
+/// Complete contents of one temporary rendered screen cell.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct LineCell {
+    pub(super) character: VimSCharT,
+    pub(super) attribute: VimSAttrT,
+    pub(super) virtual_column: VimColNrT,
+}
+
+impl LineCell {
+    /// Creates a cell containing its character and rendering metadata.
+    pub(super) const fn new(
+        character: VimSCharT,
+        attribute: VimSAttrT,
+        virtual_column: VimColNrT,
+    ) -> Self {
+        Self {
+            character,
+            attribute,
+            virtual_column,
+        }
+    }
+}
 
 #[derive(Debug)]
 pub struct LineBuffer {
     pub(super) chars: Vec<VimSCharT>,
     pub(super) attrs: Vec<VimSAttrT>,
     pub(super) vcols: Vec<VimColNrT>,
-    pub(super) scratch: Vec<VimSScratchT>,
+    pub(super) mirror_scratch: Vec<LineCell>,
     pub(super) size: usize,
 }
 
@@ -19,7 +42,7 @@ impl LineBuffer {
             chars: Vec::new(),
             attrs: Vec::new(),
             vcols: Vec::new(),
-            scratch: Vec::new(),
+            mirror_scratch: Vec::new(),
             size: 0,
         }
     }
@@ -29,7 +52,7 @@ impl LineBuffer {
         self.chars = vec![0; size];
         self.attrs = vec![0; size];
         self.vcols = vec![0; size];
-        self.scratch = vec![0; size];
+        self.mirror_scratch = vec![LineCell::default(); size];
     }
 
     pub(super) fn new(cols: usize) -> Self {
@@ -421,48 +444,7 @@ impl LineBuffer {
         true
     }
 
-    fn mirror_arr<T: Copy, U: Copy>(
-        arr: &mut [T],
-        scratch: &mut [U],
-        first: usize,
-        last: usize,
-        width: usize,
-    ) {
-        let scratch = unsafe {
-            std::slice::from_raw_parts_mut(scratch.as_mut_ptr() as *mut T, scratch.len())
-        };
-        let copy = &mut scratch[first..last];
-        copy.copy_from_slice(&arr[first..last]);
-        arr[width - last..width - first]
-            .iter_mut()
-            .rev()
-            .zip(copy.iter())
-            .for_each(|(dest, src)| *dest = *src);
-    }
-
-    fn mirror_schars(&mut self, first: usize, last: usize, width: usize) {
-        let scratch = unsafe {
-            std::slice::from_raw_parts_mut(
-                self.scratch.as_mut_ptr() as *mut VimSCharT,
-                self.scratch.len(),
-            )
-        };
-        scratch[first..last].copy_from_slice(&self.chars[first..last]);
-        let mirror = width - 1;
-        let mut col = first;
-        while col < last {
-            let rev = mirror - col;
-            if col + 1 < last && scratch[col + 1] == 0 {
-                self.chars[rev - 1] = scratch[col];
-                self.chars[rev] = 0;
-                col += 1;
-            } else {
-                self.chars[rev] = scratch[col];
-            }
-            col += 1;
-        }
-    }
-
+    /// Mirrors a rendered range while retaining double-width character pairs.
     pub(super) fn mirror(&mut self, first: usize, last: usize, width: usize) {
         assert!(
             first <= last && last <= width && last - first <= width,
@@ -471,8 +453,30 @@ impl LineBuffer {
             last,
             width
         );
-        self.mirror_schars(first, last, width);
-        Self::mirror_arr(&mut self.attrs, &mut self.scratch, first, last, width);
-        Self::mirror_arr(&mut self.vcols, &mut self.scratch, first, last, width);
+
+        for col in first..last {
+            self.mirror_scratch[col] =
+                LineCell::new(self.chars[col], self.attrs[col], self.vcols[col]);
+        }
+
+        for (source, destination) in (first..last).zip((width - last..width - first).rev()) {
+            let cell = self.mirror_scratch[source];
+            self.attrs[destination] = cell.attribute;
+            self.vcols[destination] = cell.virtual_column;
+        }
+
+        let mirror = width - 1;
+        let mut col = first;
+        while col < last {
+            let rev = mirror - col;
+            if col + 1 < last && self.mirror_scratch[col + 1].character == 0 {
+                self.chars[rev - 1] = self.mirror_scratch[col].character;
+                self.chars[rev] = 0;
+                col += 1;
+            } else {
+                self.chars[rev] = self.mirror_scratch[col].character;
+            }
+            col += 1;
+        }
     }
 }

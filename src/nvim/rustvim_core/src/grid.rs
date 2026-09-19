@@ -17,6 +17,8 @@ use std::{
 };
 
 pub use line_buffer::LineBuffer;
+#[cfg(test)]
+use line_buffer::LineCell;
 
 /// if data[0] is 0xFF, then data[1..4] is a 24-bit index (in machine endianness)
 /// otherwise it must be a UTF-8 string of length maximum 4 (no NUL when n=4)
@@ -24,8 +26,6 @@ pub type VimSCharT = u32;
 pub type VimSAttrT = i32;
 pub type VimColNrT = i32;
 
-/// must be at least as big as the biggest of schar_T, sattr_T, colnr_T
-pub type VimSScratchT = i32;
 pub type VimHandleT = libc::c_int;
 pub type VimDirtyColT = libc::c_int;
 
@@ -3803,7 +3803,7 @@ mod tests {
         assert_eq!(line_buffer.chars, [0; 4]);
         assert_eq!(line_buffer.attrs, [0; 4]);
         assert_eq!(line_buffer.vcols, [0; 4]);
-        assert_eq!(line_buffer.scratch, [0; 4]);
+        assert_eq!(line_buffer.mirror_scratch, [LineCell::default(); 4]);
         assert_eq!(line_buffer.size, 4);
     }
 
@@ -3813,7 +3813,8 @@ mod tests {
         line_buffer.chars.fill(schar_from_ascii('x'));
         line_buffer.attrs.fill(7);
         line_buffer.vcols.fill(9);
-        line_buffer.scratch.fill(11);
+        let scratch_cell = LineCell::new(11, 11, 11);
+        line_buffer.mirror_scratch.fill(scratch_cell);
 
         line_buffer.fill(0..3, schar_from_ascii(' '), 0, -1);
 
@@ -3829,7 +3830,7 @@ mod tests {
         );
         assert_eq!(line_buffer.attrs, [0, 0, 0, 7, 7]);
         assert_eq!(line_buffer.vcols, [-1, -1, -1, 9, 9]);
-        assert_eq!(line_buffer.scratch, [11; 5]);
+        assert_eq!(line_buffer.mirror_scratch, [scratch_cell; 5]);
     }
 
     #[test]
@@ -4133,7 +4134,7 @@ mod tests {
         assert!(line_buffer.chars.is_empty());
         assert!(line_buffer.attrs.is_empty());
         assert!(line_buffer.vcols.is_empty());
-        assert!(line_buffer.scratch.is_empty());
+        assert!(line_buffer.mirror_scratch.is_empty());
         assert_eq!(line_buffer.size, 0);
     }
 
@@ -4524,8 +4525,6 @@ mod tests {
         lb.chars = vec![9, 8, 1, 0, 2, 3, 7, 6];
         lb.attrs = vec![10, 20, 30, 40, 50, 60, 70, 80];
         lb.vcols = vec![1, 2, 3, 4, 5, 6, 7, 8];
-        lb.scratch = vec![0; 8];
-
         lb.mirror(2, 6, 8);
 
         assert_eq!(lb.chars, [9, 8, 3, 2, 1, 0, 7, 6]);
