@@ -3142,40 +3142,38 @@ end_check:
   return wlv.row;
 }
 
-/// Call grid_put_linebuf() using values from "wlv".
+/// Submit the completed line buffer using values from "wlv".
 /// Also takes care of putting "<<<" on the first line for 'smoothscroll'
 /// when 'showbreak' is not set.
 ///
 /// @param clear_end  clear until the end of the screen line.
-/// @param flags  for grid_put_linebuf(), but shouldn't contain SLF_RIGHTLEFT.
+/// @param flags  for grid_put_window_line(), but shouldn't contain SLF_RIGHTLEFT.
 static void wlv_put_linebuf(win_T *wp, const winlinevars_T *wlv, int endcol, bool clear_end,
                             int bg_attr, int flags)
 {
   GridView *grid = &wp->w_grid;
 
-  int startcol = 0;
-  int clear_width = clear_end ? wp->w_view_width : endcol;
-
   assert(!(flags & SLF_RIGHTLEFT));
-  if (wp->w_p_rl) {
-    linebuf_mirror(&startcol, &endcol, &clear_width, wp->w_view_width);
-    flags |= SLF_RIGHTLEFT;
-  }
 
-  // Take care of putting "<<<" on the first line for 'smoothscroll'.
-  if (wlv->row == 0 && wp->w_skipcol > 0
-      // do not overwrite the 'showbreak' text with "<<<"
-      && *get_showbreak_value(wp) == NUL
-      // do not overwrite the 'listchars' "precedes" text with "<<<"
-      && !(wp->w_p_list && wp->w_p_lcs_chars.prec != 0)) {
-    linebuf_put_smoothscroll_marker(wp->w_view_width, wp->w_p_nu && wp->w_p_rnu,
-                                    HL_ATTR(HLF_AT));
-  }
-
-  int row = wlv->row;
-  int coloff = 0;
-  ScreenGrid *g = grid_adjust(grid, &row, &coloff);
-  grid_put_linebuf(g, row, coloff, startcol, endcol, clear_width, bg_attr, 0, wlv->vcol - 1, flags);
+  const bool put_smoothscroll_marker = wlv->row == 0 && wp->w_skipcol > 0
+                                       // do not overwrite the 'showbreak' text with "<<<"
+                                       && *get_showbreak_value(wp) == NUL
+                                       // do not overwrite the 'listchars' "precedes" text with "<<<"
+                                       && !(wp->w_p_list && wp->w_p_lcs_chars.prec != 0);
+  GridLineSubmissionConfig config = {
+    .row = wlv->row,
+    .end_col = endcol,
+    .width = wp->w_view_width,
+    .bg_attr = bg_attr,
+    .smoothscroll_marker_attr = put_smoothscroll_marker ? HL_ATTR(HLF_AT) : 0,
+    .last_vcol = wlv->vcol - 1,
+    .flags = flags,
+    .clear_end = clear_end,
+    .right_left = wp->w_p_rl,
+    .put_smoothscroll_marker = put_smoothscroll_marker,
+    .preserve_line_number = wp->w_p_nu && wp->w_p_rnu,
+  };
+  grid_put_window_line(grid, &config);
 }
 
 static int decor_providers_setup(int rows_to_draw, bool draw_from_line_start, linenr_T lnum,

@@ -178,7 +178,7 @@ information.
   ml_get_curline_len                                get_cursor_line_len
   ml_get_cursor_len                                 get_cursor_pos_len
   screen_char                                             ui_line
-  screen_line                                        grid_put_linebuf
+  screen_line                                    grid_put_window_line
   screen_* (most functions)                               grid_*
   update_prepare, update_finish #9484                  removed; use update_screen only
   ARRAY_LENGTH                                          ARRAY_SIZE

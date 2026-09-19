@@ -24,7 +24,7 @@ EXTERN GridView default_gridview INIT( = { .target = &default_grid });
 /// While resizing the screen this flag is set.
 EXTERN bool resizing_screen INIT( = 0);
 
-/// flags for grid_put_linebuf()
+/// Flags for final grid line submission.
 enum {
   SLF_RIGHTLEFT = 1,
   SLF_WRAP      = 2,
@@ -46,6 +46,21 @@ typedef struct {
   int footer_width;
   int footer_attr;
 } GridBorderConfig;
+
+/// Values needed to prepare and submit a completed window line in Rust.
+typedef struct {
+  int row;
+  int end_col;
+  int width;
+  int bg_attr;
+  int smoothscroll_marker_attr;
+  colnr_T last_vcol;
+  int flags;
+  bool clear_end;
+  bool right_left;
+  bool put_smoothscroll_marker;
+  bool preserve_line_number;
+} GridLineSubmissionConfig;
 
 typedef struct {
   int end_col;
@@ -118,14 +133,11 @@ extern int linebuf_update_cell(int col, schar_T sc, bool replace_char, int attr,
 extern void linebuf_put_char_pair(int col, schar_T first, schar_T second);
 extern void linebuf_fill_vcols(int start_col, int width, colnr_T vcol);
 extern void linebuf_fill_vcols_from(int start_col, int width, colnr_T first_vcol);
-extern void linebuf_put_smoothscroll_marker(int width, bool preserve_line_number,
-                                            int attr);
-extern void linebuf_mirror(int *firstp, int *lastp, int *clearp, int width);
 extern void grid_line_flush(void);
 extern void grid_line_flush_if_valid_row(void);
 extern void grid_clear(GridView *grid, int start_row, int end_row, int start_col, int end_col, int attr);
-extern void grid_put_linebuf(ScreenGrid *grid, int row, int coloff, int col, int endcol, int clear_width,
-                      int bg_attr, int clear_attr, colnr_T last_vcol, int flags);
+extern void grid_put_window_line(const GridView *view,
+                                 const GridLineSubmissionConfig *config);
 extern void grid_draw_border_impl(ScreenGrid *grid, const GridBorderConfig *config, const int *adj,
                                   int winbl, int win_hl_attr_normal);
 

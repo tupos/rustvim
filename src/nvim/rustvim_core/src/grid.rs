@@ -26,6 +26,7 @@ use cell::GridCell;
 use fold_column::{FoldColumn, FoldColumnInfo, FoldColumnSymbols};
 pub use line_buffer::LineBuffer;
 use line_buffer::{LineTextRenderOptions, LineTextVirtualColumns};
+use line_submission::{LineSubmission, SmoothScrollMarker};
 use tabstops::TabStops;
 use virtual_text::{VirtualText, VirtualTextChunk, VirtualTextRenderOptions};
 
@@ -594,7 +595,6 @@ impl ScreenGrid {
     //     TODO: Make size proper sizes and not i32;
     //     TODO: this has high cyclomatic complexity and should be rewritten!!!
     //           as currently it is just a copy paste of the old c impl
-    // Keep the arguments aligned with grid_put_linebuf() in grid.c.
     #[allow(clippy::too_many_arguments)]
     fn put_line_buffer(
         &mut self,
@@ -2259,22 +2259,6 @@ pub extern "C" fn linebuf_fill_vcols_from(
     line_buffer.fill_vcols_from(start_col as usize..end_col as usize, first_vcol);
 }
 
-/// Places the three-cell marker used for a smooth-scrolled line.
-///
-/// Negative and out-of-bounds widths leave the line buffer unchanged.
-#[unsafe(no_mangle)]
-pub extern "C" fn linebuf_put_smoothscroll_marker(
-    width: libc::c_int,
-    preserve_line_number: bool,
-    attr: VimSAttrT,
-) {
-    let Ok(width) = usize::try_from(width) else {
-        return;
-    };
-    let mut line_buffer = LineBufferGuard::acquire();
-    line_buffer.put_smoothscroll_marker(width, preserve_line_number, attr);
-}
-
 /// Writes a two-cell character sequence without changing cell metadata.
 ///
 /// A negative or out-of-bounds column leaves the line buffer unchanged.
@@ -2285,31 +2269,6 @@ pub extern "C" fn linebuf_put_char_pair(col: libc::c_int, first: VimSCharT, seco
     };
     let mut line_buffer = LineBufferGuard::acquire();
     line_buffer.put_chars(col, &[first, second]);
-}
-
-/// # Safety
-///
-/// `pfirst`, `plast`, and `pclear` must point to valid, properly aligned
-/// writable integers. Their values and `width` must describe a valid range in
-/// the initialized line buffer.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn linebuf_mirror(
-    pfirst: *mut libc::c_int,
-    plast: *mut libc::c_int,
-    pclear: *mut libc::c_int,
-    width: libc::c_int,
-) {
-    let mut line_buffer = LineBufferGuard::acquire();
-    unsafe {
-        line_buffer.mirror(*pfirst as usize, *plast as usize, width as usize);
-
-        let first = *pfirst;
-        let last = *plast;
-
-        *pfirst = width - *pclear;
-        *pclear = width - first;
-        *plast = width - last;
-    }
 }
 
 /// End a group of grid_line_puts calls and send the screen buffer to the UI layer.
@@ -2334,38 +2293,84 @@ pub extern "C" fn grid_line_flush_if_valid_row() {
 
 /// # Safety
 ///
-/// `grid` must point to a valid, exclusively accessible `CScreenGrid` whose
-/// buffer pointers satisfy the ownership and layout requirements of
-/// `ScreenGrid`. The global line buffer must be initialized.
+/// `view` must point to a valid `CGridView`, and `config` must point to a valid
+/// `CGridLineSubmissionConfig`. The view's target grid must remain valid and
+/// exclusively accessible for the duration of the call. Its buffer pointers
+/// must satisfy the ownership and layout requirements of `ScreenGrid`. The
+/// global line buffer must be initialized.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn grid_put_linebuf(
-    grid: *mut CScreenGrid,
-    row: libc::c_int,
-    col_offset: libc::c_int,
-    col: libc::c_int,
-    end_col: libc::c_int,
-    clear_width: libc::c_int,
-    bg_attr: libc::c_int,
-    clear_attr: libc::c_int,
-    last_vcol: VimColNrT,
-    flags: libc::c_int,
+pub unsafe extern "C" fn grid_put_window_line(
+    view: *const CGridView,
+    config: *const CGridLineSubmissionConfig,
 ) {
+    if view.is_null() || config.is_null() {
+        return;
+    }
+
+    // SAFETY: The caller guarantees that both pointers reference initialized
+    // values for the duration of this call.
+    let (view, config) = unsafe { (&*view, &*config) };
+    let Some(row) = config.row.checked_add(view.row_offset) else {
+        return;
+    };
+    let target = view.target;
+    if target.is_null() {
+        return;
+    }
+
+    let (Ok(end_col), Ok(width)) = (
+        usize::try_from(config.end_col),
+        usize::try_from(config.width),
+    ) else {
+        return;
+    };
+    let smooth_scroll_marker = config.put_smoothscroll_marker.then(|| {
+        SmoothScrollMarker::new(config.preserve_line_number, config.smoothscroll_marker_attr)
+    });
+
     let mut line_buffer = LineBufferGuard::acquire();
-    let mut g = unsafe { ScreenGrid::take_from_cgrid(&mut *grid) };
-    g.put_line_buffer(
+    let Some(submission) = LineSubmission::prepare(
+        &mut line_buffer,
+        end_col,
+        width,
+        config.clear_end,
+        config.right_left,
+        smooth_scroll_marker,
+    ) else {
+        return;
+    };
+    let (Ok(start_col), Ok(end_col), Ok(clear_width)) = (
+        libc::c_int::try_from(submission.start_col()),
+        libc::c_int::try_from(submission.end_col()),
+        libc::c_int::try_from(submission.clear_width()),
+    ) else {
+        return;
+    };
+    let flags = if submission.is_right_left() {
+        config.flags | Slf::Rightleft as libc::c_int
+    } else {
+        config.flags
+    };
+
+    // SAFETY: The caller guarantees exclusive access to the target and valid
+    // Rust-owned buffer pointers. Ownership is returned below.
+    let mut grid = unsafe { ScreenGrid::take_from_cgrid(&mut *target) };
+    grid.put_line_buffer(
         row,
-        col_offset,
-        col,
+        view.col_offset,
+        start_col,
         end_col,
         clear_width,
-        bg_attr,
-        clear_attr,
-        last_vcol,
+        config.bg_attr,
+        0,
+        config.last_vcol,
         flags,
         &mut line_buffer,
     );
+    // SAFETY: This returns every grid allocation to the same C grid exactly
+    // once.
     unsafe {
-        *grid = g.to_cgrid();
+        *target = grid.to_cgrid();
     }
 }
 
@@ -2591,6 +2596,23 @@ pub struct CGridView {
     target: *mut CScreenGrid,
     row_offset: libc::c_int,
     col_offset: libc::c_int,
+}
+
+/// C representation of the options for submitting a completed window line.
+#[repr(C)]
+#[derive(Debug)]
+pub struct CGridLineSubmissionConfig {
+    row: libc::c_int,
+    end_col: libc::c_int,
+    width: libc::c_int,
+    bg_attr: libc::c_int,
+    smoothscroll_marker_attr: VimSAttrT,
+    last_vcol: VimColNrT,
+    flags: libc::c_int,
+    clear_end: bool,
+    right_left: bool,
+    put_smoothscroll_marker: bool,
+    preserve_line_number: bool,
 }
 
 /// C representation of one virtual-text chunk.
