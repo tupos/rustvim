@@ -93,6 +93,8 @@ extern void linebuf_reset(int width);
 extern int linebuf_fill_chars_and_attrs(int start_col, int width, schar_T sc,
                                         int attr);
 extern int linebuf_put_cell(int col, schar_T sc, int attr, colnr_T vcol);
+extern int linebuf_put_rendered_glyph(int col, schar_T sc, int attr,
+                                      colnr_T vcol);
 extern int linebuf_update_cell(int col, schar_T sc, bool replace_char, int attr,
                                colnr_T vcol);
 extern void linebuf_put_char_pair(int col, schar_T first, schar_T second);

@@ -964,6 +964,47 @@ impl LineBuffer {
         true
     }
 
+    /// Writes one rendered glyph and all metadata belonging to its screen cells.
+    ///
+    /// A double-width glyph occupies a character cell followed by an empty
+    /// continuation cell. Both cells receive the same attribute, and their
+    /// virtual columns are consecutive.
+    ///
+    /// Returns the number of occupied cells, or `None` if the complete glyph
+    /// does not fit or its continuation virtual column is not representable.
+    fn put_rendered_glyph(
+        &mut self,
+        col: usize,
+        character: VimSCharT,
+        attr: VimSAttrT,
+        vcol: VimColNrT,
+        glyph_map: &GlyphMapping,
+    ) -> Option<usize> {
+        let width = if schar_cells_impl(character, glyph_map) > 1 {
+            2
+        } else {
+            1
+        };
+        let continuation_vcol = if width > 1 {
+            Some(vcol.checked_add(1)?)
+        } else {
+            None
+        };
+        let end_col = col.checked_add(width)?;
+        let chars = self.chars.get_mut(col..end_col)?;
+        let attrs = self.attrs.get_mut(col..end_col)?;
+        let vcols = self.vcols.get_mut(col..end_col)?;
+
+        chars[0] = character;
+        attrs.fill(attr);
+        vcols[0] = vcol;
+        if let Some(continuation_vcol) = continuation_vcol {
+            chars[1] = 0;
+            vcols[1] = continuation_vcol;
+        }
+        Some(width)
+    }
+
     /// Fills a virtual-column range with one value.
     ///
     /// Returns whether the complete range belongs to the initialized buffer.
@@ -1934,6 +1975,36 @@ pub extern "C" fn linebuf_put_cell(
     } else {
         col
     }
+}
+
+/// Writes one rendered glyph and returns its screen-cell width.
+///
+/// Invalid positions, insufficient space, and virtual-column overflow leave
+/// the line buffer unchanged and return zero.
+///
+/// # Safety
+///
+/// Must be called on Neovim's main thread while the global glyph mapping is
+/// not being mutated.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn linebuf_put_rendered_glyph(
+    col: libc::c_int,
+    sc: VimSCharT,
+    attr: VimSAttrT,
+    vcol: VimColNrT,
+) -> libc::c_int {
+    let Ok(col) = usize::try_from(col) else {
+        return 0;
+    };
+    // SAFETY: The caller guarantees main-thread access and that the global
+    // glyph mapping is not mutated for this borrow.
+    let glyph_map = unsafe { &GLYPH_MAPPING };
+    let mut line_buffer = LineBufferGuard::acquire();
+
+    line_buffer
+        .put_rendered_glyph(col, sc, attr, vcol, glyph_map)
+        .and_then(|width| libc::c_int::try_from(width).ok())
+        .unwrap_or(0)
 }
 
 /// Updates one line-buffer cell and returns the following column.
@@ -3938,6 +4009,58 @@ mod tests {
         assert_eq!(line_buffer.attrs, [1, 20, 30]);
         assert_eq!(line_buffer.vcols, [4, 50, 60]);
         assert!(!line_buffer.update_cell(3, Some(0), 0, 0));
+    }
+
+    #[test]
+    fn line_buffer_puts_single_width_rendered_glyph() {
+        let glyph_map = GlyphMapping::new();
+        let mut line_buffer = LineBuffer::new(3);
+        line_buffer.chars.fill(schar_from_ascii(' '));
+        line_buffer.attrs.copy_from_slice(&[1, 2, 3]);
+        line_buffer.vcols.copy_from_slice(&[4, 5, 6]);
+
+        assert_eq!(
+            line_buffer.put_rendered_glyph(1, schar_from_ascii('x'), 20, 50, &glyph_map,),
+            Some(1)
+        );
+        assert_eq!(
+            line_buffer.chars,
+            [
+                schar_from_ascii(' '),
+                schar_from_ascii('x'),
+                schar_from_ascii(' '),
+            ]
+        );
+        assert_eq!(line_buffer.attrs, [1, 20, 3]);
+        assert_eq!(line_buffer.vcols, [4, 50, 6]);
+    }
+
+    #[test]
+    fn line_buffer_puts_double_width_rendered_glyph() {
+        let mut glyph_map = GlyphMapping::new();
+        let glyph = super::schar_from_bytes("界".as_bytes(), &mut glyph_map);
+        let mut line_buffer = LineBuffer::new(4);
+        line_buffer.chars.fill(schar_from_ascii(' '));
+        line_buffer.attrs.copy_from_slice(&[1, 2, 3, 4]);
+        line_buffer.vcols.copy_from_slice(&[5, 6, 7, 8]);
+
+        assert_eq!(
+            line_buffer.put_rendered_glyph(1, glyph, 20, 50, &glyph_map),
+            Some(2)
+        );
+        assert_eq!(
+            line_buffer.chars,
+            [schar_from_ascii(' '), glyph, 0, schar_from_ascii(' '),]
+        );
+        assert_eq!(line_buffer.attrs, [1, 20, 20, 4]);
+        assert_eq!(line_buffer.vcols, [5, 50, 51, 8]);
+
+        let original = format!("{line_buffer:?}");
+        assert_eq!(
+            line_buffer.put_rendered_glyph(3, glyph, 30, 60, &glyph_map),
+            None
+        );
+        assert_eq!(format!("{line_buffer:?}"), original);
     }
 
     #[test]

@@ -3066,26 +3066,17 @@ int win_line(win_T *wp, linenr_T lnum, int startrow, int endrow, int col_rows, b
       // TODO(bfredl): the main render loop should get called also with the virtual
       // lines chunks, so we get line wrapping and other Nice Things.
     } else if (wlv.skip_cells <= 0) {
-      // Store the character.
-      linebuf_char[wlv.off] = mb_schar;
-      if (multi_attr) {
-        linebuf_attr[wlv.off] = multi_attr;
-        multi_attr = 0;
-      } else {
-        linebuf_attr[wlv.off] = wlv.char_attr;
-      }
+      int cells = linebuf_put_rendered_glyph(wlv.off, mb_schar,
+                                             multi_attr ? multi_attr : wlv.char_attr,
+                                             wlv.vcol);
+      assert(cells > 0);
+      multi_attr = 0;
 
-      linebuf_vcol[wlv.off] = wlv.vcol;
-
-      if (schar_cells(mb_schar) > 1) {
+      if (cells > 1) {
         // Need to fill two screen columns.
         wlv.off++;
         wlv.col++;
-        // UTF-8: Put a 0 in the second screen char.
-        linebuf_char[wlv.off] = 0;
-        linebuf_attr[wlv.off] = linebuf_attr[wlv.off - 1];
-
-        linebuf_vcol[wlv.off] = ++wlv.vcol;
+        wlv.vcol++;
 
         // When "wlv.tocol" is halfway through a character, set it to the end
         // of the character, otherwise highlighting won't stop.
