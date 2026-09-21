@@ -126,7 +126,7 @@ impl LineBuffer {
         self.cells.is_empty()
     }
 
-    pub(super) fn new(cols: usize) -> Self {
+    pub(crate) fn new(cols: usize) -> Self {
         let mut line_buffer = Self::empty();
         line_buffer.realloc(cols);
         line_buffer

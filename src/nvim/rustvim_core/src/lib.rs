@@ -9,3 +9,4 @@ pub mod mbyte;
 pub mod option;
 pub mod pos;
 pub mod ui;
+mod ui_compositor;

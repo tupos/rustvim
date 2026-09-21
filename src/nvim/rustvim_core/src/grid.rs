@@ -3,6 +3,7 @@ mod cell;
 mod fold_column;
 mod line_buffer;
 mod line_submission;
+mod row;
 mod tabstops;
 mod virtual_text;
 
@@ -27,6 +28,9 @@ use fold_column::{FoldColumn, FoldColumnInfo, FoldColumnSymbols};
 pub use line_buffer::LineBuffer;
 use line_buffer::{LineTextRenderOptions, LineTextVirtualColumns};
 use line_submission::{LineSubmission, SmoothScrollMarker};
+#[cfg(test)]
+pub(crate) use row::GridRow;
+pub(crate) use row::GridRowSegment;
 use tabstops::TabStops;
 use virtual_text::{VirtualText, VirtualTextChunk, VirtualTextRenderOptions};
 
@@ -2688,9 +2692,19 @@ enum BorderPart {
 
 /// A resolved Neovim highlight attribute.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct Highlight(libc::c_int);
+pub(crate) struct Highlight(libc::c_int);
 
 impl Highlight {
+    /// Wraps a raw Neovim highlight attribute.
+    pub(crate) const fn new(attribute: libc::c_int) -> Self {
+        Self(attribute)
+    }
+
+    /// Returns the raw Neovim highlight attribute.
+    pub(crate) const fn raw(self) -> libc::c_int {
+        self.0
+    }
+
     /// Combines this base attribute with `primary` using Neovim's highlight
     /// composition rules.
     fn combine(self, primary: Self) -> Self {
@@ -2703,7 +2717,7 @@ impl Highlight {
     ///
     /// `through` requests preservation of the underlying character and is
     /// returned with the decision made by Neovim's blend rules.
-    fn blend(self, foreground: Self, mut through: bool) -> (Self, bool) {
+    pub(crate) fn blend(self, foreground: Self, mut through: bool) -> (Self, bool) {
         // SAFETY: The attributes and initial through flag are passed by value.
         // The C function only updates the local flag and returns an attribute.
         let attr = unsafe { hl_blend_attrs(self.0, foreground.0, &mut through) };
