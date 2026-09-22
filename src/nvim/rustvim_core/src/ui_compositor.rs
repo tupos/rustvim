@@ -209,9 +209,9 @@ impl<'output> CompositorSegment<'output> {
     }
 }
 
-/// State retained while C selects the layers for one composed line.
+/// State used while composing one output line.
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct ActiveCompositorLine {
+struct CompositorLine {
     columns: Range<usize>,
     skip_start: usize,
     skip_end: usize,
@@ -398,7 +398,6 @@ struct CompositorLineRequest<'grid> {
 struct CompositorBuffer {
     characters: Vec<VimSCharT>,
     attributes: Vec<VimSAttrT>,
-    active_line: Option<ActiveCompositorLine>,
 }
 
 impl CompositorBuffer {
@@ -407,15 +406,11 @@ impl CompositorBuffer {
         Self {
             characters: Vec::new(),
             attributes: Vec::new(),
-            active_line: None,
         }
     }
 
     /// Reallocates the buffer for a screen of `width` columns.
     fn resize(&mut self, width: usize) -> bool {
-        if self.active_line.is_some() {
-            return false;
-        }
         if self.characters.len() != width {
             self.characters = vec![schar_from_ascii(' '); width];
             self.attributes = vec![0; width];
@@ -425,9 +420,6 @@ impl CompositorBuffer {
 
     /// Releases all compositor storage.
     fn release(&mut self) -> bool {
-        if self.active_line.is_some() {
-            return false;
-        }
         self.characters = Vec::new();
         self.attributes = Vec::new();
         true
@@ -439,70 +431,65 @@ impl CompositorBuffer {
         request: CompositorLineRequest<'_>,
         layers: &CompositorLayerStack<'_>,
     ) -> Option<CompositorSubmission> {
-        let result = (|| {
-            let columns =
-                self.begin_line(request.start_column, request.end_column, request.flags)?;
-            let line_end = columns.end;
-            let mut column = columns.start;
-            let mut last_layer = None;
+        let mut line =
+            self.prepare_line(request.start_column, request.end_column, request.flags)?;
+        let line_end = line.columns.end;
+        let mut column = line.columns.start;
+        let mut last_layer = None;
 
-            while column < line_end {
-                let selection = layers.select_segment(request.row, column, line_end)?;
-                let selected_layer = layers.layer(selection.layer_index)?;
-                let separator = request
-                    .message_separator
-                    .filter(|separator| selected_layer.layer_index <= separator.layer.layer_index);
-                let composed_layer = separator.map_or(selected_layer, |separator| separator.layer);
-                let output_columns = selection.columns;
+        while column < line_end {
+            let selection = layers.select_segment(request.row, column, line_end)?;
+            let selected_layer = layers.layer(selection.layer_index)?;
+            let separator = request
+                .message_separator
+                .filter(|separator| selected_layer.layer_index <= separator.layer.layer_index);
+            let composed_layer = separator.map_or(selected_layer, |separator| separator.layer);
+            let output_columns = selection.columns;
 
-                let background = if composed_layer.blending {
-                    Some(
-                        layers
-                            .default_layer()?
-                            .screen_segment(request.row, output_columns.start..line_end)?,
-                    )
-                } else {
-                    None
-                };
+            let background = if composed_layer.blending {
+                Some(
+                    layers
+                        .default_layer()?
+                        .screen_segment(request.row, output_columns.start..line_end)?,
+                )
+            } else {
+                None
+            };
 
-                if let Some(separator) = separator {
-                    self.try_compose_separator_segment(
-                        output_columns.clone(),
-                        separator.character,
-                        separator.attribute,
-                        background,
-                    )?;
-                } else {
-                    let foreground =
-                        selected_layer.screen_segment(request.row, output_columns.clone())?;
-                    self.try_compose_grid_segment(output_columns.clone(), foreground, background)?;
-                }
-
-                column = output_columns.end;
-                last_layer = Some(composed_layer);
+            if let Some(separator) = separator {
+                self.try_compose_separator_segment(
+                    &mut line,
+                    output_columns.clone(),
+                    separator.character,
+                    separator.attribute,
+                    background,
+                )?;
+            } else {
+                let foreground =
+                    selected_layer.screen_segment(request.row, output_columns.clone())?;
+                self.try_compose_grid_segment(
+                    &mut line,
+                    output_columns.clone(),
+                    foreground,
+                    background,
+                )?;
             }
 
-            let allow_wrap = last_layer?.allows_wrap(request.screen_columns);
-            self.finish_line(request.flags, allow_wrap, request.abort_on_invalid)
-        })();
-
-        if result.is_none() {
-            self.active_line = None;
+            column = output_columns.end;
+            last_layer = Some(composed_layer);
         }
-        result
+
+        let allow_wrap = last_layer?.allows_wrap(request.screen_columns);
+        self.finish_line(line, request.flags, allow_wrap, request.abort_on_invalid)
     }
 
-    /// Begins one line and applies invalid-line edge expansion.
-    fn begin_line(
-        &mut self,
+    /// Prepares one line and applies invalid-line edge expansion.
+    fn prepare_line(
+        &self,
         start_col: i32,
         end_col: i32,
         flags: libc::c_int,
-    ) -> Option<Range<usize>> {
-        if self.active_line.is_some() {
-            return None;
-        }
-
+    ) -> Option<CompositorLine> {
         let width = i32::try_from(self.characters.len()).ok()?;
         let mut start_col = start_col.max(0);
         let mut end_col = end_col;
@@ -526,18 +513,17 @@ impl CompositorBuffer {
             return None;
         }
 
-        let columns = start_col..end_col;
-        self.active_line = Some(ActiveCompositorLine {
-            columns: columns.clone(),
+        Some(CompositorLine {
+            columns: start_col..end_col,
             skip_start,
             skip_end,
-        });
-        Some(columns)
+        })
     }
 
     /// Copies and optionally blends one already validated grid segment.
     fn try_compose_grid_segment(
         &mut self,
+        line: &mut CompositorLine,
         output_columns: Range<usize>,
         foreground: GridRowSegment<'_>,
         background: Option<GridRowSegment<'_>>,
@@ -547,7 +533,8 @@ impl CompositorBuffer {
             return None;
         }
 
-        let (line_start, line_end) = self.active_columns()?;
+        let line_start = line.columns.start;
+        let line_end = line.columns.end;
         if output_columns.start < line_start || output_columns.end > line_end {
             return None;
         }
@@ -565,12 +552,17 @@ impl CompositorBuffer {
                 .try_blend_prefix_over(background, source_len)?;
         }
 
-        self.resolve_segment_edges(output_columns, composition.is_followed_by_continuation())
+        self.resolve_segment_edges(
+            line,
+            output_columns,
+            composition.is_followed_by_continuation(),
+        )
     }
 
     /// Fills and optionally blends one message-separator segment.
     fn try_compose_separator_segment(
         &mut self,
+        line: &mut CompositorLine,
         output_columns: Range<usize>,
         character: VimSCharT,
         attribute: VimSAttrT,
@@ -581,7 +573,8 @@ impl CompositorBuffer {
             return None;
         }
 
-        let (line_start, line_end) = self.active_columns()?;
+        let line_start = line.columns.start;
+        let line_end = line.columns.end;
         if output_columns.start < line_start || output_columns.end > line_end {
             return None;
         }
@@ -594,18 +587,17 @@ impl CompositorBuffer {
                 .try_blend_prefix_over(background, source_len)?;
         }
 
-        self.resolve_segment_edges(output_columns, false)
+        self.resolve_segment_edges(line, output_columns, false)
     }
 
-    /// Completes the active line and validates its output attributes.
+    /// Completes one line and validates its output attributes.
     fn finish_line(
         &mut self,
+        mut line: CompositorLine,
         mut flags: libc::c_int,
         allow_wrap: bool,
         abort_on_invalid: bool,
     ) -> Option<CompositorSubmission> {
-        let mut line = self.active_line.take()?;
-
         if self.characters.get(line.columns.end - 1) == Some(&0) {
             line.skip_end = 0;
         }
@@ -638,20 +630,16 @@ impl CompositorBuffer {
         CompositorSegment::try_from_slices(characters, attributes)
     }
 
-    /// Returns the active line range.
-    fn active_columns(&self) -> Option<(usize, usize)> {
-        let columns = &self.active_line.as_ref()?.columns;
-        Some((columns.start, columns.end))
-    }
-
     /// Resolves wide-cell clipping at one selected segment boundary.
     fn resolve_segment_edges(
         &mut self,
+        line: &mut CompositorLine,
         output_columns: Range<usize>,
         followed_by_continuation: bool,
     ) -> Option<()> {
         let source_len = output_columns.end.checked_sub(output_columns.start)?;
-        let (line_start, line_end) = self.active_columns()?;
+        let line_start = line.columns.start;
+        let line_end = line.columns.end;
         let mut include_start =
             followed_by_continuation && output_columns.start == line_start && source_len == 1;
         let mut include_end = false;
@@ -667,7 +655,6 @@ impl CompositorBuffer {
             include_start = true;
         }
 
-        let line = self.active_line.as_mut()?;
         if include_start {
             line.skip_start = 0;
         }
@@ -1163,11 +1150,12 @@ mod tests {
         let mut compositor = CompositorBuffer::new();
 
         assert!(compositor.resize(2));
-        assert_eq!(compositor.begin_line(0, 2, 0), Some(0..2));
+        let mut line = compositor.prepare_line(0, 2, 0).unwrap();
+        assert_eq!(line.columns, 0..2);
         compositor
-            .try_compose_grid_segment(0..2, foreground, None)
+            .try_compose_grid_segment(&mut line, 0..2, foreground, None)
             .unwrap();
-        let submission = compositor.finish_line(0, true, false).unwrap();
+        let submission = compositor.finish_line(line, 0, true, false).unwrap();
 
         assert_eq!(
             compositor.characters,
