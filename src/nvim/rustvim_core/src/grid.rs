@@ -482,26 +482,6 @@ impl ScreenGrid {
         }
     }
 
-    /// Reallocates a C-owned grid with new dimensions.
-    ///
-    /// # Safety
-    ///
-    /// `grid` must satisfy the ownership requirements of
-    /// `ScreenGrid::take_from_cgrid`.
-    unsafe fn from_cgrid(
-        grid: &mut CScreenGrid,
-        rows: i32,
-        cols: i32,
-        valid: bool,
-        copy: bool,
-        line_buffer: &mut LineBuffer,
-    ) -> Self {
-        // SAFETY: The caller guarantees unique ownership of the C buffers.
-        let old_grid = unsafe { Self::take_from_cgrid(grid) };
-
-        Self::from_grid(&old_grid, rows, cols, valid, copy, line_buffer)
-    }
-
     pub fn clear_line(&mut self, offset: usize, width: usize, valid: bool) {
         let range = offset..(offset + width);
         self.chars[range.clone()].fill(schar_from_ascii(' '));
@@ -964,6 +944,69 @@ impl ScreenGrid {
         }
     }
 } // impl
+
+/// Temporary Rust ownership of the allocations exposed by a C screen grid.
+///
+/// The C structure remains at a stable address while this guard exists so
+/// synchronous C callbacks can inspect its fields as non-owning views. The
+/// allocations are returned to that structure when the guard is dropped.
+#[must_use = "dropping the guard restores ownership to the C screen grid"]
+pub(crate) struct ScreenGridGuard {
+    cgrid: std::ptr::NonNull<CScreenGrid>,
+    grid: Option<ScreenGrid>,
+}
+
+impl ScreenGridGuard {
+    /// Takes temporary ownership of a C screen grid's allocations.
+    ///
+    /// # Safety
+    ///
+    /// `cgrid` must point to a valid, exclusively owned `CScreenGrid` and
+    /// remain valid until this guard is dropped. Its buffers must satisfy the
+    /// ownership and layout requirements of `ScreenGrid::take_from_cgrid`.
+    pub(crate) unsafe fn take(cgrid: *mut CScreenGrid) -> Self {
+        let cgrid = std::ptr::NonNull::new(cgrid).expect("screen grid is nullptr");
+        // SAFETY: The caller guarantees exclusive ownership of the C grid and
+        // its allocations for the lifetime of this guard.
+        let grid = unsafe { ScreenGrid::take_from_cgrid(&mut *cgrid.as_ptr()) };
+        Self {
+            cgrid,
+            grid: Some(grid),
+        }
+    }
+}
+
+impl std::ops::Deref for ScreenGridGuard {
+    type Target = ScreenGrid;
+
+    fn deref(&self) -> &Self::Target {
+        self.grid
+            .as_ref()
+            .expect("screen grid guard does not own a grid")
+    }
+}
+
+impl std::ops::DerefMut for ScreenGridGuard {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.grid
+            .as_mut()
+            .expect("screen grid guard does not own a grid")
+    }
+}
+
+impl Drop for ScreenGridGuard {
+    fn drop(&mut self) {
+        let grid = self
+            .grid
+            .take()
+            .expect("screen grid guard does not own a grid");
+        // SAFETY: This guard uniquely owns the Rust grid and the C destination
+        // remains valid until the guard is dropped.
+        unsafe {
+            *self.cgrid.as_ptr() = grid.to_cgrid();
+        }
+    }
+}
 
 /// The screen edge at which a line is truncated.
 #[derive(Clone, Copy)]
@@ -1500,13 +1543,8 @@ impl CLineGrid {
     fn read_cell(&mut self, col: i32) -> (VimSCharT, VimSAttrT) {
         let target = self.target();
         // SAFETY: An active operation uniquely owns the target grid buffers.
-        let grid = unsafe { ScreenGrid::take_from_cgrid(&mut *target.as_ptr()) };
-        let result = self.state.read_cell(&grid, col);
-        // SAFETY: This returns the buffers to the same C grid exactly once.
-        unsafe {
-            *target.as_ptr() = grid.to_cgrid();
-        }
-        result
+        let grid = unsafe { ScreenGridGuard::take(target.as_ptr()) };
+        self.state.read_cell(&grid, col)
     }
 
     /// Buffers one screen character and its highlighting.
@@ -1575,12 +1613,8 @@ impl CLineGrid {
         }
 
         // SAFETY: The active operation uniquely owns the target grid buffers.
-        let mut grid = unsafe { ScreenGrid::take_from_cgrid(&mut *target.as_ptr()) };
+        let mut grid = unsafe { ScreenGridGuard::take(target.as_ptr()) };
         self.state.write_line(&mut grid, line_buf);
-        // SAFETY: This returns the buffers to the same C grid exactly once.
-        unsafe {
-            *target.as_ptr() = grid.to_cgrid();
-        }
     }
 
     /// Flushes the current line only if its row belongs to the target grid.
@@ -2355,8 +2389,8 @@ pub unsafe extern "C" fn grid_put_window_line(
     };
 
     // SAFETY: The caller guarantees exclusive access to the target and valid
-    // Rust-owned buffer pointers. Ownership is returned below.
-    let mut grid = unsafe { ScreenGrid::take_from_cgrid(&mut *target) };
+    // Rust-owned buffer pointers.
+    let mut grid = unsafe { ScreenGridGuard::take(target) };
     grid.put_line_buffer(
         row,
         view.col_offset,
@@ -2369,11 +2403,6 @@ pub unsafe extern "C" fn grid_put_window_line(
         flags,
         &mut line_buffer,
     );
-    // SAFETY: This returns every grid allocation to the same C grid exactly
-    // once.
-    unsafe {
-        *target = grid.to_cgrid();
-    }
 }
 
 /// Clears a rectangular region of a grid view.
@@ -2451,8 +2480,8 @@ pub unsafe extern "C" fn grid_draw_border_impl(
     };
 
     // SAFETY: The caller transfers exclusive ownership of the grid buffers
-    // into Rust for the duration of this function.
-    let mut rust_grid = unsafe { ScreenGrid::take_from_cgrid(&mut *grid) };
+    // into the guard for the duration of this function.
+    let mut rust_grid = unsafe { ScreenGridGuard::take(grid) };
     let mut line_buffer = LineBufferGuard::acquire();
     {
         let mut canvas = BorderCanvas {
@@ -2460,10 +2489,6 @@ pub unsafe extern "C" fn grid_draw_border_impl(
             line_buffer: &mut line_buffer,
         };
         border.draw(&mut canvas);
-    }
-    // SAFETY: Ownership of the grid allocations is returned exactly once.
-    unsafe {
-        *grid = rust_grid.to_cgrid();
     }
 }
 
@@ -3660,10 +3685,11 @@ pub unsafe extern "C" fn grid_alloc(
     valid: bool,
 ) {
     let mut line_buffer = LineBufferGuard::acquire();
-    unsafe {
-        let g = ScreenGrid::from_cgrid(&mut *grid, rows, cols, valid, copy, &mut line_buffer);
-        *grid = g.to_cgrid();
-    }
+    // SAFETY: The caller guarantees exclusive ownership of the C grid and its
+    // existing allocations.
+    let mut grid = unsafe { ScreenGridGuard::take(grid) };
+    let resized_grid = ScreenGrid::from_grid(&grid, rows, cols, valid, copy, &mut line_buffer);
+    *grid = resized_grid;
 }
 
 /// Enables dirty-column tracking and resets all rows to clean.
@@ -3679,14 +3705,9 @@ pub unsafe extern "C" fn grid_reset_dirty_columns(grid: *mut CScreenGrid) {
     }
 
     // SAFETY: The caller transfers exclusive ownership of the grid buffers
-    // into Rust for the duration of this function.
-    let mut rust_grid = unsafe { ScreenGrid::take_from_cgrid(&mut *grid) };
-    rust_grid.reset_dirty_columns();
-
-    // SAFETY: Ownership of every grid allocation is returned exactly once.
-    unsafe {
-        *grid = rust_grid.to_cgrid();
-    }
+    // into the guard for the duration of this function.
+    let mut grid = unsafe { ScreenGridGuard::take(grid) };
+    grid.reset_dirty_columns();
 }
 
 /// Scrolls dirty-column state upward by one row.
@@ -3702,14 +3723,9 @@ pub unsafe extern "C" fn grid_scroll_dirty_columns(grid: *mut CScreenGrid) {
     }
 
     // SAFETY: The caller transfers exclusive ownership of the grid buffers
-    // into Rust for the duration of this function.
-    let mut rust_grid = unsafe { ScreenGrid::take_from_cgrid(&mut *grid) };
-    rust_grid.scroll_dirty_columns();
-
-    // SAFETY: Ownership of every grid allocation is returned exactly once.
-    unsafe {
-        *grid = rust_grid.to_cgrid();
-    }
+    // into the guard for the duration of this function.
+    let mut grid = unsafe { ScreenGridGuard::take(grid) };
+    grid.scroll_dirty_columns();
 }
 
 /// Returns and clears the dirty column for one row.
@@ -3728,18 +3744,12 @@ pub unsafe extern "C" fn grid_take_dirty_column(
     }
 
     // SAFETY: The caller transfers exclusive ownership of the grid buffers
-    // into Rust for the duration of this function.
-    let mut rust_grid = unsafe { ScreenGrid::take_from_cgrid(&mut *grid) };
-    let dirty_col = usize::try_from(row)
+    // into the guard for the duration of this function.
+    let mut grid = unsafe { ScreenGridGuard::take(grid) };
+    usize::try_from(row)
         .ok()
-        .and_then(|row| rust_grid.take_dirty_column(row))
-        .unwrap_or_default();
-
-    // SAFETY: Ownership of every grid allocation is returned exactly once.
-    unsafe {
-        *grid = rust_grid.to_cgrid();
-    }
-    dirty_col
+        .and_then(|row| grid.take_dirty_column(row))
+        .unwrap_or_default()
 }
 
 /// # Safety
@@ -3810,14 +3820,10 @@ pub unsafe extern "C" fn grid_clear_row(
         return;
     };
 
-    // SAFETY: The caller transfers exclusive ownership of the grid buffers.
-    let mut g = unsafe { ScreenGrid::take_from_cgrid(&mut *grid) };
-    g.clear_row(row, width, valid);
-
-    // SAFETY: Ownership of every grid allocation is returned exactly once.
-    unsafe {
-        *grid = g.to_cgrid();
-    }
+    // SAFETY: The caller transfers exclusive ownership of the grid buffers to
+    // the guard.
+    let mut grid = unsafe { ScreenGridGuard::take(grid) };
+    grid.clear_row(row, width, valid);
 }
 
 /// @param buf need not be NUL terminated, but may not contain embedded NULs.
@@ -4005,13 +4011,10 @@ pub unsafe extern "C" fn grid_adjust(
 /// buffers satisfy the ownership and layout requirements of `ScreenGrid`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn grid_invalidate(grid: *mut CScreenGrid) {
-    // SAFETY: The caller transfers exclusive ownership of the grid buffers.
-    let mut g = unsafe { ScreenGrid::take_from_cgrid(&mut *grid) };
-    g.invalidate();
-    // SAFETY: Ownership of every grid allocation is returned exactly once.
-    unsafe {
-        *grid = g.to_cgrid();
-    }
+    // SAFETY: The caller transfers exclusive ownership of the grid buffers to
+    // the guard.
+    let mut grid = unsafe { ScreenGridGuard::take(grid) };
+    grid.invalidate();
 }
 
 /// Marks a logical grid row as invalid.
@@ -4029,14 +4032,10 @@ pub unsafe extern "C" fn grid_invalidate_row(grid: *mut CScreenGrid, row: libc::
         return;
     };
 
-    // SAFETY: The caller transfers exclusive ownership of the grid buffers.
-    let mut g = unsafe { ScreenGrid::take_from_cgrid(&mut *grid) };
-    g.invalidate_row(row);
-
-    // SAFETY: Ownership of every grid allocation is returned exactly once.
-    unsafe {
-        *grid = g.to_cgrid();
-    }
+    // SAFETY: The caller transfers exclusive ownership of the grid buffers to
+    // the guard.
+    let mut grid = unsafe { ScreenGridGuard::take(grid) };
+    grid.invalidate_row(row);
 }
 
 /// Get a single character directly from grid.chars
@@ -4055,16 +4054,12 @@ pub unsafe extern "C" fn grid_getchar(
     col: libc::c_int,
     attrp: *mut libc::c_int,
 ) -> VimSCharT {
-    let g = unsafe { ScreenGrid::take_from_cgrid(&mut *grid) };
-    let (sc, at) = g.get_char_and_attr(row as usize, col as usize);
+    let grid = unsafe { ScreenGridGuard::take(grid) };
+    let (sc, at) = grid.get_char_and_attr(row as usize, col as usize);
     if !attrp.is_null() {
         unsafe {
             *attrp = at;
         }
-    }
-    // SAFETY: Ownership of every grid allocation is returned exactly once.
-    unsafe {
-        *grid = g.to_cgrid();
     }
     sc
 }
@@ -4090,15 +4085,10 @@ pub unsafe extern "C" fn grid_get_vcol(
         return -1;
     };
 
-    // SAFETY: The caller transfers exclusive ownership of the grid buffers.
-    let g = unsafe { ScreenGrid::take_from_cgrid(&mut *grid) };
-    let vcol = g.get_vcol(row, col).unwrap_or(-1);
-
-    // SAFETY: Ownership of every grid allocation is returned exactly once.
-    unsafe {
-        *grid = g.to_cgrid();
-    }
-    vcol
+    // SAFETY: The caller transfers exclusive ownership of the grid buffers to
+    // the guard.
+    let grid = unsafe { ScreenGridGuard::take(grid) };
+    grid.get_vcol(row, col).unwrap_or(-1)
 }
 
 /// Put a unicode character in a screen cell.
@@ -4121,14 +4111,10 @@ pub extern "C" fn schar_from_char(mut c: libc::c_int) -> VimSCharT {
 /// `ScreenGrid`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn grid_assign_handle(grid: *mut CScreenGrid) {
-    let mut g = unsafe { ScreenGrid::take_from_cgrid(&mut *grid) };
-
-    GRID_HANDLE_ALLOCATOR.assign(&mut g.handle);
-
-    // SAFETY: Ownership of every grid allocation is returned exactly once.
-    unsafe {
-        *grid = g.to_cgrid();
-    }
+    // SAFETY: The caller transfers exclusive ownership of the grid buffers to
+    // the guard.
+    let mut grid = unsafe { ScreenGridGuard::take(grid) };
+    GRID_HANDLE_ALLOCATOR.assign(&mut grid.handle);
 }
 
 /// # Safety
@@ -4144,14 +4130,10 @@ pub unsafe extern "C" fn grid_ins_lines(
     col: libc::c_int,
     width: libc::c_int,
 ) {
-    let mut g = unsafe { ScreenGrid::take_from_cgrid(&mut *grid) };
-
-    g.ins_lines(row, line_count, end, col, width);
-
-    // SAFETY: Ownership of every grid allocation is returned exactly once.
-    unsafe {
-        *grid = g.to_cgrid();
-    }
+    // SAFETY: The caller transfers exclusive ownership of the grid buffers to
+    // the guard.
+    let mut grid = unsafe { ScreenGridGuard::take(grid) };
+    grid.ins_lines(row, line_count, end, col, width);
 }
 
 /// # Safety
@@ -4167,14 +4149,10 @@ pub unsafe extern "C" fn grid_del_lines(
     col: libc::c_int,
     width: libc::c_int,
 ) {
-    let mut g = unsafe { ScreenGrid::take_from_cgrid(&mut *grid) };
-
-    g.del_lines(row, line_count, end, col, width);
-
-    // SAFETY: Ownership of every grid allocation is returned exactly once.
-    unsafe {
-        *grid = g.to_cgrid();
-    }
+    // SAFETY: The caller transfers exclusive ownership of the grid buffers to
+    // the guard.
+    let mut grid = unsafe { ScreenGridGuard::take(grid) };
+    grid.del_lines(row, line_count, end, col, width);
 }
 
 #[cfg(test)]
@@ -4807,6 +4785,29 @@ mod tests {
 
         // SAFETY: `cgrid` still uniquely owns every transferred allocation.
         let _grid = unsafe { ScreenGrid::take_from_cgrid(&mut cgrid) };
+    }
+
+    #[test]
+    fn screen_grid_guard_restores_grid_on_drop() {
+        let mut line_buffer = LineBuffer::new(2);
+        let grid = ScreenGrid::new(1, 2, true, &mut line_buffer);
+        // SAFETY: Ownership of every grid allocation is transferred to
+        // `cgrid`.
+        let mut cgrid = unsafe { grid.to_cgrid() };
+
+        {
+            // SAFETY: `cgrid` exclusively owns valid grid allocations and
+            // remains alive until the guard is dropped.
+            let mut grid = unsafe { ScreenGridGuard::take(&raw mut cgrid) };
+            grid.chars[0] = schar_from_ascii('x');
+        }
+
+        // SAFETY: The guard returned ownership to `cgrid`.
+        let restored_grid = unsafe { ScreenGrid::take_from_cgrid(&mut cgrid) };
+        assert_eq!(
+            restored_grid.chars.as_slice(),
+            &[schar_from_ascii('x'), schar_from_ascii(' ')]
+        );
     }
 
     #[test]

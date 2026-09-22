@@ -1,7 +1,7 @@
 use crate::{
     defines::{Integer, OptInt},
     generated::enums::RdbFlags,
-    grid::{CScreenGrid, ScreenGrid, VimHandleT, VimSAttrT, VimSCharT},
+    grid::{CScreenGrid, ScreenGrid, ScreenGridGuard, VimHandleT, VimSAttrT, VimSCharT},
 };
 
 // TODO: move to highlight
@@ -105,10 +105,11 @@ pub unsafe extern "C" fn ui_line(
     clear_attr: libc::c_int,
     wrap: bool,
 ) {
-    // SAFETY: The caller transfers exclusive ownership of the grid buffers.
-    let g = unsafe { ScreenGrid::take_from_cgrid(&mut *grid) };
+    // SAFETY: The caller transfers exclusive ownership of the grid buffers to
+    // the guard.
+    let grid = unsafe { ScreenGridGuard::take(grid) };
     ui_line_r(
-        &g,
+        &grid,
         row,
         invalid_row,
         start_col,
@@ -117,9 +118,6 @@ pub unsafe extern "C" fn ui_line(
         clear_attr,
         wrap,
     );
-    unsafe {
-        *grid = g.to_cgrid();
-    }
 }
 
 // Keep the arguments aligned with ui_line() in ui.c.

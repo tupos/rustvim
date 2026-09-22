@@ -1,8 +1,8 @@
 use std::{ops::Range, slice};
 
 use crate::grid::{
-    CScreenGrid, GridRow, GridRowSegment, Highlight, ScreenGrid, VimSAttrT, VimSCharT,
-    schar_from_ascii, schar_from_char,
+    CScreenGrid, GridRow, GridRowSegment, Highlight, ScreenGrid, ScreenGridGuard, VimSAttrT,
+    VimSCharT, schar_from_ascii, schar_from_char,
 };
 
 /// Result of composing one foreground segment over its background.
@@ -207,8 +207,8 @@ pub unsafe extern "C" fn ui_comp_copy_grid_segment(
     }
 
     // SAFETY: The caller transfers exclusive ownership of the grid buffers
-    // into Rust for the duration of this function.
-    let rust_grid = unsafe { ScreenGrid::take_from_cgrid(&mut *grid) };
+    // into the guard for the duration of this function.
+    let rust_grid = unsafe { ScreenGridGuard::take(grid) };
     let composition = {
         // SAFETY: The caller guarantees that both output pointers describe
         // separate writable arrays of `len` elements which do not overlap the
@@ -218,11 +218,6 @@ pub unsafe extern "C" fn ui_comp_copy_grid_segment(
         CompositorSegment::try_from_slices(characters, attributes)
             .and_then(|mut output| output.try_copy_from_grid(&rust_grid, row, start_col..end_col))
     };
-
-    // SAFETY: Ownership of every grid allocation is returned exactly once.
-    unsafe {
-        *grid = rust_grid.to_cgrid();
-    }
 
     let Some(composition) = composition else {
         return not_copied;
