@@ -313,6 +313,31 @@ impl ScreenGrid {
         grid
     }
 
+    /// Returns whether this grid blends with the default-grid background.
+    pub(crate) fn blends_with_background(&self) -> bool {
+        self.blending
+    }
+
+    /// Returns this grid's position in the composed screen.
+    pub(crate) fn compositor_position(&self) -> (i32, i32) {
+        (self.comp_row, self.comp_col)
+    }
+
+    /// Returns the size currently requested by the compositor.
+    pub(crate) fn compositor_size(&self) -> (i32, i32) {
+        (self.comp_width, self.comp_height)
+    }
+
+    /// Returns this grid's index in the compositor layer stack.
+    pub(crate) fn compositor_index(&self) -> usize {
+        self.comp_index
+    }
+
+    /// Reports whether the compositor is temporarily ignoring this grid.
+    pub(crate) fn is_compositor_disabled(&self) -> bool {
+        self.comp_disabled
+    }
+
     pub fn from_grid(
         grid: &ScreenGrid,
         rows: i32,

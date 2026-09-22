@@ -1,13 +1,14 @@
 use std::{
     ops::Range,
+    slice,
     sync::{Mutex, MutexGuard},
 };
 
 use crate::{
     defines::Integer,
     grid::{
-        CScreenGrid, GridRow, GridRowSegment, Highlight, ScreenGridGuard, VimSAttrT, VimSCharT,
-        schar_from_ascii, schar_from_char,
+        CScreenGrid, GridRow, GridRowSegment, Highlight, ScreenGrid, ScreenGridGuard, VimSAttrT,
+        VimSCharT, schar_from_ascii, schar_from_char,
     },
 };
 
@@ -41,13 +42,19 @@ impl SegmentComposition {
     }
 }
 
-/// C-compatible range prepared for one compositor line.
+/// C representation of one complete compositor-line request.
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct CCompositorLineRange {
+#[derive(Clone, Copy, Debug)]
+pub struct CCompositorLineRequest {
+    row: Integer,
     start_col: Integer,
     end_col: Integer,
-    active: bool,
+    flags: libc::c_int,
+    message_separator_row: libc::c_int,
+    message_separator_character: VimSCharT,
+    message_separator_attribute: VimSAttrT,
+    screen_columns: libc::c_int,
+    abort_on_invalid: bool,
 }
 
 /// Output range prepared for one raw-line UI event.
@@ -210,10 +217,184 @@ struct ActiveCompositorLine {
     skip_end: usize,
 }
 
+/// One Rust-owned grid as positioned in the compositor layer stack.
+#[derive(Clone, Copy, Debug)]
+struct CompositorLayer<'grid> {
+    grid: &'grid ScreenGrid,
+    origin_row: i32,
+    origin_column: i32,
+    visible_width: i32,
+    visible_height: i32,
+    layer_index: usize,
+    blending: bool,
+    disabled: bool,
+    is_default: bool,
+}
+
+impl<'grid> CompositorLayer<'grid> {
+    /// Constructs a validated layer view from a Rust screen grid.
+    fn try_from_grid(grid: &'grid ScreenGrid, is_default: bool) -> Option<Self> {
+        let (origin_row, origin_column) = grid.compositor_position();
+        let (requested_width, requested_height) = grid.compositor_size();
+        let visible_width = grid.cols.min(requested_width);
+        let visible_height = grid.rows.min(requested_height);
+        if visible_width < 0 || visible_height < 0 {
+            return None;
+        }
+
+        Some(Self {
+            grid,
+            origin_row,
+            origin_column,
+            visible_width,
+            visible_height,
+            layer_index: grid.compositor_index(),
+            blending: grid.blends_with_background(),
+            disabled: grid.is_compositor_disabled(),
+            is_default,
+        })
+    }
+
+    /// Returns the exclusive right edge of this layer.
+    fn right_edge(self) -> Option<i32> {
+        self.origin_column.checked_add(self.visible_width)
+    }
+
+    /// Reports whether this layer participates in selection on `row`.
+    fn is_visible_on_row(self, row: i32) -> bool {
+        !self.disabled
+            && row >= self.origin_row
+            && self
+                .origin_row
+                .checked_add(self.visible_height)
+                .is_some_and(|bottom| row < bottom)
+    }
+
+    /// Reports whether this layer covers one composed-screen cell.
+    fn covers(self, row: i32, column: i32) -> bool {
+        self.is_visible_on_row(row)
+            && column >= self.origin_column
+            && self.right_edge().is_some_and(|right| column < right)
+    }
+
+    /// Borrows the grid cells corresponding to composed-screen columns.
+    fn screen_segment(self, row: i32, columns: Range<usize>) -> Option<GridRowSegment<'grid>> {
+        let start_column = i32::try_from(columns.start).ok()?;
+        let end_column = i32::try_from(columns.end).ok()?;
+        let grid_row = usize::try_from(row.checked_sub(self.origin_row)?).ok()?;
+        let grid_start = usize::try_from(start_column.checked_sub(self.origin_column)?).ok()?;
+        let grid_end = usize::try_from(end_column.checked_sub(self.origin_column)?).ok()?;
+
+        GridRow::try_from_grid(self.grid, grid_row)?.segment(grid_start..grid_end)
+    }
+
+    /// Reports whether a line ending on this layer may retain its wrap flag.
+    fn allows_wrap(self, screen_columns: usize) -> bool {
+        self.is_default
+            || (self.origin_column == 0
+                && usize::try_from(self.grid.cols).ok() == Some(screen_columns))
+    }
+}
+
+/// One contiguous output range selected from the layer stack.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct LayerSelection {
+    layer_index: usize,
+    columns: Range<usize>,
+}
+
+/// Ordered borrowed grids used to compose one line.
+struct CompositorLayerStack<'grid> {
+    layers: Vec<CompositorLayer<'grid>>,
+}
+
+impl<'grid> CompositorLayerStack<'grid> {
+    /// Builds a layer stack from grids already owned by Rust guards.
+    fn try_from_grids(grids: &[&'grid ScreenGrid]) -> Option<Self> {
+        let layers = grids
+            .iter()
+            .enumerate()
+            .map(|(index, grid)| CompositorLayer::try_from_grid(grid, index == 0))
+            .collect::<Option<Vec<_>>>()?;
+
+        if layers
+            .iter()
+            .enumerate()
+            .any(|(index, layer)| layer.layer_index != index)
+        {
+            return None;
+        }
+
+        Some(Self { layers })
+    }
+
+    /// Returns the default grid at the bottom of the stack.
+    fn default_layer(&self) -> Option<CompositorLayer<'grid>> {
+        self.layers.first().copied()
+    }
+
+    /// Returns one layer by its stack index.
+    fn layer(&self, index: usize) -> Option<CompositorLayer<'grid>> {
+        self.layers.get(index).copied()
+    }
+
+    /// Selects the topmost layer and its uninterrupted output range.
+    fn select_segment(
+        &self,
+        row: i32,
+        start_column: usize,
+        end_column: usize,
+    ) -> Option<LayerSelection> {
+        let column = i32::try_from(start_column).ok()?;
+        let line_end = i32::try_from(end_column).ok()?;
+        let mut selected = None;
+        let mut segment_end = line_end;
+
+        for (index, layer) in self.layers.iter().copied().enumerate() {
+            if !layer.is_visible_on_row(row) {
+                continue;
+            }
+            if layer.covers(row, column) {
+                selected = Some(index);
+                segment_end = layer.right_edge()?;
+            } else if layer.origin_column > column {
+                segment_end = segment_end.min(layer.origin_column);
+            }
+        }
+
+        let layer_index = selected?;
+        let segment_end = usize::try_from(segment_end.min(line_end)).ok()?;
+        (start_column < segment_end).then_some(LayerSelection {
+            layer_index,
+            columns: start_column..segment_end,
+        })
+    }
+}
+
+/// Message-separator replacement applied below its compositor layer.
+#[derive(Clone, Copy)]
+struct MessageSeparator<'grid> {
+    layer: CompositorLayer<'grid>,
+    character: VimSCharT,
+    attribute: VimSAttrT,
+}
+
+/// Validated inputs for composing one complete line in Rust.
+#[derive(Clone, Copy)]
+struct CompositorLineRequest<'grid> {
+    row: i32,
+    start_column: i32,
+    end_column: i32,
+    flags: libc::c_int,
+    message_separator: Option<MessageSeparator<'grid>>,
+    screen_columns: usize,
+    abort_on_invalid: bool,
+}
+
 /// Rust-owned storage and state for compositor line construction.
 ///
-/// C continues to select visible layers. Once selected, their validated
-/// `GridRowSegment`s are copied and blended through `CompositorSegment`.
+/// Complete line requests select validated Rust grid segments and copy or
+/// blend them through `CompositorSegment`.
 struct CompositorBuffer {
     characters: Vec<VimSCharT>,
     attributes: Vec<VimSAttrT>,
@@ -250,6 +431,65 @@ impl CompositorBuffer {
         self.characters = Vec::new();
         self.attributes = Vec::new();
         true
+    }
+
+    /// Selects and composes every layer segment for one complete line.
+    fn try_compose_line(
+        &mut self,
+        request: CompositorLineRequest<'_>,
+        layers: &CompositorLayerStack<'_>,
+    ) -> Option<CompositorSubmission> {
+        let result = (|| {
+            let columns =
+                self.begin_line(request.start_column, request.end_column, request.flags)?;
+            let line_end = columns.end;
+            let mut column = columns.start;
+            let mut last_layer = None;
+
+            while column < line_end {
+                let selection = layers.select_segment(request.row, column, line_end)?;
+                let selected_layer = layers.layer(selection.layer_index)?;
+                let separator = request
+                    .message_separator
+                    .filter(|separator| selected_layer.layer_index <= separator.layer.layer_index);
+                let composed_layer = separator.map_or(selected_layer, |separator| separator.layer);
+                let output_columns = selection.columns;
+
+                let background = if composed_layer.blending {
+                    Some(
+                        layers
+                            .default_layer()?
+                            .screen_segment(request.row, output_columns.start..line_end)?,
+                    )
+                } else {
+                    None
+                };
+
+                if let Some(separator) = separator {
+                    self.try_compose_separator_segment(
+                        output_columns.clone(),
+                        separator.character,
+                        separator.attribute,
+                        background,
+                    )?;
+                } else {
+                    let foreground =
+                        selected_layer.screen_segment(request.row, output_columns.clone())?;
+                    self.try_compose_grid_segment(output_columns.clone(), foreground, background)?;
+                }
+
+                column = output_columns.end;
+                last_layer = Some(composed_layer);
+            }
+
+            let allow_wrap = last_layer?.allows_wrap(request.screen_columns);
+            self.finish_line(request.flags, allow_wrap, request.abort_on_invalid)
+        })();
+
+        if result.is_none() {
+            self.active_line = None;
+        }
+        result
     }
 
     /// Begins one line and applies invalid-line edge expansion.
@@ -460,172 +700,121 @@ pub extern "C" fn ui_comp_release_buffer() -> bool {
     lock_compositor_buffer().release()
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn ui_comp_begin_line(
-    start_col: Integer,
-    end_col: Integer,
-    flags: libc::c_int,
-) -> CCompositorLineRange {
-    let inactive = CCompositorLineRange::default();
-    let (Ok(start_col), Ok(end_col)) = (i32::try_from(start_col), i32::try_from(end_col)) else {
-        return inactive;
-    };
-
-    let Some(columns) = lock_compositor_buffer().begin_line(start_col, end_col, flags) else {
-        return inactive;
-    };
-    CCompositorLineRange {
-        start_col: columns.start as Integer,
-        end_col: columns.end as Integer,
-        active: true,
-    }
-}
-
-/// Composes one C-owned foreground grid segment into the active Rust line.
+/// Composes and submits one complete line from an ordered C grid array.
 ///
 /// # Safety
 ///
-/// `foreground_grid` must point to a valid, exclusively accessible
-/// `CScreenGrid` whose buffers satisfy the ownership and layout requirements
-/// of `ScreenGrid`. `background_grid` may be null; otherwise it must satisfy
-/// the same requirements and must not alias `foreground_grid`.
+/// `layer_grids` must point to `layer_count` readable, distinct, non-null grid
+/// pointers. Every grid must be exclusively accessible and its buffers must
+/// satisfy the ownership and layout requirements of `ScreenGrid`.
+///
+/// When the requested row is the message-separator row, `message_grid` must
+/// either identify one grid in `layer_grids` or identify another exclusively
+/// accessible grid satisfying the same requirements.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ui_comp_compose_grid_segment(
-    foreground_grid: *mut CScreenGrid,
-    background_grid: *mut CScreenGrid,
-    foreground_row: libc::c_int,
-    start_col: libc::c_int,
-    end_col: libc::c_int,
-    background_row: libc::c_int,
-    output_start_col: Integer,
+pub unsafe extern "C" fn ui_comp_compose_line(
+    layer_grids: *const *mut CScreenGrid,
+    layer_count: usize,
+    message_grid: *mut CScreenGrid,
+    request: CCompositorLineRequest,
 ) -> bool {
-    if foreground_grid.is_null()
-        || (!background_grid.is_null() && foreground_grid == background_grid)
+    if layer_grids.is_null() || layer_count == 0 {
+        return false;
+    }
+
+    let (Ok(row), Ok(start_column), Ok(end_column), Ok(screen_columns)) = (
+        i32::try_from(request.row),
+        i32::try_from(request.start_col),
+        i32::try_from(request.end_col),
+        usize::try_from(request.screen_columns),
+    ) else {
+        return false;
+    };
+
+    // SAFETY: The caller guarantees that the pointer array is readable for
+    // `layer_count` elements for the duration of this synchronous call.
+    let layer_grids = unsafe { slice::from_raw_parts(layer_grids, layer_count) };
+    if layer_grids
+        .iter()
+        .enumerate()
+        .any(|(index, grid)| grid.is_null() || layer_grids[..index].contains(grid))
     {
         return false;
     }
 
-    let (Ok(foreground_row), Ok(start_col), Ok(end_col), Ok(background_row), Ok(output_start)) = (
-        usize::try_from(foreground_row),
-        usize::try_from(start_col),
-        usize::try_from(end_col),
-        usize::try_from(background_row),
-        usize::try_from(output_start_col),
-    ) else {
+    let separator_active = row == request.message_separator_row;
+    if separator_active && message_grid.is_null() {
         return false;
-    };
-
-    // SAFETY: The caller transfers exclusive ownership of the foreground
-    // grid buffers into this guard for the duration of the operation.
-    let foreground_grid = unsafe { ScreenGridGuard::take(foreground_grid) };
-    let foreground = GridRow::try_from_grid(&foreground_grid, foreground_row)
-        .and_then(|row| row.segment(start_col..end_col));
-    let Some(foreground) = foreground else {
-        return false;
-    };
-
-    // SAFETY: A non-null background pointer is guaranteed to identify a
-    // separate, exclusively accessible grid.
-    let background_grid =
-        (!background_grid.is_null()).then(|| unsafe { ScreenGridGuard::take(background_grid) });
+    }
+    let message_grid_index = separator_active
+        .then(|| layer_grids.iter().position(|grid| *grid == message_grid))
+        .flatten();
+    let separate_message_grid = separator_active && message_grid_index.is_none();
 
     let mut compositor = lock_compositor_buffer();
-    let output_end = match output_start.checked_add(foreground.len()) {
-        Some(output_end) => output_end,
-        None => return false,
-    };
-    let background = match background_grid.as_deref() {
-        Some(grid) => {
-            let Some((_, line_end)) = compositor.active_columns() else {
-                return false;
-            };
-            let Some(background) = GridRow::try_from_grid(grid, background_row)
-                .and_then(|row| row.segment(output_start..line_end))
-            else {
-                return false;
-            };
-            Some(background)
-        }
-        None => None,
-    };
+    let submission = (|| {
+        let grid_guards = layer_grids
+            .iter()
+            .map(|grid| {
+                // SAFETY: Null and duplicate pointers were rejected, and the
+                // caller transfers ownership for this operation.
+                unsafe { ScreenGridGuard::take(*grid) }
+            })
+            .collect::<Vec<_>>();
 
-    compositor
-        .try_compose_grid_segment(output_start..output_end, foreground, background)
-        .is_some()
-}
+        let message_grid_guard = separate_message_grid.then(|| {
+            // SAFETY: The non-null message grid is distinct from every layer
+            // pointer and the caller transfers ownership for this operation.
+            unsafe { ScreenGridGuard::take(message_grid) }
+        });
 
-/// Composes one message-separator segment into the active Rust line.
-///
-/// # Safety
-///
-/// `background_grid` may be null or point to a valid, exclusively accessible
-/// `CScreenGrid` whose buffers satisfy the ownership and layout requirements
-/// of `ScreenGrid`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn ui_comp_compose_separator_segment(
-    background_grid: *mut CScreenGrid,
-    background_row: libc::c_int,
-    output_start_col: Integer,
-    output_end_col: Integer,
-    character: VimSCharT,
-    attribute: VimSAttrT,
-) -> bool {
-    let (Ok(background_row), Ok(output_start), Ok(output_end)) = (
-        usize::try_from(background_row),
-        usize::try_from(output_start_col),
-        usize::try_from(output_end_col),
-    ) else {
+        let grids = grid_guards.iter().map(|grid| &**grid).collect::<Vec<_>>();
+        let layers = CompositorLayerStack::try_from_grids(&grids)?;
+
+        let message_separator = if separator_active {
+            let message_grid = match message_grid_index {
+                Some(index) => *grids.get(index)?,
+                None => message_grid_guard.as_deref()?,
+            };
+            Some(MessageSeparator {
+                layer: CompositorLayer::try_from_grid(
+                    message_grid,
+                    std::ptr::eq(message_grid, *grids.first()?),
+                )?,
+                character: request.message_separator_character,
+                attribute: request.message_separator_attribute,
+            })
+        } else {
+            None
+        };
+
+        compositor.try_compose_line(
+            CompositorLineRequest {
+                row,
+                start_column,
+                end_column,
+                flags: request.flags,
+                message_separator,
+                screen_columns,
+                abort_on_invalid: request.abort_on_invalid,
+            },
+            &layers,
+        )
+    })();
+
+    let Some(submission) = submission else {
         return false;
     };
-
-    // SAFETY: A non-null background pointer is guaranteed to identify an
-    // exclusively accessible grid.
-    let background_grid =
-        (!background_grid.is_null()).then(|| unsafe { ScreenGridGuard::take(background_grid) });
-
-    let mut compositor = lock_compositor_buffer();
-    let background = match background_grid.as_deref() {
-        Some(grid) => {
-            let Some((_, line_end)) = compositor.active_columns() else {
-                return false;
-            };
-            let Some(background) = GridRow::try_from_grid(grid, background_row)
-                .and_then(|row| row.segment(output_start..line_end))
-            else {
-                return false;
-            };
-            Some(background)
-        }
-        None => None,
-    };
-
-    compositor
-        .try_compose_separator_segment(output_start..output_end, character, attribute, background)
-        .is_some()
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn ui_comp_finish_line(
-    row: Integer,
-    flags: libc::c_int,
-    allow_wrap: bool,
-    abort_on_invalid: bool,
-) -> bool {
-    let mut compositor = lock_compositor_buffer();
-    let Some(submission) = compositor.finish_line(flags, allow_wrap, abort_on_invalid) else {
-        return false;
-    };
-
     let characters = unsafe { compositor.characters.as_ptr().add(submission.start_col) };
     let attributes = unsafe { compositor.attributes.as_ptr().add(submission.start_col) };
 
-    // SAFETY: Both pointers remain valid for the synchronous UI call while
-    // `compositor` remains borrowed. They describe equally sized initialized
-    // ranges ending at `submission.end_col`.
+    // SAFETY: All grid guards have restored their C grids. Both pointers remain
+    // valid for the synchronous UI call while `compositor` remains borrowed
+    // and describe equally sized initialized ranges.
     unsafe {
         ui_composed_call_raw_line(
             1,
-            row,
+            row as Integer,
             submission.start_col as Integer,
             submission.end_col as Integer,
             submission.end_col as Integer,
@@ -712,7 +901,7 @@ fn is_negative_space(character: VimSCharT) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::grid::{LineBuffer, ScreenGrid};
+    use crate::grid::LineBuffer;
 
     fn grid_with_row(characters: &[VimSCharT], attributes: &[VimSAttrT]) -> ScreenGrid {
         assert_eq!(characters.len(), attributes.len());
@@ -726,6 +915,26 @@ mod tests {
         grid.chars.copy_from_slice(characters);
         grid.attrs.copy_from_slice(attributes);
         grid
+    }
+
+    fn compositor_layer(
+        grid: &ScreenGrid,
+        origin_column: i32,
+        visible_width: i32,
+        layer_index: usize,
+        disabled: bool,
+    ) -> CompositorLayer<'_> {
+        CompositorLayer {
+            grid,
+            origin_row: 0,
+            origin_column,
+            visible_width,
+            visible_height: grid.rows,
+            layer_index,
+            blending: false,
+            disabled,
+            is_default: layer_index == 0,
+        }
     }
 
     #[test]
@@ -976,16 +1185,102 @@ mod tests {
     }
 
     #[test]
-    fn owned_buffer_composes_message_separator_segments() {
+    fn owned_buffer_selects_topmost_visible_segments() {
+        let default_grid = grid_with_row(
+            &[
+                schar_from_ascii('a'),
+                schar_from_ascii('b'),
+                schar_from_ascii('c'),
+                schar_from_ascii('d'),
+                schar_from_ascii('e'),
+                schar_from_ascii('f'),
+            ],
+            &[1, 2, 3, 4, 5, 6],
+        );
+        let overlay = grid_with_row(
+            &[
+                schar_from_ascii('X'),
+                schar_from_ascii('Y'),
+                schar_from_ascii('Z'),
+            ],
+            &[7, 8, 9],
+        );
+        let disabled = grid_with_row(&[schar_from_ascii('Q')], &[10]);
+        let layers = CompositorLayerStack {
+            layers: vec![
+                compositor_layer(&default_grid, 0, 6, 0, false),
+                compositor_layer(&overlay, 2, 2, 1, false),
+                compositor_layer(&disabled, 0, 1, 2, true),
+            ],
+        };
+        let mut compositor = CompositorBuffer::new();
+
+        assert!(compositor.resize(6));
+        let submission = compositor
+            .try_compose_line(
+                CompositorLineRequest {
+                    row: 0,
+                    start_column: 0,
+                    end_column: 6,
+                    flags: 0,
+                    message_separator: None,
+                    screen_columns: 6,
+                    abort_on_invalid: false,
+                },
+                &layers,
+            )
+            .unwrap();
+
+        assert_eq!(
+            compositor.characters,
+            [
+                schar_from_ascii('a'),
+                schar_from_ascii('b'),
+                schar_from_ascii('X'),
+                schar_from_ascii('Y'),
+                schar_from_ascii('e'),
+                schar_from_ascii('f'),
+            ]
+        );
+        assert_eq!(compositor.attributes, [1, 2, 7, 8, 5, 6]);
+        assert_eq!(submission.start_col, 0);
+        assert_eq!(submission.end_col, 6);
+    }
+
+    #[test]
+    fn owned_buffer_composes_complete_message_separator_lines() {
+        let default_grid = grid_with_row(
+            &[
+                schar_from_ascii('a'),
+                schar_from_ascii('b'),
+                schar_from_ascii('c'),
+            ],
+            &[1, 2, 3],
+        );
+        let message_grid = grid_with_row(&[schar_from_ascii('m'), schar_from_ascii('m')], &[4, 4]);
+        let layers = CompositorLayerStack {
+            layers: vec![compositor_layer(&default_grid, 0, 3, 0, false)],
+        };
         let mut compositor = CompositorBuffer::new();
 
         assert!(compositor.resize(3));
-        assert_eq!(compositor.begin_line(0, 3, LINE_FLAG_WRAP), Some(0..3));
-        compositor
-            .try_compose_separator_segment(0..3, schar_from_ascii('-'), 7, None)
-            .unwrap();
         let submission = compositor
-            .finish_line(LINE_FLAG_WRAP, false, false)
+            .try_compose_line(
+                CompositorLineRequest {
+                    row: 0,
+                    start_column: 0,
+                    end_column: 3,
+                    flags: LINE_FLAG_WRAP,
+                    message_separator: Some(MessageSeparator {
+                        layer: compositor_layer(&message_grid, 0, 2, 1, false),
+                        character: schar_from_ascii('-'),
+                        attribute: 7,
+                    }),
+                    screen_columns: 3,
+                    abort_on_invalid: false,
+                },
+                &layers,
+            )
             .unwrap();
 
         assert_eq!(

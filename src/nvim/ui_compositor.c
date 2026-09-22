@@ -352,76 +352,25 @@ ScreenGrid *ui_comp_get_grid_at_coord(int row, int col)
 /// the downstream UI.)
 static void compose_line(Integer row, Integer startcol, Integer endcol, LineFlags flags)
 {
-  CompositorLineRange line = ui_comp_begin_line(startcol, endcol, flags);
-  assert(line.active);
-  if (!line.active) {
-    return;
-  }
-  startcol = line.start_col;
-  endcol = line.end_col;
-
-  int col = (int)startcol;
-  ScreenGrid *grid = NULL;
-
-  while (col < endcol) {
-    int until = 0;
-    for (size_t i = 0; i < kv_size(layers); i++) {
-      ScreenGrid *g = kv_A(layers, i);
-      // compose_line may have been called after a shrinking operation but
-      // before the resize has actually been applied. Therefore, we need to
-      // first check to see if any grids have pending updates to width/height,
-      // to ensure that we don't copy invalidated characters into the
-      // compositor buffer.
-      int grid_width = MIN(g->cols, g->comp_width);
-      int grid_height = MIN(g->rows, g->comp_height);
-      if (g->comp_row > row || row >= g->comp_row + grid_height
-          || g->comp_disabled) {
-        continue;
-      }
-      if (g->comp_col <= col && col < g->comp_col + grid_width) {
-        grid = g;
-        until = g->comp_col + grid_width;
-      } else if (g->comp_col > col) {
-        until = MIN(until, g->comp_col);
-      }
-    }
-    until = MIN(until, (int)endcol);
-
-    assert(grid != NULL);
-    assert(until > col);
-    assert(until <= default_grid.cols);
-
-    bool composed;
-    if (row == msg_sep_row && grid->comp_index <= msg_grid.comp_index) {
-      // TODO(bfredl): when we implement borders around floating windows, then
-      // msgsep can just be a border "around" the message grid.
-      grid = &msg_grid;
-      sattr_T msg_sep_attr = (sattr_T)HL_ATTR(HLF_MSGSEP);
-      composed = ui_comp_compose_separator_segment(
-        grid->blending ? &default_grid : NULL, (int)row,
-        col, until, msg_sep_char, msg_sep_attr);
-    } else {
-      composed = ui_comp_compose_grid_segment(
-        grid, grid->blending ? &default_grid : NULL,
-        row - grid->comp_row, col - grid->comp_col,
-        until - grid->comp_col, (int)row, col);
-    }
-    assert(composed);
-    (void)composed;
-
-    col = until;
-  }
-
   assert(endcol <= chk_width);
   assert(row < chk_height);
 
-  bool allow_wrap = grid
-                    && (grid == &default_grid
-                        || (grid->comp_col == 0 && grid->cols == Columns));
-  bool submitted = ui_comp_finish_line(
-    row, flags, allow_wrap, (rdb_flags & kOptRdbFlagInvalid) != 0);
-  assert(submitted);
-  (void)submitted;
+  CompositorLineRequest request = {
+    .row = row,
+    .start_col = startcol,
+    .end_col = endcol,
+    .flags = flags,
+    .message_separator_row = msg_sep_row,
+    .message_separator_character = msg_sep_char,
+    .message_separator_attribute =
+      row == msg_sep_row ? (sattr_T)HL_ATTR(HLF_MSGSEP) : 0,
+    .screen_columns = Columns,
+    .abort_on_invalid = (rdb_flags & kOptRdbFlagInvalid) != 0,
+  };
+  bool composed = ui_comp_compose_line(
+    layers.items, layers.size, &msg_grid, request);
+  assert(composed);
+  (void)composed;
 }
 
 static void compose_debug(Integer startrow, Integer endrow, Integer startcol, Integer endcol,
