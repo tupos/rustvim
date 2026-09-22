@@ -1,9 +1,32 @@
-use std::{ops::Range, slice};
-
-use crate::grid::{
-    CScreenGrid, GridRow, GridRowSegment, Highlight, ScreenGrid, ScreenGridGuard, VimSAttrT,
-    VimSCharT, schar_from_ascii, schar_from_char,
+use std::{
+    ops::Range,
+    sync::{Mutex, MutexGuard},
 };
+
+use crate::{
+    defines::Integer,
+    grid::{
+        CScreenGrid, GridRow, GridRowSegment, Highlight, ScreenGridGuard, VimSAttrT, VimSCharT,
+        schar_from_ascii, schar_from_char,
+    },
+};
+
+const LINE_FLAG_WRAP: libc::c_int = 1;
+const LINE_FLAG_INVALID: libc::c_int = 2;
+
+unsafe extern "C" {
+    fn ui_composed_call_raw_line(
+        grid: Integer,
+        row: Integer,
+        start_col: Integer,
+        end_col: Integer,
+        clear_col: Integer,
+        clear_attr: Integer,
+        flags: libc::c_int,
+        characters: *const VimSCharT,
+        attributes: *const VimSAttrT,
+    );
+}
 
 /// Result of composing one foreground segment over its background.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -18,12 +41,21 @@ impl SegmentComposition {
     }
 }
 
-/// C-compatible result of copying one grid segment into compositor output.
+/// C-compatible range prepared for one compositor line.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct CCompositorGridSegmentResult {
-    copied: bool,
-    followed_by_continuation: bool,
+pub struct CCompositorLineRange {
+    start_col: Integer,
+    end_col: Integer,
+    active: bool,
+}
+
+/// Output range prepared for one raw-line UI event.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CompositorSubmission {
+    start_col: usize,
+    end_col: usize,
+    flags: libc::c_int,
 }
 
 /// Mutable output slices for one compositor span.
@@ -50,6 +82,12 @@ impl<'output> CompositorSegment<'output> {
         })
     }
 
+    /// Fills this output segment with one repeated cell.
+    fn fill(&mut self, character: VimSCharT, attribute: VimSAttrT) {
+        self.characters.fill(character);
+        self.attributes.fill(attribute);
+    }
+
     /// Copies a foreground grid segment into the compositor output.
     pub(crate) fn try_copy(
         &mut self,
@@ -65,17 +103,6 @@ impl<'output> CompositorSegment<'output> {
         Some(SegmentComposition {
             followed_by_continuation: foreground.is_followed_by_continuation(),
         })
-    }
-
-    /// Copies a logical row range from a Rust screen grid.
-    pub(crate) fn try_copy_from_grid(
-        &mut self,
-        grid: &ScreenGrid,
-        row: usize,
-        columns: Range<usize>,
-    ) -> Option<SegmentComposition> {
-        let foreground = GridRow::try_from_grid(grid, row)?.segment(columns)?;
-        self.try_copy(foreground)
     }
 
     /// Composes a foreground grid segment over its default-grid background.
@@ -175,126 +202,479 @@ impl<'output> CompositorSegment<'output> {
     }
 }
 
-/// Copies one C-owned grid segment into compositor output.
+/// State retained while C selects the layers for one composed line.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ActiveCompositorLine {
+    columns: Range<usize>,
+    skip_start: usize,
+    skip_end: usize,
+}
+
+/// Rust-owned storage and state for compositor line construction.
 ///
-/// # Safety
-///
-/// `grid` must be null or point to a valid, exclusively accessible
-/// `CScreenGrid` whose buffers satisfy the ownership and layout requirements
-/// of `ScreenGrid`. For a nonempty requested range, `characters` and
-/// `attributes` must point to separate writable arrays containing at least
-/// `end_col - start_col` elements. Those arrays must not overlap the grid
-/// allocations.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn ui_comp_copy_grid_segment(
-    grid: *mut CScreenGrid,
-    row: libc::c_int,
-    start_col: libc::c_int,
-    end_col: libc::c_int,
-    characters: *mut VimSCharT,
-    attributes: *mut VimSAttrT,
-) -> CCompositorGridSegmentResult {
-    let not_copied = CCompositorGridSegmentResult::default();
-    if grid.is_null() || characters.is_null() || attributes.is_null() {
-        return not_copied;
+/// C continues to select visible layers. Once selected, their validated
+/// `GridRowSegment`s are copied and blended through `CompositorSegment`.
+struct CompositorBuffer {
+    characters: Vec<VimSCharT>,
+    attributes: Vec<VimSAttrT>,
+    active_line: Option<ActiveCompositorLine>,
+}
+
+impl CompositorBuffer {
+    /// Creates an empty compositor buffer.
+    const fn new() -> Self {
+        Self {
+            characters: Vec::new(),
+            attributes: Vec::new(),
+            active_line: None,
+        }
     }
 
-    let (Ok(row), Ok(start_col), Ok(end_col)) = (
-        usize::try_from(row),
-        usize::try_from(start_col),
-        usize::try_from(end_col),
-    ) else {
-        return not_copied;
-    };
-    let Some(len) = end_col.checked_sub(start_col) else {
-        return not_copied;
-    };
-    if len == 0 {
-        return not_copied;
+    /// Reallocates the buffer for a screen of `width` columns.
+    fn resize(&mut self, width: usize) -> bool {
+        if self.active_line.is_some() {
+            return false;
+        }
+        if self.characters.len() != width {
+            self.characters = vec![schar_from_ascii(' '); width];
+            self.attributes = vec![0; width];
+        }
+        true
     }
 
-    // SAFETY: The caller transfers exclusive ownership of the grid buffers
-    // into the guard for the duration of this function.
-    let rust_grid = unsafe { ScreenGridGuard::take(grid) };
-    let composition = {
-        // SAFETY: The caller guarantees that both output pointers describe
-        // separate writable arrays of `len` elements which do not overlap the
-        // grid allocations.
-        let characters = unsafe { slice::from_raw_parts_mut(characters, len) };
-        let attributes = unsafe { slice::from_raw_parts_mut(attributes, len) };
+    /// Releases all compositor storage.
+    fn release(&mut self) -> bool {
+        if self.active_line.is_some() {
+            return false;
+        }
+        self.characters = Vec::new();
+        self.attributes = Vec::new();
+        true
+    }
+
+    /// Begins one line and applies invalid-line edge expansion.
+    fn begin_line(
+        &mut self,
+        start_col: i32,
+        end_col: i32,
+        flags: libc::c_int,
+    ) -> Option<Range<usize>> {
+        if self.active_line.is_some() {
+            return None;
+        }
+
+        let width = i32::try_from(self.characters.len()).ok()?;
+        let mut start_col = start_col.max(0);
+        let mut end_col = end_col;
+        let mut skip_start = 0;
+        let mut skip_end = 0;
+
+        if flags & LINE_FLAG_INVALID != 0 {
+            if start_col > 0 {
+                start_col -= 1;
+                skip_start = 1;
+            }
+            if end_col < width {
+                end_col += 1;
+                skip_end = 1;
+            }
+        }
+
+        let start_col = usize::try_from(start_col).ok()?;
+        let end_col = usize::try_from(end_col).ok()?;
+        if start_col >= end_col || end_col > self.characters.len() {
+            return None;
+        }
+
+        let columns = start_col..end_col;
+        self.active_line = Some(ActiveCompositorLine {
+            columns: columns.clone(),
+            skip_start,
+            skip_end,
+        });
+        Some(columns)
+    }
+
+    /// Copies and optionally blends one already validated grid segment.
+    fn try_compose_grid_segment(
+        &mut self,
+        output_columns: Range<usize>,
+        foreground: GridRowSegment<'_>,
+        background: Option<GridRowSegment<'_>>,
+    ) -> Option<()> {
+        let source_len = output_columns.end.checked_sub(output_columns.start)?;
+        if source_len == 0 || foreground.len() != source_len {
+            return None;
+        }
+
+        let (line_start, line_end) = self.active_columns()?;
+        if output_columns.start < line_start || output_columns.end > line_end {
+            return None;
+        }
+
+        let composition = self
+            .try_segment_mut(output_columns.clone())?
+            .try_copy(foreground)?;
+
+        if composition.is_followed_by_continuation() {
+            *self.characters.get_mut(output_columns.end - 1)? = schar_from_ascii(' ');
+        }
+
+        if let Some(background) = background {
+            self.try_segment_mut(output_columns.start..line_end)?
+                .try_blend_prefix_over(background, source_len)?;
+        }
+
+        self.resolve_segment_edges(output_columns, composition.is_followed_by_continuation())
+    }
+
+    /// Fills and optionally blends one message-separator segment.
+    fn try_compose_separator_segment(
+        &mut self,
+        output_columns: Range<usize>,
+        character: VimSCharT,
+        attribute: VimSAttrT,
+        background: Option<GridRowSegment<'_>>,
+    ) -> Option<()> {
+        let source_len = output_columns.end.checked_sub(output_columns.start)?;
+        if source_len == 0 {
+            return None;
+        }
+
+        let (line_start, line_end) = self.active_columns()?;
+        if output_columns.start < line_start || output_columns.end > line_end {
+            return None;
+        }
+
+        self.try_segment_mut(output_columns.clone())?
+            .fill(character, attribute);
+
+        if let Some(background) = background {
+            self.try_segment_mut(output_columns.start..line_end)?
+                .try_blend_prefix_over(background, source_len)?;
+        }
+
+        self.resolve_segment_edges(output_columns, false)
+    }
+
+    /// Completes the active line and validates its output attributes.
+    fn finish_line(
+        &mut self,
+        mut flags: libc::c_int,
+        allow_wrap: bool,
+        abort_on_invalid: bool,
+    ) -> Option<CompositorSubmission> {
+        let mut line = self.active_line.take()?;
+
+        if self.characters.get(line.columns.end - 1) == Some(&0) {
+            line.skip_end = 0;
+        }
+        if !allow_wrap {
+            flags &= !LINE_FLAG_WRAP;
+        }
+
+        let start_col = line.columns.start.checked_add(line.skip_start)?;
+        let end_col = line.columns.end.checked_sub(line.skip_end)?;
+        for attribute in self.attributes.get_mut(start_col..end_col)? {
+            if *attribute < 0 {
+                if abort_on_invalid {
+                    std::process::abort();
+                }
+                *attribute = 0;
+            }
+        }
+
+        Some(CompositorSubmission {
+            start_col,
+            end_col,
+            flags,
+        })
+    }
+
+    /// Borrows one output segment through the existing compositor abstraction.
+    fn try_segment_mut(&mut self, columns: Range<usize>) -> Option<CompositorSegment<'_>> {
+        let characters = self.characters.get_mut(columns.clone())?;
+        let attributes = self.attributes.get_mut(columns)?;
         CompositorSegment::try_from_slices(characters, attributes)
-            .and_then(|mut output| output.try_copy_from_grid(&rust_grid, row, start_col..end_col))
-    };
+    }
 
-    let Some(composition) = composition else {
-        return not_copied;
-    };
-    CCompositorGridSegmentResult {
-        copied: true,
-        followed_by_continuation: composition.is_followed_by_continuation(),
+    /// Returns the active line range.
+    fn active_columns(&self) -> Option<(usize, usize)> {
+        let columns = &self.active_line.as_ref()?.columns;
+        Some((columns.start, columns.end))
+    }
+
+    /// Resolves wide-cell clipping at one selected segment boundary.
+    fn resolve_segment_edges(
+        &mut self,
+        output_columns: Range<usize>,
+        followed_by_continuation: bool,
+    ) -> Option<()> {
+        let source_len = output_columns.end.checked_sub(output_columns.start)?;
+        let (line_start, line_end) = self.active_columns()?;
+        let mut include_start =
+            followed_by_continuation && output_columns.start == line_start && source_len == 1;
+        let mut include_end = false;
+
+        let first_character = self.characters.get_mut(output_columns.start)?;
+        if *first_character == 0 {
+            *first_character = schar_from_ascii(' ');
+            include_end = output_columns.start + 1 == line_end;
+        } else if output_columns.start == line_start
+            && source_len > 1
+            && self.characters.get(output_columns.start + 1) == Some(&0)
+        {
+            include_start = true;
+        }
+
+        let line = self.active_line.as_mut()?;
+        if include_start {
+            line.skip_start = 0;
+        }
+        if include_end {
+            line.skip_end = 0;
+        }
+        Some(())
     }
 }
 
-/// Blends an existing compositor output span over a C-owned background grid.
+static COMPOSITOR_BUFFER: Mutex<CompositorBuffer> = Mutex::new(CompositorBuffer::new());
+
+/// Acquires exclusive access to the process-global compositor buffer.
+fn lock_compositor_buffer() -> MutexGuard<'static, CompositorBuffer> {
+    COMPOSITOR_BUFFER
+        .try_lock()
+        .expect("compositor buffer is already borrowed")
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ui_comp_resize_buffer(width: Integer) -> bool {
+    let Ok(width) = usize::try_from(width) else {
+        return false;
+    };
+    lock_compositor_buffer().resize(width)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ui_comp_release_buffer() -> bool {
+    lock_compositor_buffer().release()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ui_comp_begin_line(
+    start_col: Integer,
+    end_col: Integer,
+    flags: libc::c_int,
+) -> CCompositorLineRange {
+    let inactive = CCompositorLineRange::default();
+    let (Ok(start_col), Ok(end_col)) = (i32::try_from(start_col), i32::try_from(end_col)) else {
+        return inactive;
+    };
+
+    let Some(columns) = lock_compositor_buffer().begin_line(start_col, end_col, flags) else {
+        return inactive;
+    };
+    CCompositorLineRange {
+        start_col: columns.start as Integer,
+        end_col: columns.end as Integer,
+        active: true,
+    }
+}
+
+/// Composes one C-owned foreground grid segment into the active Rust line.
 ///
 /// # Safety
 ///
-/// `background_grid` must be null or point to a valid, exclusively accessible
+/// `foreground_grid` must point to a valid, exclusively accessible
 /// `CScreenGrid` whose buffers satisfy the ownership and layout requirements
-/// of `ScreenGrid`. `start_col..=blend_end_col` must fall within
-/// `start_col..=end_col`. For a nonempty requested range, `characters` and
-/// `attributes` must point to separate initialized writable arrays containing
-/// at least `end_col - start_col` elements. Those arrays must not overlap the
-/// grid allocations.
+/// of `ScreenGrid`. `background_grid` may be null; otherwise it must satisfy
+/// the same requirements and must not alias `foreground_grid`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ui_comp_blend_grid_segment(
+pub unsafe extern "C" fn ui_comp_compose_grid_segment(
+    foreground_grid: *mut CScreenGrid,
     background_grid: *mut CScreenGrid,
-    row: libc::c_int,
+    foreground_row: libc::c_int,
     start_col: libc::c_int,
-    blend_end_col: libc::c_int,
     end_col: libc::c_int,
-    characters: *mut VimSCharT,
-    attributes: *mut VimSAttrT,
+    background_row: libc::c_int,
+    output_start_col: Integer,
 ) -> bool {
-    if background_grid.is_null() || characters.is_null() || attributes.is_null() {
+    if foreground_grid.is_null()
+        || (!background_grid.is_null() && foreground_grid == background_grid)
+    {
         return false;
     }
 
-    let (Ok(row), Ok(start_col), Ok(blend_end_col), Ok(end_col)) = (
-        usize::try_from(row),
+    let (Ok(foreground_row), Ok(start_col), Ok(end_col), Ok(background_row), Ok(output_start)) = (
+        usize::try_from(foreground_row),
         usize::try_from(start_col),
-        usize::try_from(blend_end_col),
         usize::try_from(end_col),
+        usize::try_from(background_row),
+        usize::try_from(output_start_col),
     ) else {
         return false;
     };
-    let Some(len) = end_col.checked_sub(start_col) else {
-        return false;
-    };
-    let Some(blend_len) = blend_end_col.checked_sub(start_col) else {
-        return false;
-    };
-    if len == 0 || blend_len == 0 || blend_len > len {
-        return false;
-    }
 
-    // SAFETY: The caller transfers exclusive ownership of the background grid
-    // buffers into the guard for the duration of this function.
-    let rust_background = unsafe { ScreenGridGuard::take(background_grid) };
-    let Some(background) = GridRow::try_from_grid(&rust_background, row)
-        .and_then(|row| row.segment(start_col..end_col))
+    // SAFETY: The caller transfers exclusive ownership of the foreground
+    // grid buffers into this guard for the duration of the operation.
+    let foreground_grid = unsafe { ScreenGridGuard::take(foreground_grid) };
+    let foreground = GridRow::try_from_grid(&foreground_grid, foreground_row)
+        .and_then(|row| row.segment(start_col..end_col));
+    let Some(foreground) = foreground else {
+        return false;
+    };
+
+    // SAFETY: A non-null background pointer is guaranteed to identify a
+    // separate, exclusively accessible grid.
+    let background_grid =
+        (!background_grid.is_null()).then(|| unsafe { ScreenGridGuard::take(background_grid) });
+
+    let mut compositor = lock_compositor_buffer();
+    let output_end = match output_start.checked_add(foreground.len()) {
+        Some(output_end) => output_end,
+        None => return false,
+    };
+    let background = match background_grid.as_deref() {
+        Some(grid) => {
+            let Some((_, line_end)) = compositor.active_columns() else {
+                return false;
+            };
+            let Some(background) = GridRow::try_from_grid(grid, background_row)
+                .and_then(|row| row.segment(output_start..line_end))
+            else {
+                return false;
+            };
+            Some(background)
+        }
+        None => None,
+    };
+
+    compositor
+        .try_compose_grid_segment(output_start..output_end, foreground, background)
+        .is_some()
+}
+
+/// Composes one message-separator segment into the active Rust line.
+///
+/// # Safety
+///
+/// `background_grid` may be null or point to a valid, exclusively accessible
+/// `CScreenGrid` whose buffers satisfy the ownership and layout requirements
+/// of `ScreenGrid`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ui_comp_compose_separator_segment(
+    background_grid: *mut CScreenGrid,
+    background_row: libc::c_int,
+    output_start_col: Integer,
+    output_end_col: Integer,
+    character: VimSCharT,
+    attribute: VimSAttrT,
+) -> bool {
+    let (Ok(background_row), Ok(output_start), Ok(output_end)) = (
+        usize::try_from(background_row),
+        usize::try_from(output_start_col),
+        usize::try_from(output_end_col),
+    ) else {
+        return false;
+    };
+
+    // SAFETY: A non-null background pointer is guaranteed to identify an
+    // exclusively accessible grid.
+    let background_grid =
+        (!background_grid.is_null()).then(|| unsafe { ScreenGridGuard::take(background_grid) });
+
+    let mut compositor = lock_compositor_buffer();
+    let background = match background_grid.as_deref() {
+        Some(grid) => {
+            let Some((_, line_end)) = compositor.active_columns() else {
+                return false;
+            };
+            let Some(background) = GridRow::try_from_grid(grid, background_row)
+                .and_then(|row| row.segment(output_start..line_end))
+            else {
+                return false;
+            };
+            Some(background)
+        }
+        None => None,
+    };
+
+    compositor
+        .try_compose_separator_segment(output_start..output_end, character, attribute, background)
+        .is_some()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ui_comp_finish_line(
+    row: Integer,
+    flags: libc::c_int,
+    allow_wrap: bool,
+    abort_on_invalid: bool,
+) -> bool {
+    let mut compositor = lock_compositor_buffer();
+    let Some(submission) = compositor.finish_line(flags, allow_wrap, abort_on_invalid) else {
+        return false;
+    };
+
+    let characters = unsafe { compositor.characters.as_ptr().add(submission.start_col) };
+    let attributes = unsafe { compositor.attributes.as_ptr().add(submission.start_col) };
+
+    // SAFETY: Both pointers remain valid for the synchronous UI call while
+    // `compositor` remains borrowed. They describe equally sized initialized
+    // ranges ending at `submission.end_col`.
+    unsafe {
+        ui_composed_call_raw_line(
+            1,
+            row,
+            submission.start_col as Integer,
+            submission.end_col as Integer,
+            submission.end_col as Integer,
+            0,
+            submission.flags,
+            characters,
+            attributes,
+        );
+    }
+    true
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ui_comp_emit_clear_line(
+    row: Integer,
+    start_col: Integer,
+    end_col: Integer,
+    attribute: VimSAttrT,
+) -> bool {
+    let (Ok(start_col), Ok(end_col)) = (usize::try_from(start_col), usize::try_from(end_col))
     else {
         return false;
     };
 
-    // SAFETY: The caller guarantees that both output pointers describe
-    // separate initialized writable arrays of `len` elements which do not
-    // overlap the background grid allocations.
-    let characters = unsafe { slice::from_raw_parts_mut(characters, len) };
-    let attributes = unsafe { slice::from_raw_parts_mut(attributes, len) };
-    CompositorSegment::try_from_slices(characters, attributes)
-        .and_then(|mut output| output.try_blend_prefix_over(background, blend_len))
-        .is_some()
+    let compositor = lock_compositor_buffer();
+    if start_col > end_col || end_col > compositor.characters.len() {
+        return false;
+    }
+
+    let characters = unsafe { compositor.characters.as_ptr().add(start_col) };
+    let attributes = unsafe { compositor.attributes.as_ptr().add(start_col) };
+
+    // SAFETY: The raw-line event contains no character payload because its
+    // start and end columns are equal. The pointers nevertheless remain valid
+    // for the synchronous UI call.
+    unsafe {
+        ui_composed_call_raw_line(
+            1,
+            row,
+            start_col as Integer,
+            start_col as Integer,
+            end_col as Integer,
+            attribute as Integer,
+            0,
+            characters,
+            attributes,
+        );
+    }
+    true
 }
 
 /// Reports whether a scrolled grid row should be recomposed.
@@ -332,7 +712,7 @@ fn is_negative_space(character: VimSCharT) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::grid::LineBuffer;
+    use crate::grid::{LineBuffer, ScreenGrid};
 
     fn grid_with_row(characters: &[VimSCharT], attributes: &[VimSAttrT]) -> ScreenGrid {
         assert_eq!(characters.len(), attributes.len());
@@ -425,73 +805,6 @@ mod tests {
         assert_eq!(characters, [schar_from_ascii('x'), schar_from_ascii('y')]);
         assert_eq!(attributes, [1, 2]);
         assert!(result.is_followed_by_continuation());
-    }
-
-    #[test]
-    fn ffi_copies_grid_segment_and_restores_ownership() {
-        let grid = grid_with_row(
-            &[schar_from_ascii('x'), schar_from_ascii('y'), 0],
-            &[1, 2, 3],
-        );
-        // SAFETY: This transfers every grid allocation to its C representation.
-        let mut cgrid = unsafe { grid.to_cgrid() };
-        let mut characters = [0; 2];
-        let mut attributes = [0; 2];
-
-        // SAFETY: `cgrid` exclusively owns valid grid allocations, and the
-        // output arrays are separate, writable, and have the requested length.
-        let result = unsafe {
-            ui_comp_copy_grid_segment(
-                &mut cgrid,
-                0,
-                0,
-                2,
-                characters.as_mut_ptr(),
-                attributes.as_mut_ptr(),
-            )
-        };
-
-        assert!(result.copied);
-        assert!(result.followed_by_continuation);
-        assert_eq!(characters, [schar_from_ascii('x'), schar_from_ascii('y')]);
-        assert_eq!(attributes, [1, 2]);
-
-        // SAFETY: The FFI function returned ownership to `cgrid`.
-        let restored_grid = unsafe { ScreenGrid::take_from_cgrid(&mut cgrid) };
-        assert_eq!(
-            restored_grid.chars.as_slice(),
-            &[schar_from_ascii('x'), schar_from_ascii('y'), 0]
-        );
-    }
-
-    #[test]
-    fn ffi_restores_grid_ownership_after_rejecting_a_segment() {
-        let grid = grid_with_row(&[schar_from_ascii('x'), schar_from_ascii('y')], &[1, 2]);
-        // SAFETY: This transfers every grid allocation to its C representation.
-        let mut cgrid = unsafe { grid.to_cgrid() };
-        let mut characters = [0; 2];
-        let mut attributes = [0; 2];
-
-        // SAFETY: The output arrays are valid, but columns 1..3 exceed the
-        // source row and are rejected by the safe Rust implementation.
-        let rejected = unsafe {
-            ui_comp_copy_grid_segment(
-                &mut cgrid,
-                0,
-                1,
-                3,
-                characters.as_mut_ptr(),
-                attributes.as_mut_ptr(),
-            )
-        };
-        assert!(!rejected.copied);
-
-        // SAFETY: The rejected operation returned ownership to `cgrid`.
-        let restored_grid = unsafe { ScreenGrid::take_from_cgrid(&mut cgrid) };
-        assert_eq!(
-            restored_grid.chars.as_slice(),
-            &[schar_from_ascii('x'), schar_from_ascii('y')]
-        );
     }
 
     #[test]
@@ -603,38 +916,6 @@ mod tests {
     }
 
     #[test]
-    fn ffi_blends_grid_segment_and_restores_ownership() {
-        let background = grid_with_row(&[schar_from_ascii('a')], &[-1]);
-        // SAFETY: This transfers every grid allocation to its C representation.
-        let mut cgrid = unsafe { background.to_cgrid() };
-        let mut characters = [schar_from_ascii(' ')];
-        let mut attributes = [7];
-
-        // SAFETY: `cgrid` exclusively owns valid grid allocations, and the
-        // output arrays are separate, initialized, writable, and have the
-        // requested length.
-        let blended = unsafe {
-            ui_comp_blend_grid_segment(
-                &mut cgrid,
-                0,
-                0,
-                1,
-                1,
-                characters.as_mut_ptr(),
-                attributes.as_mut_ptr(),
-            )
-        };
-
-        assert!(blended);
-        assert_eq!(characters, [schar_from_ascii('a')]);
-        assert_eq!(attributes, [7]);
-
-        // SAFETY: The FFI function returned ownership to `cgrid`.
-        let restored_grid = unsafe { ScreenGrid::take_from_cgrid(&mut cgrid) };
-        assert_eq!(restored_grid.chars.as_slice(), &[schar_from_ascii('a')]);
-    }
-
-    #[test]
     fn rejects_mismatched_lengths() {
         let mut characters = [0; 2];
         let mut one_attribute = [0; 1];
@@ -661,5 +942,64 @@ mod tests {
                 )
                 .is_none()
         );
+    }
+
+    #[test]
+    fn owned_buffer_composes_grid_segments() {
+        let foreground = grid_with_row(&[schar_from_ascii('x'), schar_from_ascii('y')], &[1, -1]);
+        let foreground = GridRow::try_from_grid(&foreground, 0)
+            .unwrap()
+            .segment(0..2)
+            .unwrap();
+        let mut compositor = CompositorBuffer::new();
+
+        assert!(compositor.resize(2));
+        assert_eq!(compositor.begin_line(0, 2, 0), Some(0..2));
+        compositor
+            .try_compose_grid_segment(0..2, foreground, None)
+            .unwrap();
+        let submission = compositor.finish_line(0, true, false).unwrap();
+
+        assert_eq!(
+            compositor.characters,
+            [schar_from_ascii('x'), schar_from_ascii('y')]
+        );
+        assert_eq!(compositor.attributes, [1, 0]);
+        assert_eq!(
+            submission,
+            CompositorSubmission {
+                start_col: 0,
+                end_col: 2,
+                flags: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn owned_buffer_composes_message_separator_segments() {
+        let mut compositor = CompositorBuffer::new();
+
+        assert!(compositor.resize(3));
+        assert_eq!(compositor.begin_line(0, 3, LINE_FLAG_WRAP), Some(0..3));
+        compositor
+            .try_compose_separator_segment(0..3, schar_from_ascii('-'), 7, None)
+            .unwrap();
+        let submission = compositor
+            .finish_line(LINE_FLAG_WRAP, false, false)
+            .unwrap();
+
+        assert_eq!(
+            compositor.characters,
+            [
+                schar_from_ascii('-'),
+                schar_from_ascii('-'),
+                schar_from_ascii('-')
+            ]
+        );
+        assert_eq!(compositor.attributes, [7, 7, 7]);
+        assert_eq!(submission.flags, 0);
+        assert!(compositor.release());
+        assert!(compositor.characters.is_empty());
+        assert!(compositor.attributes.is_empty());
     }
 }

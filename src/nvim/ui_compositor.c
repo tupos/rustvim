@@ -12,7 +12,6 @@
 
 #include "klib/kvec.h"
 #include "nvim/api/private/defs.h"
-#include "nvim/ascii_defs.h"
 #include "nvim/buffer_defs.h"
 #include "nvim/globals.h"
 #include "nvim/grid.h"
@@ -21,7 +20,6 @@
 #include "nvim/highlight_group.h"
 #include "nvim/log.h"
 #include "nvim/macros_defs.h"
-#include "nvim/memory.h"
 #include "nvim/message.h"
 #include "nvim/option_vars.h"
 #include "nvim/os/time.h"
@@ -33,10 +31,6 @@
 
 static int composed_uis = 0;
 kvec_t(ScreenGrid *) layers = KV_INITIAL_VALUE;
-
-static size_t bufsize = 0;
-static schar_T *linebuf;
-static sattr_T *attrbuf;
 
 #ifndef NDEBUG
 static int chk_width = 0, chk_height = 0;
@@ -63,8 +57,9 @@ void ui_comp_init(void)
 void ui_comp_free_all_mem(void)
 {
   kv_destroy(layers);
-  xfree(linebuf);
-  xfree(attrbuf);
+  bool released = ui_comp_release_buffer();
+  assert(released);
+  (void)released;
 }
 #endif
 
@@ -86,9 +81,9 @@ void ui_comp_detach(RemoteUI *ui)
 {
   composed_uis--;
   if (composed_uis == 0) {
-    XFREE_CLEAR(linebuf);
-    XFREE_CLEAR(attrbuf);
-    bufsize = 0;
+    bool released = ui_comp_release_buffer();
+    assert(released);
+    (void)released;
   }
   ui->composed = false;
 }
@@ -357,21 +352,13 @@ ScreenGrid *ui_comp_get_grid_at_coord(int row, int col)
 /// the downstream UI.)
 static void compose_line(Integer row, Integer startcol, Integer endcol, LineFlags flags)
 {
-  // If rightleft is set, startcol may be -1. In such cases, the assertions
-  // will fail because no overlap is found. Adjust startcol to prevent it.
-  startcol = MAX(startcol, 0);
-  // in case we start on the right half of a double-width char, we need to
-  // check the left half. But skip it in output if it wasn't doublewidth.
-  int skipstart = 0;
-  int skipend = 0;
-  if (startcol > 0 && (flags & kLineFlagInvalid)) {
-    startcol--;
-    skipstart = 1;
+  CompositorLineRange line = ui_comp_begin_line(startcol, endcol, flags);
+  assert(line.active);
+  if (!line.active) {
+    return;
   }
-  if (endcol < default_grid.cols && (flags & kLineFlagInvalid)) {
-    endcol++;
-    skipend = 1;
-  }
+  startcol = line.start_col;
+  endcol = line.end_col;
 
   int col = (int)startcol;
   ScreenGrid *grid = NULL;
@@ -383,8 +370,8 @@ static void compose_line(Integer row, Integer startcol, Integer endcol, LineFlag
       // compose_line may have been called after a shrinking operation but
       // before the resize has actually been applied. Therefore, we need to
       // first check to see if any grids have pending updates to width/height,
-      // to ensure that we don't accidentally put any characters into `linebuf`
-      // that have been invalidated.
+      // to ensure that we don't copy invalidated characters into the
+      // compositor buffer.
       int grid_width = MIN(g->cols, g->comp_width);
       int grid_height = MIN(g->rows, g->comp_height);
       if (g->comp_row > row || row >= g->comp_row + grid_height
@@ -403,77 +390,38 @@ static void compose_line(Integer row, Integer startcol, Integer endcol, LineFlag
     assert(grid != NULL);
     assert(until > col);
     assert(until <= default_grid.cols);
-    size_t n = (size_t)(until - col);
 
+    bool composed;
     if (row == msg_sep_row && grid->comp_index <= msg_grid.comp_index) {
       // TODO(bfredl): when we implement borders around floating windows, then
       // msgsep can just be a border "around" the message grid.
       grid = &msg_grid;
       sattr_T msg_sep_attr = (sattr_T)HL_ATTR(HLF_MSGSEP);
-      for (int i = col; i < until; i++) {
-        linebuf[i - startcol] = msg_sep_char;
-        attrbuf[i - startcol] = msg_sep_attr;
-      }
+      composed = ui_comp_compose_separator_segment(
+        grid->blending ? &default_grid : NULL, (int)row,
+        col, until, msg_sep_char, msg_sep_attr);
     } else {
-      CompositorGridSegmentResult copy_result = ui_comp_copy_grid_segment(
-        grid, row - grid->comp_row, col - grid->comp_col,
-        until - grid->comp_col, linebuf + (col - startcol),
-        attrbuf + (col - startcol));
-      assert(copy_result.copied);
-      if (copy_result.followed_by_continuation) {
-        linebuf[until - 1 - startcol] = schar_from_ascii(' ');
-        if (col == startcol && n == 1) {
-          skipstart = 0;
-        }
-      }
+      composed = ui_comp_compose_grid_segment(
+        grid, grid->blending ? &default_grid : NULL,
+        row - grid->comp_row, col - grid->comp_col,
+        until - grid->comp_col, (int)row, col);
     }
-
-    // 'pumblend' and 'winblend'
-    if (grid->blending) {
-      bool blended = ui_comp_blend_grid_segment(
-        &default_grid, (int)row, col, until, (int)endcol,
-        linebuf + (col - startcol), attrbuf + (col - startcol));
-      assert(blended);
-      (void)blended;
-    }
-
-    // Tricky: if overlap caused a doublewidth char to get cut-off, must
-    // replace the visible half with a space.
-    if (linebuf[col - startcol] == NUL) {
-      linebuf[col - startcol] = schar_from_ascii(' ');
-      if (col == endcol - 1) {
-        skipend = 0;
-      }
-    } else if (col == startcol && n > 1 && linebuf[1] == NUL) {
-      skipstart = 0;
-    }
+    assert(composed);
+    (void)composed;
 
     col = until;
-  }
-  if (linebuf[endcol - startcol - 1] == NUL) {
-    skipend = 0;
   }
 
   assert(endcol <= chk_width);
   assert(row < chk_height);
 
-  if (!(grid && (grid == &default_grid || (grid->comp_col == 0 && grid->cols == Columns)))) {
-    flags = flags & ~kLineFlagWrap;
-  }
-
-  for (int i = skipstart; i < (endcol - skipend) - startcol; i++) {
-    if (attrbuf[i] < 0) {
-      if (rdb_flags & kOptRdbFlagInvalid) {
-        abort();
-      } else {
-        attrbuf[i] = 0;
-      }
-    }
-  }
-  ui_composed_call_raw_line(1, row, startcol + skipstart,
-                            endcol - skipend, endcol - skipend, 0, flags,
-                            (const schar_T *)linebuf + skipstart,
-                            (const sattr_T *)attrbuf + skipstart);
+  bool allow_wrap = grid
+                    && (grid == &default_grid
+                        || (grid->comp_col == 0 && grid->cols == Columns));
+  bool submitted = ui_comp_finish_line(
+    row, flags, allow_wrap, (rdb_flags & kOptRdbFlagInvalid) != 0);
+  assert(submitted);
+  (void)submitted;
 }
 
 static void compose_debug(Integer startrow, Integer endrow, Integer startcol, Integer endcol,
@@ -492,9 +440,9 @@ static void compose_debug(Integer startrow, Integer endrow, Integer startcol, In
   }
 
   for (int row = (int)startrow; row < endrow; row++) {
-    ui_composed_call_raw_line(1, row, startcol, startcol, endcol, attr, false,
-                              (const schar_T *)linebuf,
-                              (const sattr_T *)attrbuf);
+    bool emitted = ui_comp_emit_clear_line(row, startcol, endcol, attr);
+    assert(emitted);
+    (void)emitted;
   }
 
   if (delay) {
@@ -701,13 +649,8 @@ void ui_comp_grid_resize(Integer grid, Integer width, Integer height)
     chk_width = (int)width;
     chk_height = (int)height;
 #endif
-    size_t new_bufsize = (size_t)width;
-    if (bufsize != new_bufsize) {
-      xfree(linebuf);
-      xfree(attrbuf);
-      linebuf = xmalloc(new_bufsize * sizeof(*linebuf));
-      attrbuf = xmalloc(new_bufsize * sizeof(*attrbuf));
-      bufsize = new_bufsize;
-    }
+    bool resized = ui_comp_resize_buffer(width);
+    assert(resized);
+    (void)resized;
   }
 }
