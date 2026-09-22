@@ -297,6 +297,33 @@ pub unsafe extern "C" fn ui_comp_blend_grid_segment(
         .is_some()
 }
 
+/// Reports whether a scrolled grid row should be recomposed.
+///
+/// # Safety
+///
+/// `grid` must be null or point to a valid, exclusively accessible
+/// `CScreenGrid` whose buffers satisfy the ownership and layout requirements
+/// of `ScreenGrid`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ui_comp_should_compose_scroll_row(
+    grid: *mut CScreenGrid,
+    row: libc::c_int,
+    start_col: libc::c_int,
+) -> bool {
+    if grid.is_null() {
+        return false;
+    }
+
+    let (Ok(row), Ok(start_col)) = (usize::try_from(row), usize::try_from(start_col)) else {
+        return false;
+    };
+
+    // SAFETY: The caller transfers exclusive ownership of the grid buffers
+    // into the guard for the duration of this function.
+    let rust_grid = unsafe { ScreenGridGuard::take(grid) };
+    GridRow::try_from_grid(&rust_grid, row).is_some_and(|row| row.is_valid_at(start_col))
+}
+
 /// Reports whether a screen character participates in negative-space blending.
 fn is_negative_space(character: VimSCharT) -> bool {
     character == schar_from_ascii(' ') || character == schar_from_char(0x2800)
@@ -465,6 +492,35 @@ mod tests {
             restored_grid.chars.as_slice(),
             &[schar_from_ascii('x'), schar_from_ascii('y')]
         );
+    }
+
+    #[test]
+    fn ffi_checks_scroll_cell_validity_and_restores_ownership() {
+        let grid = grid_with_row(&[schar_from_ascii('x'), schar_from_ascii('y')], &[1, -1]);
+        // SAFETY: This transfers every grid allocation to its C representation.
+        let mut cgrid = unsafe { grid.to_cgrid() };
+
+        // SAFETY: `cgrid` exclusively owns valid grid allocations. Each call
+        // restores those allocations before returning.
+        let (valid, invalid, outside) = unsafe {
+            (
+                ui_comp_should_compose_scroll_row(&mut cgrid, 0, 0),
+                ui_comp_should_compose_scroll_row(&mut cgrid, 0, 1),
+                ui_comp_should_compose_scroll_row(&mut cgrid, 1, 0),
+            )
+        };
+
+        assert!(valid);
+        assert!(!invalid);
+        assert!(!outside);
+
+        // SAFETY: The FFI function returned ownership to `cgrid`.
+        let restored_grid = unsafe { ScreenGrid::take_from_cgrid(&mut cgrid) };
+        assert_eq!(
+            restored_grid.chars.as_slice(),
+            &[schar_from_ascii('x'), schar_from_ascii('y')]
+        );
+        assert_eq!(restored_grid.attrs.as_slice(), &[1, -1]);
     }
 
     #[test]

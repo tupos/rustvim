@@ -680,8 +680,8 @@ void ui_comp_grid_scroll(Integer grid, Integer top, Integer bot, Integer left, I
       // row, where the latter might scroll invalid space created by the first.
       // ideally win_update() should keep track of this itself and not scroll
       // the invalid space.
-      if (curgrid->attrs[curgrid->line_offset[r - curgrid->comp_row]
-                         + (size_t)left - (size_t)curgrid->comp_col] >= 0) {
+      if (ui_comp_should_compose_scroll_row(
+            curgrid, r - curgrid->comp_row, (int)left - curgrid->comp_col)) {
         compose_line(r, left, right, 0);
       }
     }

@@ -40,10 +40,10 @@ impl<'grid> GridRow<'grid> {
         })
     }
 
-    /// Reports whether this row contains valid rendered cells.
-    pub(crate) fn is_valid(self) -> bool {
+    /// Reports whether one column contains a valid rendered cell.
+    pub(crate) fn is_valid_at(self, column: usize) -> bool {
         self.attributes
-            .first()
+            .get(column)
             .is_some_and(|attribute| *attribute >= 0)
     }
 }
@@ -117,11 +117,15 @@ mod tests {
             ]
         );
         assert_eq!(segment.attributes(), [4, 5, 6]);
-        assert!(row.is_valid());
+        assert!(row.is_valid_at(0));
+        assert!(row.is_valid_at(1));
 
         let first_row_offset = grid.line_offset[0];
-        grid.attrs[first_row_offset] = -1;
-        assert!(!GridRow::try_from_grid(&grid, 0).unwrap().is_valid());
+        grid.attrs[first_row_offset + 1] = -1;
+        let row = GridRow::try_from_grid(&grid, 0).unwrap();
+        assert!(row.is_valid_at(0));
+        assert!(!row.is_valid_at(1));
+        assert!(!row.is_valid_at(3));
     }
 
     #[test]

@@ -20,4 +20,7 @@ extern bool ui_comp_blend_grid_segment(
   ScreenGrid *background_grid, int row, int start_col, int blend_end_col,
   int end_col, schar_T *characters, sattr_T *attributes);
 
+extern bool ui_comp_should_compose_scroll_row(
+  ScreenGrid *grid, int row, int start_col);
+
 #include "ui_compositor.h.generated.h"
