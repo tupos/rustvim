@@ -89,82 +89,89 @@ impl<'output> CompositorSegment<'output> {
         foreground: GridRowSegment<'_>,
         blending: bool,
     ) -> Option<SegmentComposition> {
-        self.try_compose_with(
-            background,
-            foreground,
-            blending,
-            |background, foreground, through| {
-                let (attribute, through) =
-                    Highlight::new(background).blend(Highlight::new(foreground), through);
-                (attribute.raw(), through)
-            },
-        )
+        let composition = self.try_copy(foreground)?;
+        if blending {
+            self.try_blend_prefix_over(background, self.characters.len())?;
+        }
+        Some(composition)
     }
 
-    /// Composes a segment using the supplied attribute-blending operation.
+    /// Blends a prefix of this output over a background grid segment.
+    ///
+    /// The complete output and background segments remain available while the
+    /// prefix is blended because a double-width background character beginning
+    /// at the end of the prefix also includes its following continuation cell.
+    pub(crate) fn try_blend_prefix_over(
+        &mut self,
+        background: GridRowSegment<'_>,
+        blend_len: usize,
+    ) -> Option<()> {
+        self.try_blend_prefix_over_with(background, blend_len, |background, foreground, through| {
+            let (attribute, through) =
+                Highlight::new(background).blend(Highlight::new(foreground), through);
+            (attribute.raw(), through)
+        })
+    }
+
+    /// Blends a prefix using the supplied attribute-blending operation.
     ///
     /// Keeping the cell traversal independent of the highlight implementation
     /// permits deterministic tests of wide-cell and negative-space behavior.
-    fn try_compose_with(
+    fn try_blend_prefix_over_with(
         &mut self,
         background: GridRowSegment<'_>,
-        foreground: GridRowSegment<'_>,
-        blending: bool,
+        blend_len: usize,
         mut blend_attributes: impl FnMut(VimSAttrT, VimSAttrT, bool) -> (VimSAttrT, bool),
-    ) -> Option<SegmentComposition> {
+    ) -> Option<()> {
         let len = self.characters.len();
-        if background.len() != len {
+        if background.len() != len || blend_len > len {
             return None;
         }
 
-        let composition = self.try_copy(foreground)?;
+        let background_characters = background.characters();
+        let background_attributes = background.attributes();
+        let mut index = 0;
 
-        if blending {
-            let background_characters = background.characters();
-            let background_attributes = background.attributes();
-            let mut index = 0;
+        while index < blend_len {
+            let width = if index + 1 < len && background_characters[index + 1] == 0 {
+                2
+            } else {
+                1
+            };
+            let mut through =
+                is_negative_space(self.characters[index]) && background_characters[index] != 0;
 
-            while index < len {
-                let width = if index + 1 < len && background_characters[index + 1] == 0 {
-                    2
-                } else {
-                    1
-                };
-                let mut through =
-                    is_negative_space(self.characters[index]) && background_characters[index] != 0;
+            if width == 2 {
+                through &= is_negative_space(self.characters[index + 1]);
+            }
 
-                if width == 2 {
-                    through &= is_negative_space(self.characters[index + 1]);
-                }
+            let (attribute, blended_through) = blend_attributes(
+                background_attributes[index],
+                self.attributes[index],
+                through,
+            );
+            self.attributes[index] = attribute;
+            through = blended_through;
 
+            if width == 2 {
                 let (attribute, blended_through) = blend_attributes(
-                    background_attributes[index],
-                    self.attributes[index],
+                    background_attributes[index + 1],
+                    self.attributes[index + 1],
                     through,
                 );
-                self.attributes[index] = attribute;
+                self.attributes[index + 1] = attribute;
                 through = blended_through;
-
-                if width == 2 {
-                    let (attribute, blended_through) = blend_attributes(
-                        background_attributes[index + 1],
-                        self.attributes[index + 1],
-                        through,
-                    );
-                    self.attributes[index + 1] = attribute;
-                    through = blended_through;
-                }
-
-                if through {
-                    self.characters[index..index + width]
-                        .copy_from_slice(&background_characters[index..index + width]);
-                }
-
-                index += width;
             }
+
+            if through {
+                self.characters[index..index + width]
+                    .copy_from_slice(&background_characters[index..index + width]);
+            }
+
+            index += width;
         }
 
-        Some(composition)
+        Some(())
     }
 }
 
@@ -226,6 +233,68 @@ pub unsafe extern "C" fn ui_comp_copy_grid_segment(
         copied: true,
         followed_by_continuation: composition.is_followed_by_continuation(),
     }
+}
+
+/// Blends an existing compositor output span over a C-owned background grid.
+///
+/// # Safety
+///
+/// `background_grid` must be null or point to a valid, exclusively accessible
+/// `CScreenGrid` whose buffers satisfy the ownership and layout requirements
+/// of `ScreenGrid`. `start_col..=blend_end_col` must fall within
+/// `start_col..=end_col`. For a nonempty requested range, `characters` and
+/// `attributes` must point to separate initialized writable arrays containing
+/// at least `end_col - start_col` elements. Those arrays must not overlap the
+/// grid allocations.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ui_comp_blend_grid_segment(
+    background_grid: *mut CScreenGrid,
+    row: libc::c_int,
+    start_col: libc::c_int,
+    blend_end_col: libc::c_int,
+    end_col: libc::c_int,
+    characters: *mut VimSCharT,
+    attributes: *mut VimSAttrT,
+) -> bool {
+    if background_grid.is_null() || characters.is_null() || attributes.is_null() {
+        return false;
+    }
+
+    let (Ok(row), Ok(start_col), Ok(blend_end_col), Ok(end_col)) = (
+        usize::try_from(row),
+        usize::try_from(start_col),
+        usize::try_from(blend_end_col),
+        usize::try_from(end_col),
+    ) else {
+        return false;
+    };
+    let Some(len) = end_col.checked_sub(start_col) else {
+        return false;
+    };
+    let Some(blend_len) = blend_end_col.checked_sub(start_col) else {
+        return false;
+    };
+    if len == 0 || blend_len == 0 || blend_len > len {
+        return false;
+    }
+
+    // SAFETY: The caller transfers exclusive ownership of the background grid
+    // buffers into the guard for the duration of this function.
+    let rust_background = unsafe { ScreenGridGuard::take(background_grid) };
+    let Some(background) = GridRow::try_from_grid(&rust_background, row)
+        .and_then(|row| row.segment(start_col..end_col))
+    else {
+        return false;
+    };
+
+    // SAFETY: The caller guarantees that both output pointers describe
+    // separate initialized writable arrays of `len` elements which do not
+    // overlap the background grid allocations.
+    let characters = unsafe { slice::from_raw_parts_mut(characters, len) };
+    let attributes = unsafe { slice::from_raw_parts_mut(attributes, len) };
+    CompositorSegment::try_from_slices(characters, attributes)
+        .and_then(|mut output| output.try_blend_prefix_over(background, blend_len))
+        .is_some()
 }
 
 /// Reports whether a screen character participates in negative-space blending.
@@ -424,16 +493,20 @@ mod tests {
             CompositorSegment::try_from_slices(&mut characters, &mut attributes).unwrap();
 
         output
-            .try_compose_with(
-                GridRow::try_from_grid(&background, 0)
-                    .unwrap()
-                    .segment(0..4)
-                    .unwrap(),
+            .try_copy(
                 GridRow::try_from_grid(&foreground, 0)
                     .unwrap()
                     .segment(0..4)
                     .unwrap(),
-                true,
+            )
+            .unwrap();
+        output
+            .try_blend_prefix_over_with(
+                GridRow::try_from_grid(&background, 0)
+                    .unwrap()
+                    .segment(0..4)
+                    .unwrap(),
+                4,
                 |background, foreground, through| (background + foreground, through),
             )
             .unwrap();
@@ -448,6 +521,61 @@ mod tests {
             ]
         );
         assert_eq!(attributes, [11, 22, 33, 44]);
+    }
+
+    #[test]
+    fn blends_wide_background_continuation_past_prefix() {
+        let background = grid_with_row(&[schar_from_ascii('W'), 0], &[10, 20]);
+        let mut characters = [schar_from_ascii(' '), schar_from_ascii(' ')];
+        let mut attributes = [1, 2];
+        let mut output =
+            CompositorSegment::try_from_slices(&mut characters, &mut attributes).unwrap();
+
+        output
+            .try_blend_prefix_over_with(
+                GridRow::try_from_grid(&background, 0)
+                    .unwrap()
+                    .segment(0..2)
+                    .unwrap(),
+                1,
+                |background, foreground, through| (background + foreground, through),
+            )
+            .unwrap();
+
+        assert_eq!(characters, [schar_from_ascii('W'), 0]);
+        assert_eq!(attributes, [11, 22]);
+    }
+
+    #[test]
+    fn ffi_blends_grid_segment_and_restores_ownership() {
+        let background = grid_with_row(&[schar_from_ascii('a')], &[-1]);
+        // SAFETY: This transfers every grid allocation to its C representation.
+        let mut cgrid = unsafe { background.to_cgrid() };
+        let mut characters = [schar_from_ascii(' ')];
+        let mut attributes = [7];
+
+        // SAFETY: `cgrid` exclusively owns valid grid allocations, and the
+        // output arrays are separate, initialized, writable, and have the
+        // requested length.
+        let blended = unsafe {
+            ui_comp_blend_grid_segment(
+                &mut cgrid,
+                0,
+                0,
+                1,
+                1,
+                characters.as_mut_ptr(),
+                attributes.as_mut_ptr(),
+            )
+        };
+
+        assert!(blended);
+        assert_eq!(characters, [schar_from_ascii('a')]);
+        assert_eq!(attributes, [7]);
+
+        // SAFETY: The FFI function returned ownership to `cgrid`.
+        let restored_grid = unsafe { ScreenGrid::take_from_cgrid(&mut cgrid) };
+        assert_eq!(restored_grid.chars.as_slice(), &[schar_from_ascii('a')]);
     }
 
     #[test]

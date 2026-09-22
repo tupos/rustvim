@@ -8,7 +8,6 @@
 #include <limits.h>
 #include <stdbool.h>
 #include <stdlib.h>
-#include <string.h>
 #include <uv.h>
 
 #include "klib/kvec.h"
@@ -376,10 +375,6 @@ static void compose_line(Integer row, Integer startcol, Integer endcol, LineFlag
 
   int col = (int)startcol;
   ScreenGrid *grid = NULL;
-  schar_T *bg_line = &default_grid.chars[default_grid.line_offset[row]
-                                         + (size_t)startcol];
-  sattr_T *bg_attrs = &default_grid.attrs[default_grid.line_offset[row]
-                                          + (size_t)startcol];
 
   while (col < endcol) {
     int until = 0;
@@ -435,26 +430,11 @@ static void compose_line(Integer row, Integer startcol, Integer endcol, LineFlag
 
     // 'pumblend' and 'winblend'
     if (grid->blending) {
-      int width;
-      for (int i = col - (int)startcol; i < until - startcol; i += width) {
-        width = 1;
-        // negative space
-        bool thru = (linebuf[i] == schar_from_ascii(' ')
-                     || linebuf[i] == schar_from_char(L'\u2800')) && bg_line[i] != NUL;
-        if (i + 1 < endcol - startcol && bg_line[i + 1] == NUL) {
-          width = 2;
-          thru &= (linebuf[i + 1] == schar_from_ascii(' ')
-                   || linebuf[i + 1] == schar_from_char(L'\u2800'));
-        }
-        attrbuf[i] = (sattr_T)hl_blend_attrs(bg_attrs[i], attrbuf[i], &thru);
-        if (width == 2) {
-          attrbuf[i + 1] = (sattr_T)hl_blend_attrs(bg_attrs[i + 1],
-                                                   attrbuf[i + 1], &thru);
-        }
-        if (thru) {
-          memcpy(linebuf + i, bg_line + i, (size_t)width * sizeof(linebuf[i]));
-        }
-      }
+      bool blended = ui_comp_blend_grid_segment(
+        &default_grid, (int)row, col, until, (int)endcol,
+        linebuf + (col - startcol), attrbuf + (col - startcol));
+      assert(blended);
+      (void)blended;
     }
 
     // Tricky: if overlap caused a doublewidth char to get cut-off, must
