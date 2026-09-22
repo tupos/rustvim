@@ -1,5 +1,8 @@
+use std::{ops::Range, slice};
+
 use crate::grid::{
-    GridRowSegment, Highlight, VimSAttrT, VimSCharT, schar_from_ascii, schar_from_char,
+    CScreenGrid, GridRow, GridRowSegment, Highlight, ScreenGrid, VimSAttrT, VimSCharT,
+    schar_from_ascii, schar_from_char,
 };
 
 /// Result of composing one foreground segment over its background.
@@ -15,10 +18,21 @@ impl SegmentComposition {
     }
 }
 
+/// C-compatible result of copying one grid segment into compositor output.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct CCompositorGridSegmentResult {
+    copied: bool,
+    followed_by_continuation: bool,
+}
+
 /// Mutable output slices for one compositor span.
 ///
 /// Characters and attributes are kept in parallel slices because that is the
 /// representation consumed by Neovim's raw-line UI event.
+///
+/// TODO: Replace these parallel slices with a unified Rust cell slice once
+/// screen-grid ownership has moved completely from C to Rust.
 pub(crate) struct CompositorSegment<'output> {
     characters: &'output mut [VimSCharT],
     attributes: &'output mut [VimSAttrT],
@@ -34,6 +48,34 @@ impl<'output> CompositorSegment<'output> {
             characters,
             attributes,
         })
+    }
+
+    /// Copies a foreground grid segment into the compositor output.
+    pub(crate) fn try_copy(
+        &mut self,
+        foreground: GridRowSegment<'_>,
+    ) -> Option<SegmentComposition> {
+        if foreground.len() != self.characters.len() {
+            return None;
+        }
+
+        self.characters.copy_from_slice(foreground.characters());
+        self.attributes.copy_from_slice(foreground.attributes());
+
+        Some(SegmentComposition {
+            followed_by_continuation: foreground.is_followed_by_continuation(),
+        })
+    }
+
+    /// Copies a logical row range from a Rust screen grid.
+    pub(crate) fn try_copy_from_grid(
+        &mut self,
+        grid: &ScreenGrid,
+        row: usize,
+        columns: Range<usize>,
+    ) -> Option<SegmentComposition> {
+        let foreground = GridRow::try_from_grid(grid, row)?.segment(columns)?;
+        self.try_copy(foreground)
     }
 
     /// Composes a foreground grid segment over its default-grid background.
@@ -71,12 +113,11 @@ impl<'output> CompositorSegment<'output> {
         mut blend_attributes: impl FnMut(VimSAttrT, VimSAttrT, bool) -> (VimSAttrT, bool),
     ) -> Option<SegmentComposition> {
         let len = self.characters.len();
-        if background.len() != len || foreground.len() != len {
+        if background.len() != len {
             return None;
         }
 
-        self.characters.copy_from_slice(foreground.characters());
-        self.attributes.copy_from_slice(foreground.attributes());
+        let composition = self.try_copy(foreground)?;
 
         if blending {
             let background_characters = background.characters();
@@ -123,9 +164,72 @@ impl<'output> CompositorSegment<'output> {
             }
         }
 
-        Some(SegmentComposition {
-            followed_by_continuation: foreground.is_followed_by_continuation(),
-        })
+        Some(composition)
+    }
+}
+
+/// Copies one C-owned grid segment into compositor output.
+///
+/// # Safety
+///
+/// `grid` must be null or point to a valid, exclusively accessible
+/// `CScreenGrid` whose buffers satisfy the ownership and layout requirements
+/// of `ScreenGrid`. For a nonempty requested range, `characters` and
+/// `attributes` must point to separate writable arrays containing at least
+/// `end_col - start_col` elements. Those arrays must not overlap the grid
+/// allocations.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ui_comp_copy_grid_segment(
+    grid: *mut CScreenGrid,
+    row: libc::c_int,
+    start_col: libc::c_int,
+    end_col: libc::c_int,
+    characters: *mut VimSCharT,
+    attributes: *mut VimSAttrT,
+) -> CCompositorGridSegmentResult {
+    let not_copied = CCompositorGridSegmentResult::default();
+    if grid.is_null() || characters.is_null() || attributes.is_null() {
+        return not_copied;
+    }
+
+    let (Ok(row), Ok(start_col), Ok(end_col)) = (
+        usize::try_from(row),
+        usize::try_from(start_col),
+        usize::try_from(end_col),
+    ) else {
+        return not_copied;
+    };
+    let Some(len) = end_col.checked_sub(start_col) else {
+        return not_copied;
+    };
+    if len == 0 {
+        return not_copied;
+    }
+
+    // SAFETY: The caller transfers exclusive ownership of the grid buffers
+    // into Rust for the duration of this function.
+    let rust_grid = unsafe { ScreenGrid::take_from_cgrid(&mut *grid) };
+    let composition = {
+        // SAFETY: The caller guarantees that both output pointers describe
+        // separate writable arrays of `len` elements which do not overlap the
+        // grid allocations.
+        let characters = unsafe { slice::from_raw_parts_mut(characters, len) };
+        let attributes = unsafe { slice::from_raw_parts_mut(attributes, len) };
+        CompositorSegment::try_from_slices(characters, attributes)
+            .and_then(|mut output| output.try_copy_from_grid(&rust_grid, row, start_col..end_col))
+    };
+
+    // SAFETY: Ownership of every grid allocation is returned exactly once.
+    unsafe {
+        *grid = rust_grid.to_cgrid();
+    }
+
+    let Some(composition) = composition else {
+        return not_copied;
+    };
+    CCompositorGridSegmentResult {
+        copied: true,
+        followed_by_continuation: composition.is_followed_by_continuation(),
     }
 }
 
@@ -137,7 +241,7 @@ fn is_negative_space(character: VimSCharT) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::grid::{GridRow, LineBuffer, ScreenGrid};
+    use crate::grid::LineBuffer;
 
     fn grid_with_row(characters: &[VimSCharT], attributes: &[VimSAttrT]) -> ScreenGrid {
         assert_eq!(characters.len(), attributes.len());
@@ -151,6 +255,47 @@ mod tests {
         grid.chars.copy_from_slice(characters);
         grid.attrs.copy_from_slice(attributes);
         grid
+    }
+
+    #[test]
+    fn copies_foreground_segment() {
+        let foreground = grid_with_row(
+            &[schar_from_ascii('x'), schar_from_ascii('y'), 0],
+            &[1, 2, 3],
+        );
+        let mut characters = [0; 2];
+        let mut attributes = [0; 2];
+        let mut output =
+            CompositorSegment::try_from_slices(&mut characters, &mut attributes).unwrap();
+
+        let result = output
+            .try_copy(
+                GridRow::try_from_grid(&foreground, 0)
+                    .unwrap()
+                    .segment(0..2)
+                    .unwrap(),
+            )
+            .unwrap();
+
+        assert_eq!(characters, [schar_from_ascii('x'), schar_from_ascii('y')]);
+        assert_eq!(attributes, [1, 2]);
+        assert!(result.is_followed_by_continuation());
+
+        let mut short_characters = [0; 1];
+        let mut short_attributes = [0; 1];
+        let mut short_output =
+            CompositorSegment::try_from_slices(&mut short_characters, &mut short_attributes)
+                .unwrap();
+        assert!(
+            short_output
+                .try_copy(
+                    GridRow::try_from_grid(&foreground, 0)
+                        .unwrap()
+                        .segment(0..2)
+                        .unwrap()
+                )
+                .is_none()
+        );
     }
 
     #[test]
@@ -189,6 +334,73 @@ mod tests {
         assert_eq!(characters, [schar_from_ascii('x'), schar_from_ascii('y')]);
         assert_eq!(attributes, [1, 2]);
         assert!(result.is_followed_by_continuation());
+    }
+
+    #[test]
+    fn ffi_copies_grid_segment_and_restores_ownership() {
+        let grid = grid_with_row(
+            &[schar_from_ascii('x'), schar_from_ascii('y'), 0],
+            &[1, 2, 3],
+        );
+        // SAFETY: This transfers every grid allocation to its C representation.
+        let mut cgrid = unsafe { grid.to_cgrid() };
+        let mut characters = [0; 2];
+        let mut attributes = [0; 2];
+
+        // SAFETY: `cgrid` exclusively owns valid grid allocations, and the
+        // output arrays are separate, writable, and have the requested length.
+        let result = unsafe {
+            ui_comp_copy_grid_segment(
+                &mut cgrid,
+                0,
+                0,
+                2,
+                characters.as_mut_ptr(),
+                attributes.as_mut_ptr(),
+            )
+        };
+
+        assert!(result.copied);
+        assert!(result.followed_by_continuation);
+        assert_eq!(characters, [schar_from_ascii('x'), schar_from_ascii('y')]);
+        assert_eq!(attributes, [1, 2]);
+
+        // SAFETY: The FFI function returned ownership to `cgrid`.
+        let restored_grid = unsafe { ScreenGrid::take_from_cgrid(&mut cgrid) };
+        assert_eq!(
+            restored_grid.chars.as_slice(),
+            &[schar_from_ascii('x'), schar_from_ascii('y'), 0]
+        );
+    }
+
+    #[test]
+    fn ffi_restores_grid_ownership_after_rejecting_a_segment() {
+        let grid = grid_with_row(&[schar_from_ascii('x'), schar_from_ascii('y')], &[1, 2]);
+        // SAFETY: This transfers every grid allocation to its C representation.
+        let mut cgrid = unsafe { grid.to_cgrid() };
+        let mut characters = [0; 2];
+        let mut attributes = [0; 2];
+
+        // SAFETY: The output arrays are valid, but columns 1..3 exceed the
+        // source row and are rejected by the safe Rust implementation.
+        let rejected = unsafe {
+            ui_comp_copy_grid_segment(
+                &mut cgrid,
+                0,
+                1,
+                3,
+                characters.as_mut_ptr(),
+                attributes.as_mut_ptr(),
+            )
+        };
+        assert!(!rejected.copied);
+
+        // SAFETY: The rejected operation returned ownership to `cgrid`.
+        let restored_grid = unsafe { ScreenGrid::take_from_cgrid(&mut cgrid) };
+        assert_eq!(
+            restored_grid.chars.as_slice(),
+            &[schar_from_ascii('x'), schar_from_ascii('y')]
+        );
     }
 
     #[test]

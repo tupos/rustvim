@@ -28,9 +28,7 @@ use fold_column::{FoldColumn, FoldColumnInfo, FoldColumnSymbols};
 pub use line_buffer::LineBuffer;
 use line_buffer::{LineTextRenderOptions, LineTextVirtualColumns};
 use line_submission::{LineSubmission, SmoothScrollMarker};
-#[cfg(test)]
-pub(crate) use row::GridRow;
-pub(crate) use row::GridRowSegment;
+pub(crate) use row::{GridRow, GridRowSegment};
 use tabstops::TabStops;
 use virtual_text::{VirtualText, VirtualTextChunk, VirtualTextRenderOptions};
 

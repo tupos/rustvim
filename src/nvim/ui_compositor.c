@@ -420,12 +420,12 @@ static void compose_line(Integer row, Integer startcol, Integer endcol, LineFlag
         attrbuf[i - startcol] = msg_sep_attr;
       }
     } else {
-      size_t off = grid->line_offset[row - grid->comp_row]
-                   + (size_t)(col - grid->comp_col);
-      memcpy(linebuf + (col - startcol), grid->chars + off, n * sizeof(*linebuf));
-      memcpy(attrbuf + (col - startcol), grid->attrs + off, n * sizeof(*attrbuf));
-      if (grid->comp_col + grid->cols > until
-          && grid->chars[off + n] == NUL) {
+      CompositorGridSegmentResult copy_result = ui_comp_copy_grid_segment(
+        grid, row - grid->comp_row, col - grid->comp_col,
+        until - grid->comp_col, linebuf + (col - startcol),
+        attrbuf + (col - startcol));
+      assert(copy_result.copied);
+      if (copy_result.followed_by_continuation) {
         linebuf[until - 1 - startcol] = schar_from_ascii(' ');
         if (col == startcol && n == 1) {
           skipstart = 0;
