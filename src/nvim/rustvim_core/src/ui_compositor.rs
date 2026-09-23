@@ -501,6 +501,7 @@ struct CompositorLayer<'grid> {
     requested_height: i32,
     visible_width: i32,
     visible_height: i32,
+    z_index: i32,
     layer_index: usize,
     blending: bool,
     disabled: bool,
@@ -527,6 +528,7 @@ impl<'grid> CompositorLayer<'grid> {
             requested_height,
             visible_width,
             visible_height,
+            z_index: grid.z_index(),
             layer_index: grid.compositor_index(),
             blending: grid.blends_with_background(),
             disabled: grid.is_compositor_disabled(),
@@ -633,6 +635,44 @@ impl LayerHitTest {
     }
 }
 
+/// Direction in which a layer's changed z-index may move it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CompositorLayerAdjustment {
+    Raise,
+    Lower,
+}
+
+/// One stable relocation within the compositor layer stack.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CompositorLayerMove {
+    source_index: usize,
+    target_index: usize,
+}
+
+impl CompositorLayerMove {
+    /// Applies this relocation to any layer representation.
+    fn apply_to<T>(self, layers: &mut [T]) -> Option<()> {
+        if self.source_index < self.target_index {
+            layers
+                .get_mut(self.source_index..=self.target_index)?
+                .rotate_left(1);
+        } else if self.source_index > self.target_index {
+            layers
+                .get_mut(self.target_index..=self.source_index)?
+                .rotate_right(1);
+        } else {
+            layers.get(self.source_index)?;
+        }
+
+        Some(())
+    }
+
+    /// Returns the inclusive range whose compositor indices changed.
+    fn affected_indices(self) -> std::ops::RangeInclusive<usize> {
+        self.source_index.min(self.target_index)..=self.source_index.max(self.target_index)
+    }
+}
+
 /// Ordered borrowed grids used to compose one line.
 struct CompositorLayerStack<'grid> {
     layers: Vec<CompositorLayer<'grid>>,
@@ -683,6 +723,39 @@ impl<'grid> CompositorLayerStack<'grid> {
             let layer = *layer;
             (layer.contains_allocated_cell(point) && hit_test.accepts(layer))
                 .then_some(layer.layer_index)
+        })
+    }
+
+    /// Plans a stable relocation after one layer's z-index changes.
+    fn plan_layer_adjustment(
+        &self,
+        layer_index: usize,
+        adjustment: CompositorLayerAdjustment,
+    ) -> Option<CompositorLayerMove> {
+        let layer = self.layer(layer_index)?;
+        if layer.is_default {
+            return None;
+        }
+
+        let mut target_index = layer_index;
+        match adjustment {
+            CompositorLayerAdjustment::Raise => {
+                while target_index + 1 < self.layers.len()
+                    && layer.z_index > self.layers[target_index + 1].z_index
+                {
+                    target_index += 1;
+                }
+            }
+            CompositorLayerAdjustment::Lower => {
+                while target_index > 1 && layer.z_index < self.layers[target_index - 1].z_index {
+                    target_index -= 1;
+                }
+            }
+        }
+
+        Some(CompositorLayerMove {
+            source_index: layer_index,
+            target_index,
         })
     }
 
@@ -852,14 +925,19 @@ impl<'grid> CompositorLayerStack<'grid> {
     }
 }
 
+/// One C grid identity paired with its temporary Rust owner.
+struct GuardedCompositorLayer {
+    cgrid: NonNull<CScreenGrid>,
+    grid: ScreenGridGuard,
+}
+
 /// Temporary Rust ownership of the ordered compositor layers received from C.
 ///
 /// Each contained `ScreenGridGuard` restores its grid allocations when this
 /// collection is dropped.
 #[must_use = "dropping the layer guards restores ownership to the C grids"]
 struct CompositorLayerGuards {
-    cgrids: Vec<NonNull<CScreenGrid>>,
-    grids: Vec<ScreenGridGuard>,
+    layers: Vec<GuardedCompositorLayer>,
 }
 
 impl CompositorLayerGuards {
@@ -891,32 +969,67 @@ impl CompositorLayerGuards {
             return None;
         }
 
-        let grids = cgrids
-            .iter()
-            .map(|grid| {
+        let layers = cgrids
+            .into_iter()
+            .map(|cgrid| {
                 // SAFETY: Null and duplicate pointers were rejected, and the
                 // caller transfers ownership for this operation.
-                unsafe { ScreenGridGuard::take(grid.as_ptr()) }
+                let grid = unsafe { ScreenGridGuard::take(cgrid.as_ptr()) };
+                GuardedCompositorLayer { cgrid, grid }
             })
             .collect();
-        Some(Self { cgrids, grids })
+        Some(Self { layers })
     }
 
     /// Returns the stack index belonging to one C grid identity.
     fn index_of(&self, cgrid: *mut CScreenGrid) -> Option<usize> {
         let cgrid = NonNull::new(cgrid)?;
-        self.cgrids.iter().position(|grid| *grid == cgrid)
+        self.layers.iter().position(|layer| layer.cgrid == cgrid)
     }
 
     /// Borrows one owned Rust grid by its layer index.
     fn grid(&self, index: usize) -> Option<&ScreenGrid> {
-        self.grids.get(index).map(|grid| &**grid)
+        self.layers.get(index).map(|layer| &*layer.grid)
     }
 
     /// Borrows all owned grids as a validated compositor layer stack.
     fn layer_stack(&self) -> Option<CompositorLayerStack<'_>> {
-        let grids = self.grids.iter().map(|grid| &**grid).collect::<Vec<_>>();
+        let grids = self
+            .layers
+            .iter()
+            .map(|layer| &*layer.grid)
+            .collect::<Vec<_>>();
         CompositorLayerStack::try_from_grids(&grids)
+    }
+
+    /// Applies a planned relocation and synchronizes affected grid metadata.
+    fn apply_layer_move(&mut self, movement: CompositorLayerMove) -> Option<()> {
+        movement.apply_to(&mut self.layers)?;
+
+        let affected_indices = movement.affected_indices();
+        let first_index = *affected_indices.start();
+        for (offset, layer) in self
+            .layers
+            .get_mut(affected_indices)?
+            .iter_mut()
+            .enumerate()
+        {
+            layer.grid.set_compositor_index(first_index + offset);
+        }
+
+        Some(())
+    }
+
+    /// Writes the current grid identity order into a C pointer slice.
+    fn write_cgrid_order(&self, cgrids: &mut [*mut CScreenGrid]) -> bool {
+        if cgrids.len() != self.layers.len() {
+            return false;
+        }
+
+        for (cgrid, layer) in cgrids.iter_mut().zip(&self.layers) {
+            *cgrid = layer.cgrid.as_ptr();
+        }
+        true
     }
 }
 
@@ -1234,6 +1347,53 @@ pub extern "C" fn ui_comp_resize_buffer(width: Integer) -> bool {
 #[unsafe(no_mangle)]
 pub extern "C" fn ui_comp_release_buffer() -> bool {
     lock_compositor_buffer().release()
+}
+
+/// Adjusts one layer's position after its z-index changes.
+///
+/// Every temporarily owned grid is restored before this function returns.
+///
+/// # Safety
+///
+/// `layer_grids` must point to `layer_count` writable, distinct, non-null grid
+/// pointers. Every grid must be exclusively accessible and its buffers must
+/// satisfy the ownership and layout requirements of `ScreenGrid`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ui_comp_adjust_layer_order(
+    layer_grids: *mut *mut CScreenGrid,
+    layer_count: usize,
+    layer_index: usize,
+    raise: bool,
+) -> bool {
+    // SAFETY: The caller satisfies the documented layer-array and grid
+    // ownership requirements.
+    let Some(mut layer_guards) =
+        (unsafe { CompositorLayerGuards::try_take(layer_grids, layer_count) })
+    else {
+        return false;
+    };
+    let adjustment = if raise {
+        CompositorLayerAdjustment::Raise
+    } else {
+        CompositorLayerAdjustment::Lower
+    };
+    let movement = {
+        let Some(layers) = layer_guards.layer_stack() else {
+            return false;
+        };
+        let Some(movement) = layers.plan_layer_adjustment(layer_index, adjustment) else {
+            return false;
+        };
+        movement
+    };
+    if layer_guards.apply_layer_move(movement).is_none() {
+        return false;
+    }
+
+    // SAFETY: The caller guarantees that the pointer array is writable for
+    // `layer_count` elements for the duration of this synchronous call.
+    let cgrids = unsafe { slice::from_raw_parts_mut(layer_grids, layer_count) };
+    layer_guards.write_cgrid_order(cgrids)
 }
 
 /// Finds the topmost non-default compositor layer at one screen coordinate.
@@ -1605,6 +1765,7 @@ mod tests {
             requested_height: grid.rows,
             visible_width,
             visible_height: grid.rows,
+            z_index: 0,
             layer_index,
             blending: false,
             disabled,
@@ -1650,6 +1811,114 @@ mod tests {
         };
         assert_eq!(first.chars.as_slice(), &[schar_from_ascii('a')]);
         assert_eq!(second.chars.as_slice(), &[schar_from_ascii('b')]);
+    }
+
+    #[test]
+    fn layer_adjustment_raises_across_strictly_lower_z_indices() {
+        let default_grid = grid_with_size(1, 1);
+        let moving_grid = grid_with_size(1, 1);
+        let lower_grid = grid_with_size(1, 1);
+        let equal_grid = grid_with_size(1, 1);
+        let mut moving_layer = compositor_layer(&moving_grid, 0, 1, 1, false);
+        moving_layer.z_index = 30;
+        let mut lower_layer = compositor_layer(&lower_grid, 0, 1, 2, false);
+        lower_layer.z_index = 20;
+        let mut equal_layer = compositor_layer(&equal_grid, 0, 1, 3, false);
+        equal_layer.z_index = 30;
+        let layers = CompositorLayerStack {
+            layers: vec![
+                compositor_layer(&default_grid, 0, 1, 0, false),
+                moving_layer,
+                lower_layer,
+                equal_layer,
+            ],
+        };
+
+        assert_eq!(
+            layers.plan_layer_adjustment(1, CompositorLayerAdjustment::Raise),
+            Some(CompositorLayerMove {
+                source_index: 1,
+                target_index: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn layer_adjustment_lowers_across_strictly_higher_z_indices() {
+        let default_grid = grid_with_size(1, 1);
+        let equal_grid = grid_with_size(1, 1);
+        let higher_grid = grid_with_size(1, 1);
+        let moving_grid = grid_with_size(1, 1);
+        let mut equal_layer = compositor_layer(&equal_grid, 0, 1, 1, false);
+        equal_layer.z_index = 10;
+        let mut higher_layer = compositor_layer(&higher_grid, 0, 1, 2, false);
+        higher_layer.z_index = 20;
+        let mut moving_layer = compositor_layer(&moving_grid, 0, 1, 3, false);
+        moving_layer.z_index = 10;
+        let layers = CompositorLayerStack {
+            layers: vec![
+                compositor_layer(&default_grid, 0, 1, 0, false),
+                equal_layer,
+                higher_layer,
+                moving_layer,
+            ],
+        };
+
+        assert_eq!(
+            layers.plan_layer_adjustment(3, CompositorLayerAdjustment::Lower),
+            Some(CompositorLayerMove {
+                source_index: 3,
+                target_index: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn guarded_layer_move_updates_pointer_order_and_grid_indices() {
+        let default_grid = grid_with_row(&[schar_from_ascii('d')], &[1]);
+        let lower_grid = grid_with_row(&[schar_from_ascii('l')], &[2]);
+        let upper_grid = grid_with_row(&[schar_from_ascii('u')], &[3]);
+        // SAFETY: Each conversion transfers its grid allocations to a distinct
+        // C representation.
+        let (mut default_cgrid, mut lower_cgrid, mut upper_cgrid) = unsafe {
+            (
+                default_grid.to_cgrid(),
+                lower_grid.to_cgrid(),
+                upper_grid.to_cgrid(),
+            )
+        };
+        let default_pointer = &mut default_cgrid as *mut CScreenGrid;
+        let lower_pointer = &mut lower_cgrid as *mut CScreenGrid;
+        let upper_pointer = &mut upper_cgrid as *mut CScreenGrid;
+        let mut cgrids = [default_pointer, lower_pointer, upper_pointer];
+
+        {
+            // SAFETY: The pointers identify distinct, exclusively accessible
+            // C grids and the pointer array remains readable for this scope.
+            let mut guards =
+                unsafe { CompositorLayerGuards::try_take(cgrids.as_ptr(), cgrids.len()) }.unwrap();
+            guards
+                .apply_layer_move(CompositorLayerMove {
+                    source_index: 2,
+                    target_index: 1,
+                })
+                .unwrap();
+            assert!(guards.write_cgrid_order(&mut cgrids));
+        }
+
+        assert_eq!(cgrids, [default_pointer, upper_pointer, lower_pointer]);
+
+        // SAFETY: Dropping the collection returned ownership to every C grid.
+        let (default_grid, lower_grid, upper_grid) = unsafe {
+            (
+                ScreenGrid::take_from_cgrid(&mut default_cgrid),
+                ScreenGrid::take_from_cgrid(&mut lower_cgrid),
+                ScreenGrid::take_from_cgrid(&mut upper_cgrid),
+            )
+        };
+        assert_eq!(default_grid.compositor_index(), 0);
+        assert_eq!(lower_grid.compositor_index(), 2);
+        assert_eq!(upper_grid.compositor_index(), 1);
     }
 
     #[test]

@@ -102,27 +102,10 @@ bool ui_comp_should_draw(void)
 /// @param[in]  raise      Raise the layer if true, else lower it.
 void ui_comp_layers_adjust(size_t layer_idx, bool raise)
 {
-  size_t size = layers.size;
-  ScreenGrid *layer = layers.items[layer_idx];
-
-  if (raise) {
-    while (layer_idx < size - 1 && layer->zindex > layers.items[layer_idx + 1]->zindex) {
-      layers.items[layer_idx] = layers.items[layer_idx + 1];
-      layers.items[layer_idx]->comp_index = layer_idx;
-      layers.items[layer_idx]->pending_comp_index_update = true;
-      layer_idx++;
-    }
-  } else {
-    while (layer_idx > 0 && layer->zindex < layers.items[layer_idx - 1]->zindex) {
-      layers.items[layer_idx] = layers.items[layer_idx - 1];
-      layers.items[layer_idx]->comp_index = layer_idx;
-      layers.items[layer_idx]->pending_comp_index_update = true;
-      layer_idx--;
-    }
-  }
-  layers.items[layer_idx] = layer;
-  layer->comp_index = layer_idx;
-  layer->pending_comp_index_update = true;
+  bool adjusted = ui_comp_adjust_layer_order(
+    layers.items, layers.size, layer_idx, raise);
+  assert(adjusted);
+  (void)adjusted;
 }
 
 /// Places `grid` at (col,row) position with (width * height) size.

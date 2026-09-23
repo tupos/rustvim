@@ -328,9 +328,20 @@ impl ScreenGrid {
         (self.comp_row, self.comp_col)
     }
 
+    /// Returns this grid's z-index in the compositor stack.
+    pub(crate) fn z_index(&self) -> i32 {
+        self.zindex
+    }
+
     /// Returns the size currently requested by the compositor.
     pub(crate) fn compositor_size(&self) -> (i32, i32) {
         (self.comp_width, self.comp_height)
+    }
+
+    /// Assigns a compositor-stack index and records that it must be published.
+    pub(crate) fn set_compositor_index(&mut self, index: usize) {
+        self.comp_index = index;
+        self.pending_comp_index_update = true;
     }
 
     /// Returns this grid's index in the compositor layer stack.
