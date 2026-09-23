@@ -69,6 +69,32 @@ pub struct CCompositorCoveredAboveRequest {
     message_was_scrolled: bool,
 }
 
+/// C representation of one grid-scroll planning request.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct CCompositorScrollRequest {
+    top: Integer,
+    bottom: Integer,
+    left: Integer,
+    right: Integer,
+    row_delta: Integer,
+}
+
+/// C representation of a validated compositor scroll plan.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct CCompositorScrollPlan {
+    top: Integer,
+    bottom: Integer,
+    left: Integer,
+    right: Integer,
+    first_recompose_row: Integer,
+    recompose_end_row: Integer,
+    first_grid_row: libc::c_int,
+    grid_start_column: libc::c_int,
+    recompose: bool,
+}
+
 /// An inclusive rectangle in composed-screen coordinates.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct CompositorRect {
@@ -95,6 +121,121 @@ impl CompositorRect {
             && self.left <= other.right
             && self.bottom >= other.top
             && self.top <= other.bottom
+    }
+}
+
+/// A half-open rectangular region in compositor coordinates.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CompositorRegion {
+    rows: Range<Integer>,
+    columns: Range<Integer>,
+}
+
+impl CompositorRegion {
+    /// Constructs a region with ordered row and column boundaries.
+    fn try_new(rows: Range<Integer>, columns: Range<Integer>) -> Option<Self> {
+        (rows.start <= rows.end && columns.start <= columns.end).then_some(Self { rows, columns })
+    }
+
+    /// Translates a grid-local region into composed-screen coordinates.
+    fn translated(self, row_offset: i32, column_offset: i32) -> Option<Self> {
+        let row_offset = Integer::from(row_offset);
+        let column_offset = Integer::from(column_offset);
+        Self::try_new(
+            self.rows.start.checked_add(row_offset)?..self.rows.end.checked_add(row_offset)?,
+            self.columns.start.checked_add(column_offset)?
+                ..self.columns.end.checked_add(column_offset)?,
+        )
+    }
+
+    /// Converts the boundaries used by the existing C coverage check.
+    ///
+    /// The compositor historically treats the scroll region's bottom and
+    /// right boundaries as inclusive for this conservative overlap check.
+    fn coverage_rect(&self) -> Option<CompositorRect> {
+        CompositorRect::try_new(
+            i32::try_from(self.rows.start).ok()?,
+            i32::try_from(self.rows.end).ok()?,
+            i32::try_from(self.columns.start).ok()?,
+            i32::try_from(self.columns.end).ok()?,
+        )
+    }
+}
+
+/// Validated grid-local inputs for planning one compositor scroll.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CompositorScrollRequest {
+    region: CompositorRegion,
+    row_delta: Integer,
+}
+
+impl TryFrom<CCompositorScrollRequest> for CompositorScrollRequest {
+    type Error = ();
+
+    fn try_from(request: CCompositorScrollRequest) -> Result<Self, Self::Error> {
+        Ok(Self {
+            region: CompositorRegion::try_new(
+                request.top..request.bottom,
+                request.left..request.right,
+            )
+            .ok_or(())?,
+            row_delta: request.row_delta,
+        })
+    }
+}
+
+/// Action selected for one validated compositor scroll.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum CompositorScrollPlan {
+    /// Forward the translated scroll directly to the composed UI.
+    Forward { region: CompositorRegion },
+
+    /// Recompose valid rows because another layer covers the region.
+    Recompose {
+        region: CompositorRegion,
+        screen_rows: Range<Integer>,
+        first_grid_row: i32,
+        grid_start_column: i32,
+    },
+}
+
+impl From<CompositorScrollPlan> for CCompositorScrollPlan {
+    fn from(plan: CompositorScrollPlan) -> Self {
+        let (
+            region,
+            first_recompose_row,
+            recompose_end_row,
+            first_grid_row,
+            grid_start_column,
+            recompose,
+        ) = match plan {
+            CompositorScrollPlan::Forward { region } => (region, 0, 0, 0, 0, false),
+            CompositorScrollPlan::Recompose {
+                region,
+                screen_rows,
+                first_grid_row,
+                grid_start_column,
+            } => (
+                region,
+                screen_rows.start,
+                screen_rows.end,
+                first_grid_row,
+                grid_start_column,
+                true,
+            ),
+        };
+
+        Self {
+            top: region.rows.start,
+            bottom: region.rows.end,
+            left: region.columns.start,
+            right: region.columns.end,
+            first_recompose_row,
+            recompose_end_row,
+            first_grid_row,
+            grid_start_column,
+            recompose,
+        }
     }
 }
 
@@ -419,6 +560,54 @@ impl<'grid> CompositorLayerStack<'grid> {
                 .coverage_rect(include_row_above)
                 .is_some_and(|rectangle| rectangle.intersects(query.rectangle))
         }))
+    }
+
+    /// Plans a translated scroll for one layer in this stack.
+    fn plan_scroll(
+        &self,
+        current_layer_index: usize,
+        message_layer_index: Option<usize>,
+        message_was_scrolled: bool,
+        request: CompositorScrollRequest,
+    ) -> Option<CompositorScrollPlan> {
+        let current_layer = self.layer(current_layer_index)?;
+        let row_delta = request.row_delta;
+        let region = request
+            .region
+            .translated(current_layer.origin_row, current_layer.origin_column)?;
+        let covered = self.is_covered_above(CompositorCoveredAboveQuery {
+            rectangle: region.coverage_rect()?,
+            current_layer_index,
+            message_layer_index,
+            message_was_scrolled,
+        })?;
+
+        if !covered && !current_layer.blending {
+            return Some(CompositorScrollPlan::Forward { region });
+        }
+
+        let skipped_top = row_delta.checked_neg()?.max(0);
+        let skipped_bottom = row_delta.max(0);
+        let first_recompose_row = region.rows.start.checked_add(skipped_top)?;
+        let recompose_end_row = region.rows.end.checked_sub(skipped_bottom)?;
+        let first_grid_row = i32::try_from(
+            first_recompose_row.checked_sub(Integer::from(current_layer.origin_row))?,
+        )
+        .ok()?;
+        let grid_start_column = i32::try_from(
+            region
+                .columns
+                .start
+                .checked_sub(Integer::from(current_layer.origin_column))?,
+        )
+        .ok()?;
+
+        Some(CompositorScrollPlan::Recompose {
+            region,
+            screen_rows: first_recompose_row..recompose_end_row,
+            first_grid_row,
+            grid_start_column,
+        })
     }
 
     /// Selects the topmost layer and its uninterrupted output range.
@@ -1024,6 +1213,81 @@ pub unsafe extern "C" fn ui_comp_is_covered_above(
     .unwrap_or(false)
 }
 
+/// Plans coordinate translation and recomposition for one grid scroll.
+///
+/// The returned plan contains only owned scalar data. All grid guards restore
+/// their allocations before C executes the selected compositor callbacks.
+///
+/// # Safety
+///
+/// `layer_grids` must point to `layer_count` readable, distinct, non-null grid
+/// pointers. Every grid must be exclusively accessible and its buffers must
+/// satisfy the ownership and layout requirements of `ScreenGrid`.
+///
+/// `current_grid` must identify one grid in `layer_grids`. `message_grid` is
+/// used only for pointer identity and may be null. `output` must point to
+/// writable, properly aligned storage for one `CCompositorScrollPlan`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ui_comp_plan_scroll(
+    layer_grids: *const *mut CScreenGrid,
+    layer_count: usize,
+    current_grid: *mut CScreenGrid,
+    message_grid: *mut CScreenGrid,
+    message_was_scrolled: bool,
+    request: CCompositorScrollRequest,
+    output: *mut CCompositorScrollPlan,
+) -> bool {
+    if layer_grids.is_null() || layer_count == 0 || current_grid.is_null() || output.is_null() {
+        return false;
+    }
+
+    let Ok(request) = CompositorScrollRequest::try_from(request) else {
+        return false;
+    };
+
+    // SAFETY: The caller guarantees that the pointer array is readable for
+    // `layer_count` elements for the duration of this synchronous call.
+    let layer_grids = unsafe { slice::from_raw_parts(layer_grids, layer_count) };
+    if layer_grids
+        .iter()
+        .enumerate()
+        .any(|(index, grid)| grid.is_null() || layer_grids[..index].contains(grid))
+    {
+        return false;
+    }
+
+    let Some(current_layer_index) = layer_grids.iter().position(|grid| *grid == current_grid)
+    else {
+        return false;
+    };
+    let message_layer_index = layer_grids.iter().position(|grid| *grid == message_grid);
+    let plan = (|| {
+        let grid_guards = layer_grids
+            .iter()
+            .map(|grid| {
+                // SAFETY: Null and duplicate pointers were rejected, and the
+                // caller transfers ownership for this operation.
+                unsafe { ScreenGridGuard::take(*grid) }
+            })
+            .collect::<Vec<_>>();
+        let grids = grid_guards.iter().map(|grid| &**grid).collect::<Vec<_>>();
+        let layers = CompositorLayerStack::try_from_grids(&grids)?;
+        layers.plan_scroll(
+            current_layer_index,
+            message_layer_index,
+            message_was_scrolled,
+            request,
+        )
+    })();
+
+    let Some(plan) = plan else {
+        return false;
+    };
+    // SAFETY: The caller guarantees writable, aligned storage for one plan.
+    unsafe { output.write(plan.into()) };
+    true
+}
+
 /// Reports whether a screen character participates in negative-space blending.
 fn is_negative_space(character: VimSCharT) -> bool {
     character == schar_from_ascii(' ') || character == schar_from_char(0x2800)
@@ -1246,6 +1510,105 @@ mod tests {
                 ..query
             }),
             Some(true)
+        );
+    }
+
+    #[test]
+    fn plans_uncovered_scroll_in_composed_screen_coordinates() {
+        let grid = grid_with_row(&[schar_from_ascii('a')], &[1]);
+        let mut layer = compositor_layer(&grid, 4, 1, 0, false);
+        layer.origin_row = 3;
+        let layers = CompositorLayerStack {
+            layers: vec![layer],
+        };
+
+        let plan = layers
+            .plan_scroll(
+                0,
+                None,
+                false,
+                CompositorScrollRequest {
+                    region: CompositorRegion::try_new(2..7, 1..5).unwrap(),
+                    row_delta: 2,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(
+            plan,
+            CompositorScrollPlan::Forward {
+                region: CompositorRegion::try_new(5..10, 5..9).unwrap(),
+            }
+        );
+    }
+
+    #[test]
+    fn plans_covered_scroll_recomposition_rows() {
+        let default_grid = grid_with_row(&[schar_from_ascii('a')], &[1]);
+        let overlay_grid = grid_with_row(&[schar_from_ascii('b')], &[2]);
+        let mut default_layer = compositor_layer(&default_grid, 4, 1, 0, false);
+        default_layer.origin_row = 3;
+        let mut overlay = compositor_layer(&overlay_grid, 6, 1, 1, false);
+        overlay.origin_row = 6;
+        overlay.requested_width = 1;
+        overlay.requested_height = 1;
+        let layers = CompositorLayerStack {
+            layers: vec![default_layer, overlay],
+        };
+
+        let plan = layers
+            .plan_scroll(
+                0,
+                None,
+                false,
+                CompositorScrollRequest {
+                    region: CompositorRegion::try_new(2..7, 1..5).unwrap(),
+                    row_delta: 2,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(
+            plan,
+            CompositorScrollPlan::Recompose {
+                region: CompositorRegion::try_new(5..10, 5..9).unwrap(),
+                screen_rows: 5..8,
+                first_grid_row: 2,
+                grid_start_column: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn plans_upward_scroll_recomposition_rows() {
+        let default_grid = grid_with_row(&[schar_from_ascii('a')], &[1]);
+        let mut layer = compositor_layer(&default_grid, 4, 1, 0, false);
+        layer.origin_row = 3;
+        layer.blending = true;
+        let layers = CompositorLayerStack {
+            layers: vec![layer],
+        };
+
+        let plan = layers
+            .plan_scroll(
+                0,
+                None,
+                false,
+                CompositorScrollRequest {
+                    region: CompositorRegion::try_new(2..7, 1..5).unwrap(),
+                    row_delta: -2,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(
+            plan,
+            CompositorScrollPlan::Recompose {
+                region: CompositorRegion::try_new(5..10, 5..9).unwrap(),
+                screen_rows: 7..10,
+                first_grid_row: 4,
+                grid_start_column: 1,
+            }
         );
     }
 

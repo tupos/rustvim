@@ -29,6 +29,26 @@ typedef struct {
   bool message_was_scrolled;
 } CompositorCoveredAboveRequest;
 
+typedef struct {
+  Integer top;
+  Integer bottom;
+  Integer left;
+  Integer right;
+  Integer row_delta;
+} CompositorScrollRequest;
+
+typedef struct {
+  Integer top;
+  Integer bottom;
+  Integer left;
+  Integer right;
+  Integer first_recompose_row;
+  Integer recompose_end_row;
+  int first_grid_row;
+  int grid_start_column;
+  bool recompose;
+} CompositorScrollPlan;
+
 extern bool ui_comp_resize_buffer(Integer width);
 extern bool ui_comp_release_buffer(void);
 
@@ -45,5 +65,11 @@ extern bool ui_comp_should_compose_scroll_row(
 extern bool ui_comp_is_covered_above(
   ScreenGrid *const *layer_grids, size_t layer_count,
   ScreenGrid *message_grid, CompositorCoveredAboveRequest request);
+
+extern bool ui_comp_plan_scroll(
+  ScreenGrid *const *layer_grids, size_t layer_count,
+  ScreenGrid *current_grid, ScreenGrid *message_grid,
+  bool message_was_scrolled, CompositorScrollRequest request,
+  CompositorScrollPlan *output);
 
 #include "ui_compositor.h.generated.h"

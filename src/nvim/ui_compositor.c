@@ -555,29 +555,42 @@ void ui_comp_grid_scroll(Integer grid, Integer top, Integer bot, Integer left, I
   if (!ui_comp_should_draw() || !ui_comp_set_grid((int)grid)) {
     return;
   }
-  top += curgrid->comp_row;
-  bot += curgrid->comp_row;
-  left += curgrid->comp_col;
-  right += curgrid->comp_col;
-  bool covered = curgrid_covered_above((int)top, (int)bot, (int)left, (int)right);
 
-  if (covered || curgrid->blending) {
+  CompositorScrollRequest request = {
+    .top = top,
+    .bottom = bot,
+    .left = left,
+    .right = right,
+    .row_delta = rows,
+  };
+  CompositorScrollPlan plan;
+  bool planned = ui_comp_plan_scroll(
+    layers.items, layers.size, curgrid, &msg_grid, msg_was_scrolled, request, &plan);
+  assert(planned);
+  if (!planned) {
+    return;
+  }
+
+  if (plan.recompose) {
     // TODO(bfredl):
     // 1. check if rectangles actually overlap
     // 2. calculate subareas that can scroll.
-    compose_debug(top, bot, left, right, dbghl_recompose, true);
-    for (int r = (int)(top + MAX(-rows, 0)); r < bot - MAX(rows, 0); r++) {
+    compose_debug(plan.top, plan.bottom, plan.left, plan.right, dbghl_recompose, true);
+    int grid_row = plan.first_grid_row;
+    for (Integer row = plan.first_recompose_row; row < plan.recompose_end_row;
+         row++, grid_row++) {
       // TODO(bfredl): workaround for win_update() performing two scrolls in a
       // row, where the latter might scroll invalid space created by the first.
       // ideally win_update() should keep track of this itself and not scroll
       // the invalid space.
       if (ui_comp_should_compose_scroll_row(
-            curgrid, r - curgrid->comp_row, (int)left - curgrid->comp_col)) {
-        compose_line(r, left, right, 0);
+            curgrid, grid_row, plan.grid_start_column)) {
+        compose_line(row, plan.left, plan.right, 0);
       }
     }
   } else {
-    ui_composed_call_grid_scroll(1, top, bot, left, right, rows, cols);
+    ui_composed_call_grid_scroll(
+      1, plan.top, plan.bottom, plan.left, plan.right, rows, cols);
     if (rdb_flags & kOptRdbFlagCompositor) {
       debug_delay(2);
     }
