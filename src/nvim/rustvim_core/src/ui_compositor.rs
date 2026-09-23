@@ -50,6 +50,16 @@ pub struct CCompositorGridPlacementRequest {
     should_draw: bool,
 }
 
+/// C representation of one half-open compositor recomposition area.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct CCompositorRecomposeArea {
+    start_row: Integer,
+    end_row: Integer,
+    start_column: Integer,
+    end_column: Integer,
+}
+
 /// C representation of one compositor cursor request.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -228,6 +238,32 @@ impl CompositorRect {
 struct CompositorRecomposeArea {
     rows: Range<i32>,
     columns: Range<i32>,
+}
+
+impl CompositorRecomposeArea {
+    /// Returns the composed-screen area occupied by an allocated grid.
+    fn try_from_grid(grid: &ScreenGrid) -> Option<Self> {
+        if grid.rows < 0 || grid.cols < 0 {
+            return None;
+        }
+
+        let (row, column) = grid.compositor_position();
+        Some(Self {
+            rows: row..row.checked_add(grid.rows)?,
+            columns: column..column.checked_add(grid.cols)?,
+        })
+    }
+}
+
+impl From<CompositorRecomposeArea> for CCompositorRecomposeArea {
+    fn from(area: CompositorRecomposeArea) -> Self {
+        Self {
+            start_row: Integer::from(area.rows.start),
+            end_row: Integer::from(area.rows.end),
+            start_column: Integer::from(area.columns.start),
+            end_column: Integer::from(area.columns.end),
+        }
+    }
 }
 
 /// Dimensions of a compositor layer.
@@ -2110,6 +2146,42 @@ pub unsafe extern "C" fn ui_comp_plan_message_position(
     true
 }
 
+/// Returns the composed-screen area occupied by one grid.
+///
+/// The returned area contains only owned scalar values. Grid ownership is
+/// restored before this function returns.
+///
+/// # Safety
+///
+/// `grid` must point to a valid, exclusively accessible `CScreenGrid` whose
+/// buffers satisfy the ownership and layout requirements of `ScreenGrid`.
+///
+/// `output` must point to writable, properly aligned storage for one
+/// `CCompositorRecomposeArea` and must not overlap `grid`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ui_comp_grid_recompose_area(
+    grid: *mut CScreenGrid,
+    output: *mut CCompositorRecomposeArea,
+) -> bool {
+    if grid.is_null() || output.is_null() {
+        return false;
+    }
+
+    let area = {
+        // SAFETY: The caller transfers exclusive ownership of the grid buffers
+        // into the guard for the duration of this operation.
+        let grid = unsafe { ScreenGridGuard::take(grid) };
+        CompositorRecomposeArea::try_from_grid(&grid)
+    };
+    let Some(area) = area else {
+        return false;
+    };
+
+    // SAFETY: The caller provides valid, non-overlapping output storage.
+    unsafe { output.write(area.into()) };
+    true
+}
+
 /// Repositions and resizes one existing compositor grid.
 ///
 /// The C grid identity is converted to a Rust layer index at this boundary.
@@ -3036,6 +3108,28 @@ mod tests {
                 }),
             }
         );
+    }
+
+    #[test]
+    fn grid_recomposition_area_uses_position_and_allocated_size() {
+        let mut grid = grid_with_size(3, 4);
+        grid.set_compositor_position(2, 5);
+
+        assert_eq!(
+            CompositorRecomposeArea::try_from_grid(&grid),
+            Some(CompositorRecomposeArea {
+                rows: 2..5,
+                columns: 5..9,
+            })
+        );
+    }
+
+    #[test]
+    fn grid_recomposition_area_rejects_overflowing_edges() {
+        let mut grid = grid_with_size(1, 1);
+        grid.set_compositor_position(i32::MAX, i32::MAX);
+
+        assert_eq!(CompositorRecomposeArea::try_from_grid(&grid), None);
     }
 
     #[test]

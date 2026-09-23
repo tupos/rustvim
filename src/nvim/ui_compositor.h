@@ -18,6 +18,13 @@ typedef struct {
 } CompositorGridPlacementRequest;
 
 typedef struct {
+  Integer start_row;
+  Integer end_row;
+  Integer start_column;
+  Integer end_column;
+} CompositorRecomposeArea;
+
+typedef struct {
   int grid_handle;
   int row;
   int column;
@@ -124,6 +131,9 @@ extern bool ui_comp_place_existing_grid(
   ScreenGrid *const *layer_grids, size_t layer_count,
   ScreenGrid *grid, CompositorGridPlacementRequest request,
   CompositorAreaCallback compose_area, bool *moved);
+
+extern bool ui_comp_grid_recompose_area(
+  ScreenGrid *grid, CompositorRecomposeArea *output);
 
 extern bool ui_comp_place_new_grid(
   ScreenGrid **layer_grids, size_t layer_count,

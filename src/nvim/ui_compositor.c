@@ -313,10 +313,18 @@ static void compose_area(Integer startrow, Integer endrow, Integer startcol, Int
 /// such as 'pumblend' for popupmenu grid.
 void ui_comp_compose_grid(ScreenGrid *grid)
 {
-  if (ui_comp_should_draw()) {
-    compose_area(grid->comp_row, grid->comp_row + grid->rows,
-                 grid->comp_col, grid->comp_col + grid->cols);
+  if (!ui_comp_should_draw()) {
+    return;
   }
+
+  CompositorRecomposeArea area;
+  bool planned = ui_comp_grid_recompose_area(grid, &area);
+  assert(planned);
+  if (!planned) {
+    return;
+  }
+
+  compose_area(area.start_row, area.end_row, area.start_column, area.end_column);
 }
 
 void ui_comp_raw_line(Integer grid, Integer row, Integer startcol, Integer endcol, Integer clearcol,
