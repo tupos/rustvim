@@ -318,6 +318,11 @@ impl ScreenGrid {
         self.blending
     }
 
+    /// Reports whether this grid accepts mouse input.
+    pub(crate) fn accepts_mouse_input(&self) -> bool {
+        self.mouse_enabled
+    }
+
     /// Returns this grid's position in the composed screen.
     pub(crate) fn compositor_position(&self) -> (i32, i32) {
         (self.comp_row, self.comp_col)

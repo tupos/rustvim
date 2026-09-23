@@ -112,6 +112,13 @@ pub struct CCompositorScrollPlan {
     recompose: bool,
 }
 
+/// One cell in composed-screen coordinates.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CompositorPoint {
+    row: i32,
+    column: i32,
+}
+
 /// An inclusive rectangle in composed-screen coordinates.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct CompositorRect {
@@ -497,6 +504,7 @@ struct CompositorLayer<'grid> {
     layer_index: usize,
     blending: bool,
     disabled: bool,
+    accepts_mouse_input: bool,
     is_default: bool,
 }
 
@@ -522,6 +530,7 @@ impl<'grid> CompositorLayer<'grid> {
             layer_index: grid.compositor_index(),
             blending: grid.blends_with_background(),
             disabled: grid.is_compositor_disabled(),
+            accepts_mouse_input: grid.accepts_mouse_input(),
             is_default,
         })
     }
@@ -563,6 +572,24 @@ impl<'grid> CompositorLayer<'grid> {
             && self.right_edge().is_some_and(|right| column < right)
     }
 
+    /// Reports whether the allocated grid contains one composed-screen cell.
+    ///
+    /// Hit testing follows the original compositor behavior and therefore
+    /// uses the allocated grid size, independently of its requested visible
+    /// size and temporary compositor-disabled state.
+    fn contains_allocated_cell(self, point: CompositorPoint) -> bool {
+        point.row >= self.origin_row
+            && self
+                .origin_row
+                .checked_add(self.grid.rows)
+                .is_some_and(|bottom| point.row < bottom)
+            && point.column >= self.origin_column
+            && self
+                .origin_column
+                .checked_add(self.grid.cols)
+                .is_some_and(|right| point.column < right)
+    }
+
     /// Borrows the grid cells corresponding to composed-screen columns.
     fn screen_segment(self, row: i32, columns: Range<usize>) -> Option<GridRowSegment<'grid>> {
         let start_column = i32::try_from(columns.start).ok()?;
@@ -587,6 +614,23 @@ impl<'grid> CompositorLayer<'grid> {
 struct LayerSelection {
     layer_index: usize,
     columns: Range<usize>,
+}
+
+/// Selects which compositor layers participate in coordinate hit testing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LayerHitTest {
+    Any,
+    MouseEnabled,
+}
+
+impl LayerHitTest {
+    /// Reports whether one layer participates in this hit test.
+    fn accepts(self, layer: CompositorLayer<'_>) -> bool {
+        match self {
+            Self::Any => true,
+            Self::MouseEnabled => layer.accepts_mouse_input,
+        }
+    }
 }
 
 /// Ordered borrowed grids used to compose one line.
@@ -631,6 +675,15 @@ impl<'grid> CompositorLayerStack<'grid> {
     /// Returns one layer by its stack index.
     fn layer(&self, index: usize) -> Option<CompositorLayer<'grid>> {
         self.layers.get(index).copied()
+    }
+
+    /// Finds the topmost non-default layer containing one screen cell.
+    fn topmost_layer_at(&self, point: CompositorPoint, hit_test: LayerHitTest) -> Option<usize> {
+        self.layers.get(1..)?.iter().rev().find_map(|layer| {
+            let layer = *layer;
+            (layer.contains_allocated_cell(point) && hit_test.accepts(layer))
+                .then_some(layer.layer_index)
+        })
     }
 
     /// Reports whether any layer above the current layer intersects the query.
@@ -1183,6 +1236,46 @@ pub extern "C" fn ui_comp_release_buffer() -> bool {
     lock_compositor_buffer().release()
 }
 
+/// Finds the topmost non-default compositor layer at one screen coordinate.
+///
+/// Returns `usize::MAX` when no matching layer exists or the layer array is
+/// invalid. Every temporarily owned grid is restored before this function
+/// returns.
+///
+/// # Safety
+///
+/// `layer_grids` must point to `layer_count` readable, distinct, non-null grid
+/// pointers. Every grid must be exclusively accessible and its buffers must
+/// satisfy the ownership and layout requirements of `ScreenGrid`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ui_comp_find_layer_at_coord(
+    layer_grids: *const *mut CScreenGrid,
+    layer_count: usize,
+    row: libc::c_int,
+    column: libc::c_int,
+    require_mouse_input: bool,
+) -> usize {
+    let hit_test = if require_mouse_input {
+        LayerHitTest::MouseEnabled
+    } else {
+        LayerHitTest::Any
+    };
+
+    // SAFETY: The caller satisfies the documented layer-array and grid
+    // ownership requirements.
+    let Some(layer_guards) = (unsafe { CompositorLayerGuards::try_take(layer_grids, layer_count) })
+    else {
+        return usize::MAX;
+    };
+    let Some(layers) = layer_guards.layer_stack() else {
+        return usize::MAX;
+    };
+
+    layers
+        .topmost_layer_at(CompositorPoint { row, column }, hit_test)
+        .unwrap_or(usize::MAX)
+}
+
 /// Composes and submits one complete line from an ordered C grid array.
 ///
 /// # Safety
@@ -1515,6 +1608,7 @@ mod tests {
             layer_index,
             blending: false,
             disabled,
+            accepts_mouse_input: true,
             is_default: layer_index == 0,
         }
     }
@@ -1556,6 +1650,85 @@ mod tests {
         };
         assert_eq!(first.chars.as_slice(), &[schar_from_ascii('a')]);
         assert_eq!(second.chars.as_slice(), &[schar_from_ascii('b')]);
+    }
+
+    #[test]
+    fn hit_testing_selects_the_topmost_overlapping_layer() {
+        let default_grid = grid_with_size(4, 4);
+        let lower_grid = grid_with_size(3, 3);
+        let upper_grid = grid_with_size(3, 3);
+        let mut lower_layer = compositor_layer(&lower_grid, 1, 1, 1, false);
+        lower_layer.origin_row = 1;
+        let mut upper_layer = compositor_layer(&upper_grid, 1, 1, 2, false);
+        upper_layer.origin_row = 1;
+        let layers = CompositorLayerStack {
+            layers: vec![
+                compositor_layer(&default_grid, 0, 4, 0, false),
+                lower_layer,
+                upper_layer,
+            ],
+        };
+
+        assert_eq!(
+            layers.topmost_layer_at(CompositorPoint { row: 2, column: 2 }, LayerHitTest::Any,),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn hit_testing_excludes_the_default_layer() {
+        let default_grid = grid_with_size(3, 3);
+        let layers = CompositorLayerStack {
+            layers: vec![compositor_layer(&default_grid, 0, 3, 0, false)],
+        };
+
+        assert_eq!(
+            layers.topmost_layer_at(CompositorPoint { row: 1, column: 1 }, LayerHitTest::Any,),
+            None
+        );
+    }
+
+    #[test]
+    fn mouse_hit_testing_skips_layers_that_reject_mouse_input() {
+        let default_grid = grid_with_size(3, 3);
+        let lower_grid = grid_with_size(2, 2);
+        let upper_grid = grid_with_size(2, 2);
+        let lower_layer = compositor_layer(&lower_grid, 1, 2, 1, false);
+        let mut upper_layer = compositor_layer(&upper_grid, 1, 2, 2, false);
+        upper_layer.accepts_mouse_input = false;
+        let layers = CompositorLayerStack {
+            layers: vec![
+                compositor_layer(&default_grid, 0, 3, 0, false),
+                lower_layer,
+                upper_layer,
+            ],
+        };
+        let point = CompositorPoint { row: 0, column: 1 };
+
+        assert_eq!(layers.topmost_layer_at(point, LayerHitTest::Any), Some(2));
+        assert_eq!(
+            layers.topmost_layer_at(point, LayerHitTest::MouseEnabled),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn hit_testing_reports_when_no_non_default_layer_contains_the_cell() {
+        let default_grid = grid_with_size(3, 3);
+        let overlay_grid = grid_with_size(1, 1);
+        let mut overlay_layer = compositor_layer(&overlay_grid, 2, 1, 1, false);
+        overlay_layer.origin_row = 2;
+        let layers = CompositorLayerStack {
+            layers: vec![
+                compositor_layer(&default_grid, 0, 3, 0, false),
+                overlay_layer,
+            ],
+        };
+
+        assert_eq!(
+            layers.topmost_layer_at(CompositorPoint { row: 0, column: 0 }, LayerHitTest::Any,),
+            None
+        );
     }
 
     #[test]

@@ -305,14 +305,12 @@ void ui_comp_grid_cursor_goto(Integer grid_handle, Integer r, Integer c)
 
 ScreenGrid *ui_comp_mouse_focus(int row, int col)
 {
-  for (ssize_t i = (ssize_t)kv_size(layers) - 1; i > 0; i--) {
-    ScreenGrid *grid = kv_A(layers, i);
-    if (grid->mouse_enabled
-        && row >= grid->comp_row && row < grid->comp_row + grid->rows
-        && col >= grid->comp_col && col < grid->comp_col + grid->cols) {
-      return grid;
-    }
+  size_t layer_index = ui_comp_find_layer_at_coord(
+    layers.items, layers.size, row, col, true);
+  if (layer_index < kv_size(layers)) {
+    return kv_A(layers, layer_index);
   }
+
   if (ui_has(kUIMultigrid)) {
     FOR_ALL_WINDOWS_IN_TAB(wp, curtab) {
       ScreenGrid *grid = &wp->w_grid_alloc;
@@ -328,12 +326,10 @@ ScreenGrid *ui_comp_mouse_focus(int row, int col)
 /// Compute which grid is on top at supplied screen coordinates
 ScreenGrid *ui_comp_get_grid_at_coord(int row, int col)
 {
-  for (ssize_t i = (ssize_t)kv_size(layers) - 1; i > 0; i--) {
-    ScreenGrid *grid = kv_A(layers, i);
-    if (row >= grid->comp_row && row < grid->comp_row + grid->rows
-        && col >= grid->comp_col && col < grid->comp_col + grid->cols) {
-      return grid;
-    }
+  size_t layer_index = ui_comp_find_layer_at_coord(
+    layers.items, layers.size, row, col, false);
+  if (layer_index < kv_size(layers)) {
+    return kv_A(layers, layer_index);
   }
 
   FOR_ALL_WINDOWS_IN_TAB(wp, curtab) {
