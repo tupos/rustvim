@@ -163,6 +163,80 @@ struct CompositorRecomposeArea {
     columns: Range<i32>,
 }
 
+/// Dimensions of a compositor layer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CompositorSize {
+    height: i32,
+    width: i32,
+}
+
+/// Requested position and size of one compositor grid.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CompositorGridPlacement {
+    origin: CompositorPoint,
+    size: CompositorSize,
+}
+
+impl CompositorGridPlacement {
+    /// Constructs a placement with nonnegative dimensions.
+    fn try_new(row: i32, column: i32, height: i32, width: i32) -> Option<Self> {
+        (height >= 0 && width >= 0).then_some(Self {
+            origin: CompositorPoint { row, column },
+            size: CompositorSize { height, width },
+        })
+    }
+
+    /// Returns the exclusive bottom edge of the requested area.
+    fn bottom_edge(self) -> Option<i32> {
+        self.origin.row.checked_add(self.size.height)
+    }
+
+    /// Returns the exclusive right edge of the requested area.
+    fn right_edge(self) -> Option<i32> {
+        self.origin.column.checked_add(self.size.width)
+    }
+
+    /// Returns the allocated grid area at this placement.
+    fn allocated_area(self, grid: &ScreenGrid) -> Option<CompositorRecomposeArea> {
+        Some(CompositorRecomposeArea {
+            rows: self.origin.row..self.origin.row.checked_add(grid.rows)?,
+            columns: self.origin.column..self.origin.column.checked_add(grid.cols)?,
+        })
+    }
+}
+
+/// Effects of placing one grid in the compositor.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CompositorGridPlacementPlan {
+    placement: CompositorGridPlacement,
+    moved: bool,
+    exposed_areas: Vec<CompositorRecomposeArea>,
+    redraw_area: Option<CompositorRecomposeArea>,
+}
+
+impl CompositorGridPlacementPlan {
+    /// Plans the initial placement of a newly inserted grid.
+    fn try_for_new_grid(
+        grid: &ScreenGrid,
+        placement: CompositorGridPlacement,
+        valid: bool,
+        should_draw: bool,
+    ) -> Option<Self> {
+        let redraw_area = if valid && should_draw {
+            Some(placement.allocated_area(grid)?)
+        } else {
+            None
+        };
+
+        Some(Self {
+            placement,
+            moved: true,
+            exposed_areas: Vec::new(),
+            redraw_area,
+        })
+    }
+}
+
 /// A half-open rectangular region in compositor coordinates.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct CompositorRegion {
@@ -605,6 +679,62 @@ impl<'grid> CompositorLayer<'grid> {
         })
     }
 
+    /// Plans repositioning and resizing this existing compositor layer.
+    fn try_plan_placement(
+        self,
+        placement: CompositorGridPlacement,
+        valid: bool,
+        should_draw: bool,
+    ) -> Option<CompositorGridPlacementPlan> {
+        let moved = placement.origin.row != self.origin_row
+            || placement.origin.column != self.origin_column;
+        let mut exposed_areas = Vec::new();
+
+        if should_draw {
+            let old_bottom = self.origin_row.checked_add(self.requested_height)?;
+            let old_right = self.origin_column.checked_add(self.requested_width)?;
+            let new_bottom = placement.bottom_edge()?;
+            let new_right = placement.right_edge()?;
+
+            exposed_areas.push(CompositorRecomposeArea {
+                rows: self.origin_row..placement.origin.row,
+                columns: self.origin_column..old_right,
+            });
+
+            if self.origin_column < placement.origin.column {
+                exposed_areas.push(CompositorRecomposeArea {
+                    rows: placement.origin.row.max(self.origin_row)..new_bottom.min(old_bottom),
+                    columns: self.origin_column..placement.origin.column,
+                });
+            }
+
+            if new_right < old_right {
+                exposed_areas.push(CompositorRecomposeArea {
+                    rows: placement.origin.row.max(self.origin_row)..new_bottom.min(old_bottom),
+                    columns: new_right..old_right,
+                });
+            }
+
+            exposed_areas.push(CompositorRecomposeArea {
+                rows: new_bottom..old_bottom,
+                columns: self.origin_column..old_right,
+            });
+        }
+
+        let redraw_area = if moved && valid && should_draw {
+            Some(placement.allocated_area(self.grid)?)
+        } else {
+            None
+        };
+
+        Some(CompositorGridPlacementPlan {
+            placement,
+            moved,
+            exposed_areas,
+            redraw_area,
+        })
+    }
+
     /// Reports whether this layer participates in selection on `row`.
     fn is_visible_on_row(self, row: i32) -> bool {
         !self.disabled
@@ -770,6 +900,34 @@ impl<'grid> CompositorLayerStack<'grid> {
     /// Returns one layer by its stack index.
     fn layer(&self, index: usize) -> Option<CompositorLayer<'grid>> {
         self.layers.get(index).copied()
+    }
+
+    /// Selects the stable insertion index for one new layer.
+    fn plan_layer_insertion(
+        &self,
+        z_index: i32,
+        current_window_layer: Option<usize>,
+        on_top: bool,
+    ) -> Option<usize> {
+        let mut insertion_index = self.layers.len();
+        while insertion_index > 0 && self.layers.get(insertion_index - 1)?.z_index > z_index {
+            insertion_index -= 1;
+        }
+
+        // The default grid must remain the first layer.
+        if insertion_index == 0 {
+            return None;
+        }
+
+        if !on_top {
+            let preceding_index = insertion_index - 1;
+            let preceding_layer = self.layer(preceding_index)?;
+            if current_window_layer == Some(preceding_index) && preceding_layer.z_index == z_index {
+                insertion_index = preceding_index;
+            }
+        }
+
+        Some(insertion_index)
     }
 
     /// Finds the topmost non-default layer containing one screen cell.
@@ -2060,6 +2218,115 @@ mod tests {
                 target_index: 2,
             })
         );
+    }
+
+    #[test]
+    fn existing_grid_placement_plans_exposed_and_redrawn_areas() {
+        let grid = grid_with_size(3, 4);
+        let mut layer = compositor_layer(&grid, 3, 4, 1, false);
+        layer.origin_row = 2;
+        layer.requested_height = 3;
+        let placement = CompositorGridPlacement::try_new(3, 5, 2, 2).unwrap();
+
+        assert_eq!(
+            layer.try_plan_placement(placement, true, true),
+            Some(CompositorGridPlacementPlan {
+                placement,
+                moved: true,
+                exposed_areas: vec![
+                    CompositorRecomposeArea {
+                        rows: 2..3,
+                        columns: 3..7,
+                    },
+                    CompositorRecomposeArea {
+                        rows: 3..5,
+                        columns: 3..5,
+                    },
+                    CompositorRecomposeArea {
+                        rows: 5..5,
+                        columns: 3..7,
+                    },
+                ],
+                redraw_area: Some(CompositorRecomposeArea {
+                    rows: 3..6,
+                    columns: 5..9,
+                }),
+            })
+        );
+    }
+
+    #[test]
+    fn stationary_grid_resize_only_plans_exposed_areas() {
+        let grid = grid_with_size(3, 4);
+        let mut layer = compositor_layer(&grid, 3, 4, 1, false);
+        layer.origin_row = 2;
+        layer.requested_height = 3;
+        let placement = CompositorGridPlacement::try_new(2, 3, 2, 2).unwrap();
+
+        assert_eq!(
+            layer.try_plan_placement(placement, true, true),
+            Some(CompositorGridPlacementPlan {
+                placement,
+                moved: false,
+                exposed_areas: vec![
+                    CompositorRecomposeArea {
+                        rows: 2..2,
+                        columns: 3..7,
+                    },
+                    CompositorRecomposeArea {
+                        rows: 2..4,
+                        columns: 5..7,
+                    },
+                    CompositorRecomposeArea {
+                        rows: 4..5,
+                        columns: 3..7,
+                    },
+                ],
+                redraw_area: None,
+            })
+        );
+    }
+
+    #[test]
+    fn new_grid_placement_plans_redrawing_allocated_size() {
+        let grid = grid_with_size(3, 4);
+        let placement = CompositorGridPlacement::try_new(2, 5, 2, 2).unwrap();
+
+        assert_eq!(
+            CompositorGridPlacementPlan::try_for_new_grid(&grid, placement, true, true),
+            Some(CompositorGridPlacementPlan {
+                placement,
+                moved: true,
+                exposed_areas: Vec::new(),
+                redraw_area: Some(CompositorRecomposeArea {
+                    rows: 2..5,
+                    columns: 5..9,
+                }),
+            })
+        );
+    }
+
+    #[test]
+    fn layer_insertion_preserves_zindex_and_current_window_ordering() {
+        let default_grid = grid_with_size(1, 1);
+        let current_grid = grid_with_size(1, 1);
+        let upper_grid = grid_with_size(1, 1);
+        let mut current_layer = compositor_layer(&current_grid, 0, 1, 1, false);
+        current_layer.z_index = 10;
+        let mut upper_layer = compositor_layer(&upper_grid, 0, 1, 2, false);
+        upper_layer.z_index = 20;
+        let layers = CompositorLayerStack {
+            layers: vec![
+                compositor_layer(&default_grid, 0, 1, 0, false),
+                current_layer,
+                upper_layer,
+            ],
+        };
+
+        assert_eq!(layers.plan_layer_insertion(10, Some(1), true), Some(2));
+        assert_eq!(layers.plan_layer_insertion(10, Some(1), false), Some(1));
+        assert_eq!(layers.plan_layer_insertion(30, Some(1), true), Some(3));
+        assert_eq!(layers.plan_layer_insertion(-1, None, true), None);
     }
 
     #[test]
