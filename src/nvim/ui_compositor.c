@@ -538,21 +538,15 @@ void ui_comp_msg_set_pos(Integer grid, Integer row, Boolean scrolled, String sep
 /// check if curgrid is covered by any other grid within the rectangle
 static bool curgrid_covered_above(int top, int bot, int left, int right)
 {
-  // check all layers above curgrid. if any intersect with the given rectangle, then consider the
-  // curgrid covered. account for the msg_sep_row if the msg_grid layer was scrolled.
-  for (size_t i = curgrid->comp_index + 1; i < kv_size(layers); i++) {
-    ScreenGrid *g = kv_A(layers, i);
-    int grid_top = g->comp_row - (g == &msg_grid && msg_was_scrolled ? 1 : 0);
-    int grid_bot = g->comp_row + g->comp_height - 1;
-    int grid_left = g->comp_col;
-    int grid_right = g->comp_col + g->comp_width - 1;
-
-    if (right >= grid_left && left <= grid_right && bot >= grid_top && top <= grid_bot) {
-      return true;
-    }
-  }
-
-  return false;
+  CompositorCoveredAboveRequest request = {
+    .top = top,
+    .bottom = bot,
+    .left = left,
+    .right = right,
+    .current_layer_index = curgrid->comp_index,
+    .message_was_scrolled = msg_was_scrolled,
+  };
+  return ui_comp_is_covered_above(layers.items, layers.size, &msg_grid, request);
 }
 
 void ui_comp_grid_scroll(Integer grid, Integer top, Integer bot, Integer left, Integer right,

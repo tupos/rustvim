@@ -57,6 +57,47 @@ pub struct CCompositorLineRequest {
     abort_on_invalid: bool,
 }
 
+/// C representation of one compositor-coverage request.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct CCompositorCoveredAboveRequest {
+    top: libc::c_int,
+    bottom: libc::c_int,
+    left: libc::c_int,
+    right: libc::c_int,
+    current_layer_index: usize,
+    message_was_scrolled: bool,
+}
+
+/// An inclusive rectangle in composed-screen coordinates.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CompositorRect {
+    top: i32,
+    bottom: i32,
+    left: i32,
+    right: i32,
+}
+
+impl CompositorRect {
+    /// Constructs a rectangle whose edges form a nonempty area.
+    fn try_new(top: i32, bottom: i32, left: i32, right: i32) -> Option<Self> {
+        (top <= bottom && left <= right).then_some(Self {
+            top,
+            bottom,
+            left,
+            right,
+        })
+    }
+
+    /// Reports whether this rectangle intersects another at any cell.
+    fn intersects(self, other: Self) -> bool {
+        self.right >= other.left
+            && self.left <= other.right
+            && self.bottom >= other.top
+            && self.top <= other.bottom
+    }
+}
+
 /// Output range prepared for one raw-line UI event.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct CompositorSubmission {
@@ -223,6 +264,8 @@ struct CompositorLayer<'grid> {
     grid: &'grid ScreenGrid,
     origin_row: i32,
     origin_column: i32,
+    requested_width: i32,
+    requested_height: i32,
     visible_width: i32,
     visible_height: i32,
     layer_index: usize,
@@ -246,6 +289,8 @@ impl<'grid> CompositorLayer<'grid> {
             grid,
             origin_row,
             origin_column,
+            requested_width,
+            requested_height,
             visible_width,
             visible_height,
             layer_index: grid.compositor_index(),
@@ -258,6 +303,21 @@ impl<'grid> CompositorLayer<'grid> {
     /// Returns the exclusive right edge of this layer.
     fn right_edge(self) -> Option<i32> {
         self.origin_column.checked_add(self.visible_width)
+    }
+
+    /// Returns the requested compositor area, optionally including the row
+    /// occupied by a scrolled message separator.
+    fn coverage_rect(self, include_row_above: bool) -> Option<CompositorRect> {
+        let top = self.origin_row.checked_sub(i32::from(include_row_above))?;
+        let bottom = self
+            .origin_row
+            .checked_add(self.requested_height)?
+            .checked_sub(1)?;
+        let right = self
+            .origin_column
+            .checked_add(self.requested_width)?
+            .checked_sub(1)?;
+        CompositorRect::try_new(top, bottom, self.origin_column, right)
     }
 
     /// Reports whether this layer participates in selection on `row`.
@@ -308,6 +368,15 @@ struct CompositorLayerStack<'grid> {
     layers: Vec<CompositorLayer<'grid>>,
 }
 
+/// Validated inputs for checking coverage above one compositor layer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CompositorCoveredAboveQuery {
+    rectangle: CompositorRect,
+    current_layer_index: usize,
+    message_layer_index: Option<usize>,
+    message_was_scrolled: bool,
+}
+
 impl<'grid> CompositorLayerStack<'grid> {
     /// Builds a layer stack from grids already owned by Rust guards.
     fn try_from_grids(grids: &[&'grid ScreenGrid]) -> Option<Self> {
@@ -336,6 +405,20 @@ impl<'grid> CompositorLayerStack<'grid> {
     /// Returns one layer by its stack index.
     fn layer(&self, index: usize) -> Option<CompositorLayer<'grid>> {
         self.layers.get(index).copied()
+    }
+
+    /// Reports whether any layer above the current layer intersects the query.
+    fn is_covered_above(&self, query: CompositorCoveredAboveQuery) -> Option<bool> {
+        let first_layer_above = query.current_layer_index.checked_add(1)?;
+        let layers_above = self.layers.get(first_layer_above..)?;
+
+        Some(layers_above.iter().any(|layer| {
+            let include_row_above =
+                query.message_was_scrolled && query.message_layer_index == Some(layer.layer_index);
+            layer
+                .coverage_rect(include_row_above)
+                .is_some_and(|rectangle| rectangle.intersects(query.rectangle))
+        }))
     }
 
     /// Selects the topmost layer and its uninterrupted output range.
@@ -880,6 +963,67 @@ pub unsafe extern "C" fn ui_comp_should_compose_scroll_row(
     GridRow::try_from_grid(&rust_grid, row).is_some_and(|row| row.is_valid_at(start_col))
 }
 
+/// Reports whether any compositor layer above the selected layer intersects a
+/// requested composed-screen rectangle.
+///
+/// # Safety
+///
+/// `layer_grids` must point to `layer_count` readable, distinct, non-null grid
+/// pointers. Every grid must be exclusively accessible and its buffers must
+/// satisfy the ownership and layout requirements of `ScreenGrid`.
+///
+/// `message_grid` is used only for pointer identity and may be null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ui_comp_is_covered_above(
+    layer_grids: *const *mut CScreenGrid,
+    layer_count: usize,
+    message_grid: *mut CScreenGrid,
+    request: CCompositorCoveredAboveRequest,
+) -> bool {
+    if layer_grids.is_null() || layer_count == 0 {
+        return false;
+    }
+
+    let Some(rectangle) =
+        CompositorRect::try_new(request.top, request.bottom, request.left, request.right)
+    else {
+        return false;
+    };
+
+    // SAFETY: The caller guarantees that the pointer array is readable for
+    // `layer_count` elements for the duration of this synchronous call.
+    let layer_grids = unsafe { slice::from_raw_parts(layer_grids, layer_count) };
+    if layer_grids
+        .iter()
+        .enumerate()
+        .any(|(index, grid)| grid.is_null() || layer_grids[..index].contains(grid))
+    {
+        return false;
+    }
+
+    let message_layer_index = layer_grids.iter().position(|grid| *grid == message_grid);
+    (|| {
+        let grid_guards = layer_grids
+            .iter()
+            .map(|grid| {
+                // SAFETY: Null and duplicate pointers were rejected, and the
+                // caller transfers ownership for this operation.
+                unsafe { ScreenGridGuard::take(*grid) }
+            })
+            .collect::<Vec<_>>();
+        let grids = grid_guards.iter().map(|grid| &**grid).collect::<Vec<_>>();
+        let layers = CompositorLayerStack::try_from_grids(&grids)?;
+
+        layers.is_covered_above(CompositorCoveredAboveQuery {
+            rectangle,
+            current_layer_index: request.current_layer_index,
+            message_layer_index,
+            message_was_scrolled: request.message_was_scrolled,
+        })
+    })()
+    .unwrap_or(false)
+}
+
 /// Reports whether a screen character participates in negative-space blending.
 fn is_negative_space(character: VimSCharT) -> bool {
     character == schar_from_ascii(' ') || character == schar_from_char(0x2800)
@@ -915,6 +1059,8 @@ mod tests {
             grid,
             origin_row: 0,
             origin_column,
+            requested_width: visible_width,
+            requested_height: grid.rows,
             visible_width,
             visible_height: grid.rows,
             layer_index,
@@ -1030,6 +1176,77 @@ mod tests {
             &[schar_from_ascii('x'), schar_from_ascii('y')]
         );
         assert_eq!(restored_grid.attrs.as_slice(), &[1, -1]);
+    }
+
+    #[test]
+    fn compositor_rect_intersections_include_shared_edges() {
+        let rectangle = CompositorRect::try_new(2, 4, 3, 6).unwrap();
+
+        assert!(rectangle.intersects(CompositorRect::try_new(4, 5, 6, 7).unwrap()));
+        assert!(!rectangle.intersects(CompositorRect::try_new(5, 6, 3, 6).unwrap()));
+        assert!(!rectangle.intersects(CompositorRect::try_new(2, 4, 7, 8).unwrap()));
+    }
+
+    #[test]
+    fn coverage_uses_requested_size_and_only_layers_above() {
+        let default_grid = grid_with_row(&[schar_from_ascii('a')], &[1]);
+        let overlay_grid = grid_with_row(&[schar_from_ascii('b')], &[2]);
+        let mut overlay = compositor_layer(&overlay_grid, 4, 1, 1, false);
+        overlay.origin_row = 2;
+        overlay.requested_width = 3;
+        overlay.requested_height = 2;
+        let layers = CompositorLayerStack {
+            layers: vec![compositor_layer(&default_grid, 0, 1, 0, false), overlay],
+        };
+        let rectangle = CompositorRect::try_new(3, 3, 6, 6).unwrap();
+
+        assert_eq!(
+            layers.is_covered_above(CompositorCoveredAboveQuery {
+                rectangle,
+                current_layer_index: 0,
+                message_layer_index: None,
+                message_was_scrolled: false,
+            }),
+            Some(true)
+        );
+        assert_eq!(
+            layers.is_covered_above(CompositorCoveredAboveQuery {
+                rectangle,
+                current_layer_index: 1,
+                message_layer_index: None,
+                message_was_scrolled: false,
+            }),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn scrolled_message_layer_covers_separator_row() {
+        let default_grid = grid_with_row(&[schar_from_ascii('a')], &[1]);
+        let message_grid = grid_with_row(&[schar_from_ascii('m')], &[2]);
+        let mut message = compositor_layer(&message_grid, 1, 1, 1, false);
+        message.origin_row = 2;
+        message.requested_width = 2;
+        message.requested_height = 1;
+        let layers = CompositorLayerStack {
+            layers: vec![compositor_layer(&default_grid, 0, 1, 0, false), message],
+        };
+        let rectangle = CompositorRect::try_new(1, 1, 1, 1).unwrap();
+        let query = CompositorCoveredAboveQuery {
+            rectangle,
+            current_layer_index: 0,
+            message_layer_index: Some(1),
+            message_was_scrolled: false,
+        };
+
+        assert_eq!(layers.is_covered_above(query), Some(false));
+        assert_eq!(
+            layers.is_covered_above(CompositorCoveredAboveQuery {
+                message_was_scrolled: true,
+                ..query
+            }),
+            Some(true)
+        );
     }
 
     #[test]
