@@ -36,8 +36,6 @@ kvec_t(ScreenGrid *) layers = KV_INITIAL_VALUE;
 static int chk_width = 0, chk_height = 0;
 #endif
 
-static ScreenGrid *curgrid;
-
 static bool valid_screen = true;
 static int msg_current_row = INT_MAX;
 static bool msg_was_scrolled = false;
@@ -50,7 +48,6 @@ static int dbghl_normal, dbghl_clear, dbghl_composed, dbghl_recompose;
 void ui_comp_init(void)
 {
   kv_push(layers, &default_grid);
-  curgrid = &default_grid;
 }
 
 #ifdef EXITFREE
@@ -160,34 +157,11 @@ void ui_comp_remove_grid(ScreenGrid *grid)
     return;
   }
 
-  if (curgrid == grid) {
-    curgrid = &default_grid;
-  }
-
   (void)kv_pop(layers);
 
   // recompose the area under the grid
   // inefficient when being overlapped: only draw up to grid->comp_index
   ui_comp_compose_grid(grid);
-}
-
-bool ui_comp_set_grid(handle_T handle)
-{
-  if (curgrid->handle == handle) {
-    return true;
-  }
-  ScreenGrid *grid = NULL;
-  for (size_t i = 0; i < kv_size(layers); i++) {
-    if (kv_A(layers, i)->handle == handle) {
-      grid = kv_A(layers, i);
-      break;
-    }
-  }
-  if (grid != NULL) {
-    curgrid = grid;
-    return true;
-  }
-  return false;
 }
 
 void ui_comp_raise_grid(ScreenGrid *grid, size_t new_index)
@@ -212,12 +186,12 @@ void ui_comp_grid_cursor_goto(Integer grid_handle, Integer r, Integer c)
     return;
   }
 
-  curgrid = kv_A(layers, plan.layer_index);
+  ScreenGrid *cursor_grid = kv_A(layers, plan.layer_index);
 
   // TODO(bfredl): maybe not the best time to do this, for efficiency we
   // should configure all grids before entering win_update()
   if (plan.should_raise) {
-    ui_comp_raise_grid(curgrid, plan.raise_to);
+    ui_comp_raise_grid(cursor_grid, plan.raise_to);
   }
 
   if (!plan.emit) {
@@ -357,13 +331,14 @@ void ui_comp_raw_line(Integer grid, Integer row, Integer startcol, Integer endco
                       Integer clearattr, LineFlags flags, const schar_T *chunk,
                       const sattr_T *attrs)
 {
-  if (!ui_comp_should_draw() || !ui_comp_set_grid((int)grid)) {
+  if (!ui_comp_should_draw()) {
     return;
   }
 
   assert(endcol <= clearcol);
 
   CompositorRawLineRequest request = {
+    .grid_handle = (int)grid,
     .row = row,
     .start_col = startcol,
     .end_col = endcol,
@@ -373,7 +348,7 @@ void ui_comp_raw_line(Integer grid, Integer row, Integer startcol, Integer endco
   };
   CompositorRawLinePlan plan;
   bool planned = ui_comp_plan_raw_line(
-    layers.items, layers.size, curgrid, &msg_grid, request, &plan);
+    layers.items, layers.size, &msg_grid, request, &plan);
   assert(planned);
   if (!planned) {
     return;
@@ -469,11 +444,12 @@ void ui_comp_msg_set_pos(Integer grid, Integer row, Boolean scrolled, String sep
 void ui_comp_grid_scroll(Integer grid, Integer top, Integer bot, Integer left, Integer right,
                          Integer rows, Integer cols)
 {
-  if (!ui_comp_should_draw() || !ui_comp_set_grid((int)grid)) {
+  if (!ui_comp_should_draw()) {
     return;
   }
 
   CompositorScrollRequest request = {
+    .grid_handle = (int)grid,
     .top = top,
     .bottom = bot,
     .left = left,
@@ -482,13 +458,17 @@ void ui_comp_grid_scroll(Integer grid, Integer top, Integer bot, Integer left, I
   };
   CompositorScrollPlan plan;
   bool planned = ui_comp_plan_scroll(
-    layers.items, layers.size, curgrid, &msg_grid, msg_was_scrolled, request, &plan);
+    layers.items, layers.size, &msg_grid, msg_was_scrolled, request, &plan);
   assert(planned);
   if (!planned) {
     return;
   }
+  if (plan.discard) {
+    return;
+  }
 
   if (plan.recompose) {
+    ScreenGrid *scroll_grid = kv_A(layers, plan.current_layer_index);
     // TODO(bfredl):
     // 1. check if rectangles actually overlap
     // 2. calculate subareas that can scroll.
@@ -501,7 +481,7 @@ void ui_comp_grid_scroll(Integer grid, Integer top, Integer bot, Integer left, I
       // ideally win_update() should keep track of this itself and not scroll
       // the invalid space.
       if (ui_comp_should_compose_scroll_row(
-            curgrid, grid_row, plan.grid_start_column)) {
+            scroll_grid, grid_row, plan.grid_start_column)) {
         compose_line(row, plan.left, plan.right, 0);
       }
     }

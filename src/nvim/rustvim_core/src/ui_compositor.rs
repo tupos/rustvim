@@ -105,6 +105,7 @@ pub struct CCompositorLineRequest {
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct CCompositorRawLineRequest {
+    grid_handle: libc::c_int,
     row: Integer,
     start_col: Integer,
     end_col: Integer,
@@ -133,6 +134,7 @@ pub struct CCompositorRawLinePlan {
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct CCompositorScrollRequest {
+    grid_handle: libc::c_int,
     top: Integer,
     bottom: Integer,
     left: Integer,
@@ -144,6 +146,7 @@ pub struct CCompositorScrollRequest {
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct CCompositorScrollPlan {
+    current_layer_index: usize,
     top: Integer,
     bottom: Integer,
     left: Integer,
@@ -152,6 +155,7 @@ pub struct CCompositorScrollPlan {
     recompose_end_row: Integer,
     first_grid_row: libc::c_int,
     grid_start_column: libc::c_int,
+    discard: bool,
     recompose: bool,
 }
 
@@ -411,8 +415,26 @@ enum CompositorScrollPlan {
     },
 }
 
-impl From<CompositorScrollPlan> for CCompositorScrollPlan {
-    fn from(plan: CompositorScrollPlan) -> Self {
+impl CCompositorScrollPlan {
+    /// Constructs a successful no-op for a grid outside the compositor.
+    const fn discarded() -> Self {
+        Self {
+            current_layer_index: 0,
+            top: 0,
+            bottom: 0,
+            left: 0,
+            right: 0,
+            first_recompose_row: 0,
+            recompose_end_row: 0,
+            first_grid_row: 0,
+            grid_start_column: 0,
+            discard: true,
+            recompose: false,
+        }
+    }
+
+    /// Converts a safe scroll plan for the selected compositor layer.
+    fn from_plan(current_layer_index: usize, plan: CompositorScrollPlan) -> Self {
         let (
             region,
             first_recompose_row,
@@ -438,6 +460,7 @@ impl From<CompositorScrollPlan> for CCompositorScrollPlan {
         };
 
         Self {
+            current_layer_index,
             top: Integer::from(region.rows.start),
             bottom: Integer::from(region.rows.end),
             left: Integer::from(region.columns.start),
@@ -446,6 +469,7 @@ impl From<CompositorScrollPlan> for CCompositorScrollPlan {
             recompose_end_row: Integer::from(recompose_end_row),
             first_grid_row,
             grid_start_column,
+            discard: false,
             recompose,
         }
     }
@@ -524,6 +548,24 @@ impl From<CompositorRawLinePlan> for CCompositorRawLinePlan {
             columns_clipped: plan.clear_column != plan.requested_clear_column,
             discard,
             recompose,
+        }
+    }
+}
+
+impl CCompositorRawLinePlan {
+    /// Constructs a successful no-op for a grid outside the compositor.
+    const fn discarded() -> Self {
+        Self {
+            row: 0,
+            start_col: 0,
+            end_col: 0,
+            clear_col: 0,
+            requested_clear_col: 0,
+            flags: 0,
+            row_outside: false,
+            columns_clipped: false,
+            discard: true,
+            recompose: false,
         }
     }
 }
@@ -1025,12 +1067,16 @@ impl<'grid> CompositorLayerStack<'grid> {
         Some(insertion_index)
     }
 
+    /// Finds the compositor layer identified by one native grid handle.
+    fn layer_index_with_handle(&self, handle: i32) -> Option<usize> {
+        self.layers
+            .iter()
+            .position(|layer| layer.grid.handle() == handle)
+    }
+
     /// Selects a grid and plans its composed-screen cursor update.
     fn plan_cursor(&self, request: CompositorCursorRequest) -> Option<CompositorCursorPlan> {
-        let layer_index = self
-            .layers
-            .iter()
-            .position(|layer| layer.grid.handle() == request.grid_handle)?;
+        let layer_index = self.layer_index_with_handle(request.grid_handle)?;
         let layer = self.layer(layer_index)?;
         let screen_position = CompositorPoint {
             row: layer.origin_row.checked_add(request.local_position.row)?,
@@ -2419,22 +2465,24 @@ pub unsafe extern "C" fn ui_comp_should_compose_scroll_row(
 /// pointers. Every grid must be exclusively accessible and its buffers must
 /// satisfy the ownership and layout requirements of `ScreenGrid`.
 ///
-/// `current_grid` must identify one grid in `layer_grids`. `message_grid` is
+/// A grid handle absent from `layer_grids` produces a successful discarded
+/// plan, preserving the behavior of the former C lookup. `message_grid` is
 /// used only for pointer identity and may be null. `output` must point to
-/// writable, properly aligned storage for one `CCompositorRawLinePlan`.
+/// writable, properly aligned storage for one
+/// `CCompositorRawLinePlan`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ui_comp_plan_raw_line(
     layer_grids: *const *mut CScreenGrid,
     layer_count: usize,
-    current_grid: *mut CScreenGrid,
     message_grid: *mut CScreenGrid,
     request: CCompositorRawLineRequest,
     output: *mut CCompositorRawLinePlan,
 ) -> bool {
-    if current_grid.is_null() || output.is_null() {
+    if output.is_null() {
         return false;
     }
 
+    let grid_handle = request.grid_handle;
     let Ok(raw_line) = CompositorRawLineRequest::try_from(request) else {
         return false;
     };
@@ -2445,12 +2493,16 @@ pub unsafe extern "C" fn ui_comp_plan_raw_line(
     else {
         return false;
     };
-    let Some(current_layer_index) = layer_guards.index_of(current_grid) else {
-        return false;
-    };
     let message_layer_index = layer_guards.index_of(message_grid);
     let Some(layers) = layer_guards.layer_stack() else {
         return false;
+    };
+    let Some(current_layer_index) = layers.layer_index_with_handle(grid_handle) else {
+        // SAFETY: The caller guarantees writable, aligned output storage.
+        unsafe {
+            output.write(CCompositorRawLinePlan::discarded());
+        }
+        return true;
     };
 
     let Some(plan) = layers.plan_raw_line(
@@ -2478,23 +2530,25 @@ pub unsafe extern "C" fn ui_comp_plan_raw_line(
 /// pointers. Every grid must be exclusively accessible and its buffers must
 /// satisfy the ownership and layout requirements of `ScreenGrid`.
 ///
-/// `current_grid` must identify one grid in `layer_grids`. `message_grid` is
+/// A grid handle absent from `layer_grids` produces a successful discarded
+/// plan, preserving the behavior of the former C lookup. `message_grid` is
 /// used only for pointer identity and may be null. `output` must point to
-/// writable, properly aligned storage for one `CCompositorScrollPlan`.
+/// writable, properly aligned storage for one
+/// `CCompositorScrollPlan`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ui_comp_plan_scroll(
     layer_grids: *const *mut CScreenGrid,
     layer_count: usize,
-    current_grid: *mut CScreenGrid,
     message_grid: *mut CScreenGrid,
     message_was_scrolled: bool,
     request: CCompositorScrollRequest,
     output: *mut CCompositorScrollPlan,
 ) -> bool {
-    if current_grid.is_null() || output.is_null() {
+    if output.is_null() {
         return false;
     }
 
+    let grid_handle = request.grid_handle;
     let Ok(request) = CompositorScrollRequest::try_from(request) else {
         return false;
     };
@@ -2505,12 +2559,16 @@ pub unsafe extern "C" fn ui_comp_plan_scroll(
     else {
         return false;
     };
-    let Some(current_layer_index) = layer_guards.index_of(current_grid) else {
-        return false;
-    };
     let message_layer_index = layer_guards.index_of(message_grid);
     let Some(layers) = layer_guards.layer_stack() else {
         return false;
+    };
+    let Some(current_layer_index) = layers.layer_index_with_handle(grid_handle) else {
+        // SAFETY: The caller guarantees writable, aligned output storage.
+        unsafe {
+            output.write(CCompositorScrollPlan::discarded());
+        }
+        return true;
     };
     let Some(plan) = layers.plan_scroll(
         current_layer_index,
@@ -2522,7 +2580,7 @@ pub unsafe extern "C" fn ui_comp_plan_scroll(
     };
 
     // SAFETY: The caller guarantees writable, aligned storage for one plan.
-    unsafe { output.write(plan.into()) };
+    unsafe { output.write(CCompositorScrollPlan::from_plan(current_layer_index, plan)) };
     true
 }
 

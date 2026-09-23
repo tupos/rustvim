@@ -47,6 +47,7 @@ typedef struct {
 } CompositorLineRequest;
 
 typedef struct {
+  int grid_handle;
   Integer row;
   Integer start_col;
   Integer end_col;
@@ -69,6 +70,7 @@ typedef struct {
 } CompositorRawLinePlan;
 
 typedef struct {
+  int grid_handle;
   Integer top;
   Integer bottom;
   Integer left;
@@ -77,6 +79,7 @@ typedef struct {
 } CompositorScrollRequest;
 
 typedef struct {
+  size_t current_layer_index;
   Integer top;
   Integer bottom;
   Integer left;
@@ -85,6 +88,7 @@ typedef struct {
   Integer recompose_end_row;
   int first_grid_row;
   int grid_start_column;
+  bool discard;
   bool recompose;
 } CompositorScrollPlan;
 
@@ -138,13 +142,12 @@ extern bool ui_comp_should_compose_scroll_row(
 
 extern bool ui_comp_plan_raw_line(
   ScreenGrid *const *layer_grids, size_t layer_count,
-  ScreenGrid *current_grid, ScreenGrid *message_grid,
-  CompositorRawLineRequest request, CompositorRawLinePlan *output);
+  ScreenGrid *message_grid, CompositorRawLineRequest request,
+  CompositorRawLinePlan *output);
 
 extern bool ui_comp_plan_scroll(
   ScreenGrid *const *layer_grids, size_t layer_count,
-  ScreenGrid *current_grid, ScreenGrid *message_grid,
-  bool message_was_scrolled, CompositorScrollRequest request,
-  CompositorScrollPlan *output);
+  ScreenGrid *message_grid, bool message_was_scrolled,
+  CompositorScrollRequest request, CompositorScrollPlan *output);
 
 #include "ui_compositor.h.generated.h"
