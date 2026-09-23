@@ -166,20 +166,18 @@ struct CompositorRecomposeArea {
 /// A half-open rectangular region in compositor coordinates.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct CompositorRegion {
-    rows: Range<Integer>,
-    columns: Range<Integer>,
+    rows: Range<i32>,
+    columns: Range<i32>,
 }
 
 impl CompositorRegion {
     /// Constructs a region with ordered row and column boundaries.
-    fn try_new(rows: Range<Integer>, columns: Range<Integer>) -> Option<Self> {
+    fn try_new(rows: Range<i32>, columns: Range<i32>) -> Option<Self> {
         (rows.start <= rows.end && columns.start <= columns.end).then_some(Self { rows, columns })
     }
 
     /// Translates a grid-local region into composed-screen coordinates.
     fn translated(self, row_offset: i32, column_offset: i32) -> Option<Self> {
-        let row_offset = Integer::from(row_offset);
-        let column_offset = Integer::from(column_offset);
         Self::try_new(
             self.rows.start.checked_add(row_offset)?..self.rows.end.checked_add(row_offset)?,
             self.columns.start.checked_add(column_offset)?
@@ -187,16 +185,16 @@ impl CompositorRegion {
         )
     }
 
-    /// Converts the boundaries used by the existing C coverage check.
+    /// Returns the boundaries used by the existing C coverage check.
     ///
     /// The compositor historically treats the scroll region's bottom and
     /// right boundaries as inclusive for this conservative overlap check.
     fn coverage_rect(&self) -> Option<CompositorRect> {
         CompositorRect::try_new(
-            i32::try_from(self.rows.start).ok()?,
-            i32::try_from(self.rows.end).ok()?,
-            i32::try_from(self.columns.start).ok()?,
-            i32::try_from(self.columns.end).ok()?,
+            self.rows.start,
+            self.rows.end,
+            self.columns.start,
+            self.columns.end,
         )
     }
 }
@@ -205,20 +203,26 @@ impl CompositorRegion {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct CompositorScrollRequest {
     region: CompositorRegion,
-    row_delta: Integer,
+    row_delta: i32,
 }
 
 impl TryFrom<CCompositorScrollRequest> for CompositorScrollRequest {
     type Error = ();
 
     fn try_from(request: CCompositorScrollRequest) -> Result<Self, Self::Error> {
+        let (Ok(top), Ok(bottom), Ok(left), Ok(right), Ok(row_delta)) = (
+            i32::try_from(request.top),
+            i32::try_from(request.bottom),
+            i32::try_from(request.left),
+            i32::try_from(request.right),
+            i32::try_from(request.row_delta),
+        ) else {
+            return Err(());
+        };
+
         Ok(Self {
-            region: CompositorRegion::try_new(
-                request.top..request.bottom,
-                request.left..request.right,
-            )
-            .ok_or(())?,
-            row_delta: request.row_delta,
+            region: CompositorRegion::try_new(top..bottom, left..right).ok_or(())?,
+            row_delta,
         })
     }
 }
@@ -232,7 +236,7 @@ enum CompositorScrollPlan {
     /// Recompose valid rows because another layer covers the region.
     Recompose {
         region: CompositorRegion,
-        screen_rows: Range<Integer>,
+        screen_rows: Range<i32>,
         first_grid_row: i32,
         grid_start_column: i32,
     },
@@ -265,12 +269,12 @@ impl From<CompositorScrollPlan> for CCompositorScrollPlan {
         };
 
         Self {
-            top: region.rows.start,
-            bottom: region.rows.end,
-            left: region.columns.start,
-            right: region.columns.end,
-            first_recompose_row,
-            recompose_end_row,
+            top: Integer::from(region.rows.start),
+            bottom: Integer::from(region.rows.end),
+            left: Integer::from(region.columns.start),
+            right: Integer::from(region.columns.end),
+            first_recompose_row: Integer::from(first_recompose_row),
+            recompose_end_row: Integer::from(recompose_end_row),
             first_grid_row,
             grid_start_column,
             recompose,
@@ -281,9 +285,9 @@ impl From<CompositorScrollPlan> for CCompositorScrollPlan {
 /// Validated grid-local inputs for planning one raw-line event.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct CompositorRawLineRequest {
-    row: Integer,
-    columns: Range<Integer>,
-    clear_column: Integer,
+    row: i32,
+    columns: Range<i32>,
+    clear_column: i32,
     flags: libc::c_int,
 }
 
@@ -291,11 +295,20 @@ impl TryFrom<CCompositorRawLineRequest> for CompositorRawLineRequest {
     type Error = ();
 
     fn try_from(request: CCompositorRawLineRequest) -> Result<Self, Self::Error> {
-        (request.start_col <= request.end_col && request.end_col <= request.clear_col)
+        let (Ok(row), Ok(start_column), Ok(end_column), Ok(clear_column)) = (
+            i32::try_from(request.row),
+            i32::try_from(request.start_col),
+            i32::try_from(request.end_col),
+            i32::try_from(request.clear_col),
+        ) else {
+            return Err(());
+        };
+
+        (start_column <= end_column && end_column <= clear_column)
             .then_some(Self {
-                row: request.row,
-                columns: request.start_col..request.end_col,
-                clear_column: request.clear_col,
+                row,
+                columns: start_column..end_column,
+                clear_column,
                 flags: request.flags,
             })
             .ok_or(())
@@ -314,10 +327,10 @@ enum CompositorRawLineAction {
 /// Translated and clipped raw-line state returned to the C callback boundary.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct CompositorRawLinePlan {
-    row: Integer,
-    columns: Range<Integer>,
-    clear_column: Integer,
-    requested_clear_column: Integer,
+    row: i32,
+    columns: Range<i32>,
+    clear_column: i32,
+    requested_clear_column: i32,
     flags: libc::c_int,
     action: CompositorRawLineAction,
 }
@@ -332,11 +345,11 @@ impl From<CompositorRawLinePlan> for CCompositorRawLinePlan {
         let recompose = plan.action == CompositorRawLineAction::Recompose;
 
         Self {
-            row: plan.row,
-            start_col: plan.columns.start,
-            end_col: plan.columns.end,
-            clear_col: plan.clear_column,
-            requested_clear_col: plan.requested_clear_column,
+            row: Integer::from(plan.row),
+            start_col: Integer::from(plan.columns.start),
+            end_col: Integer::from(plan.columns.end),
+            clear_col: Integer::from(plan.clear_column),
+            requested_clear_col: Integer::from(plan.requested_clear_column),
             flags: plan.flags,
             row_outside,
             columns_clipped: plan.clear_column != plan.requested_clear_column,
@@ -874,17 +887,11 @@ impl<'grid> CompositorLayerStack<'grid> {
         let skipped_bottom = row_delta.max(0);
         let first_recompose_row = region.rows.start.checked_add(skipped_top)?;
         let recompose_end_row = region.rows.end.checked_sub(skipped_bottom)?;
-        let first_grid_row = i32::try_from(
-            first_recompose_row.checked_sub(Integer::from(current_layer.origin_row))?,
-        )
-        .ok()?;
-        let grid_start_column = i32::try_from(
-            region
-                .columns
-                .start
-                .checked_sub(Integer::from(current_layer.origin_column))?,
-        )
-        .ok()?;
+        let first_grid_row = first_recompose_row.checked_sub(current_layer.origin_row)?;
+        let grid_start_column = region
+            .columns
+            .start
+            .checked_sub(current_layer.origin_column)?;
 
         Some(CompositorScrollPlan::Recompose {
             region,
@@ -904,20 +911,18 @@ impl<'grid> CompositorLayerStack<'grid> {
     ) -> Option<CompositorRawLinePlan> {
         let current_layer = self.layer(current_layer_index)?;
         let default_layer = self.default_layer()?;
-        let row = request
-            .row
-            .checked_add(Integer::from(current_layer.origin_row))?;
+        let row = request.row.checked_add(current_layer.origin_row)?;
         let start_column = request
             .columns
             .start
-            .checked_add(Integer::from(current_layer.origin_column))?;
+            .checked_add(current_layer.origin_column)?;
         let end_column = request
             .columns
             .end
-            .checked_add(Integer::from(current_layer.origin_column))?;
+            .checked_add(current_layer.origin_column)?;
         let requested_clear_column = request
             .clear_column
-            .checked_add(Integer::from(current_layer.origin_column))?;
+            .checked_add(current_layer.origin_column)?;
         let flags = if current_layer.is_default {
             request.flags
         } else {
@@ -932,12 +937,12 @@ impl<'grid> CompositorLayerStack<'grid> {
             action: CompositorRawLineAction::Forward,
         };
 
-        if row >= Integer::from(default_layer.grid.rows) {
+        if row >= default_layer.grid.rows {
             plan.action = CompositorRawLineAction::DiscardRow;
             return Some(plan);
         }
 
-        let screen_columns = Integer::from(default_layer.grid.cols);
+        let screen_columns = default_layer.grid.cols;
         if plan.clear_column > screen_columns {
             plan.clear_column = screen_columns;
             if plan.columns.start >= screen_columns {
@@ -949,10 +954,10 @@ impl<'grid> CompositorLayerStack<'grid> {
 
         let covered = self.is_covered_above(CompositorCoveredAboveQuery {
             rectangle: CompositorRect::try_new(
-                i32::try_from(plan.row).ok()?,
-                i32::try_from(plan.row).ok()?,
-                i32::try_from(plan.columns.start).ok()?,
-                i32::try_from(plan.clear_column).ok()?,
+                plan.row,
+                plan.row,
+                plan.columns.start,
+                plan.clear_column,
             )?,
             current_layer_index,
             message_layer_index,
