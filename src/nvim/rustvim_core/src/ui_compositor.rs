@@ -1,5 +1,6 @@
 use std::{
     ops::Range,
+    ptr::NonNull,
     slice,
     sync::{Mutex, MutexGuard},
 };
@@ -643,6 +644,74 @@ impl<'grid> CompositorLayerStack<'grid> {
     }
 }
 
+/// Temporary Rust ownership of the ordered compositor layers received from C.
+///
+/// Each contained `ScreenGridGuard` restores its grid allocations when this
+/// collection is dropped.
+#[must_use = "dropping the layer guards restores ownership to the C grids"]
+struct CompositorLayerGuards {
+    cgrids: Vec<NonNull<CScreenGrid>>,
+    grids: Vec<ScreenGridGuard>,
+}
+
+impl CompositorLayerGuards {
+    /// Validates a C layer array and takes temporary ownership of every grid.
+    ///
+    /// # Safety
+    ///
+    /// If `layer_count` is nonzero, `layer_grids` must point to that many
+    /// readable grid pointers. Every non-null grid must be valid, distinct,
+    /// exclusively accessible, and satisfy the ownership and layout
+    /// requirements of `ScreenGrid`.
+    unsafe fn try_take(layer_grids: *const *mut CScreenGrid, layer_count: usize) -> Option<Self> {
+        if layer_grids.is_null() || layer_count == 0 {
+            return None;
+        }
+
+        // SAFETY: The caller guarantees that the pointer array is readable for
+        // `layer_count` elements for the duration of this synchronous call.
+        let cgrids = unsafe { slice::from_raw_parts(layer_grids, layer_count) }
+            .iter()
+            .copied()
+            .map(NonNull::new)
+            .collect::<Option<Vec<_>>>()?;
+        if cgrids
+            .iter()
+            .enumerate()
+            .any(|(index, grid)| cgrids[..index].contains(grid))
+        {
+            return None;
+        }
+
+        let grids = cgrids
+            .iter()
+            .map(|grid| {
+                // SAFETY: Null and duplicate pointers were rejected, and the
+                // caller transfers ownership for this operation.
+                unsafe { ScreenGridGuard::take(grid.as_ptr()) }
+            })
+            .collect();
+        Some(Self { cgrids, grids })
+    }
+
+    /// Returns the stack index belonging to one C grid identity.
+    fn index_of(&self, cgrid: *mut CScreenGrid) -> Option<usize> {
+        let cgrid = NonNull::new(cgrid)?;
+        self.cgrids.iter().position(|grid| *grid == cgrid)
+    }
+
+    /// Borrows one owned Rust grid by its layer index.
+    fn grid(&self, index: usize) -> Option<&ScreenGrid> {
+        self.grids.get(index).map(|grid| &**grid)
+    }
+
+    /// Borrows all owned grids as a validated compositor layer stack.
+    fn layer_stack(&self) -> Option<CompositorLayerStack<'_>> {
+        let grids = self.grids.iter().map(|grid| &**grid).collect::<Vec<_>>();
+        CompositorLayerStack::try_from_grids(&grids)
+    }
+}
+
 /// Message-separator replacement applied below its compositor layer.
 #[derive(Clone, Copy)]
 struct MessageSeparator<'grid> {
@@ -977,10 +1046,6 @@ pub unsafe extern "C" fn ui_comp_compose_line(
     message_grid: *mut CScreenGrid,
     request: CCompositorLineRequest,
 ) -> bool {
-    if layer_grids.is_null() || layer_count == 0 {
-        return false;
-    }
-
     let (Ok(row), Ok(start_column), Ok(end_column), Ok(screen_columns)) = (
         i32::try_from(request.row),
         i32::try_from(request.start_col),
@@ -990,36 +1055,19 @@ pub unsafe extern "C" fn ui_comp_compose_line(
         return false;
     };
 
-    // SAFETY: The caller guarantees that the pointer array is readable for
-    // `layer_count` elements for the duration of this synchronous call.
-    let layer_grids = unsafe { slice::from_raw_parts(layer_grids, layer_count) };
-    if layer_grids
-        .iter()
-        .enumerate()
-        .any(|(index, grid)| grid.is_null() || layer_grids[..index].contains(grid))
-    {
-        return false;
-    }
-
     let separator_active = row == request.message_separator_row;
     if separator_active && message_grid.is_null() {
         return false;
     }
-    let message_grid_index = separator_active
-        .then(|| layer_grids.iter().position(|grid| *grid == message_grid))
-        .flatten();
-    let separate_message_grid = separator_active && message_grid_index.is_none();
-
     let mut compositor = lock_compositor_buffer();
     let submission = (|| {
-        let grid_guards = layer_grids
-            .iter()
-            .map(|grid| {
-                // SAFETY: Null and duplicate pointers were rejected, and the
-                // caller transfers ownership for this operation.
-                unsafe { ScreenGridGuard::take(*grid) }
-            })
-            .collect::<Vec<_>>();
+        // SAFETY: The caller satisfies the documented layer-array and grid
+        // ownership requirements.
+        let layer_guards = unsafe { CompositorLayerGuards::try_take(layer_grids, layer_count) }?;
+        let message_grid_index = separator_active
+            .then(|| layer_guards.index_of(message_grid))
+            .flatten();
+        let separate_message_grid = separator_active && message_grid_index.is_none();
 
         let message_grid_guard = separate_message_grid.then(|| {
             // SAFETY: The non-null message grid is distinct from every layer
@@ -1027,18 +1075,16 @@ pub unsafe extern "C" fn ui_comp_compose_line(
             unsafe { ScreenGridGuard::take(message_grid) }
         });
 
-        let grids = grid_guards.iter().map(|grid| &**grid).collect::<Vec<_>>();
-        let layers = CompositorLayerStack::try_from_grids(&grids)?;
-
+        let layers = layer_guards.layer_stack()?;
         let message_separator = if separator_active {
             let message_grid = match message_grid_index {
-                Some(index) => *grids.get(index)?,
+                Some(index) => layer_guards.grid(index)?,
                 None => message_grid_guard.as_deref()?,
             };
             Some(MessageSeparator {
                 layer: CompositorLayer::try_from_grid(
                     message_grid,
-                    std::ptr::eq(message_grid, *grids.first()?),
+                    std::ptr::eq(message_grid, layer_guards.grid(0)?),
                 )?,
                 character: request.message_separator_character,
                 attribute: request.message_separator_attribute,
@@ -1169,48 +1215,31 @@ pub unsafe extern "C" fn ui_comp_is_covered_above(
     message_grid: *mut CScreenGrid,
     request: CCompositorCoveredAboveRequest,
 ) -> bool {
-    if layer_grids.is_null() || layer_count == 0 {
-        return false;
-    }
-
     let Some(rectangle) =
         CompositorRect::try_new(request.top, request.bottom, request.left, request.right)
     else {
         return false;
     };
 
-    // SAFETY: The caller guarantees that the pointer array is readable for
-    // `layer_count` elements for the duration of this synchronous call.
-    let layer_grids = unsafe { slice::from_raw_parts(layer_grids, layer_count) };
-    if layer_grids
-        .iter()
-        .enumerate()
-        .any(|(index, grid)| grid.is_null() || layer_grids[..index].contains(grid))
-    {
+    // SAFETY: The caller satisfies the documented layer-array and grid
+    // ownership requirements.
+    let Some(layer_guards) = (unsafe { CompositorLayerGuards::try_take(layer_grids, layer_count) })
+    else {
         return false;
-    }
+    };
+    let message_layer_index = layer_guards.index_of(message_grid);
+    let Some(layers) = layer_guards.layer_stack() else {
+        return false;
+    };
 
-    let message_layer_index = layer_grids.iter().position(|grid| *grid == message_grid);
-    (|| {
-        let grid_guards = layer_grids
-            .iter()
-            .map(|grid| {
-                // SAFETY: Null and duplicate pointers were rejected, and the
-                // caller transfers ownership for this operation.
-                unsafe { ScreenGridGuard::take(*grid) }
-            })
-            .collect::<Vec<_>>();
-        let grids = grid_guards.iter().map(|grid| &**grid).collect::<Vec<_>>();
-        let layers = CompositorLayerStack::try_from_grids(&grids)?;
-
-        layers.is_covered_above(CompositorCoveredAboveQuery {
+    layers
+        .is_covered_above(CompositorCoveredAboveQuery {
             rectangle,
             current_layer_index: request.current_layer_index,
             message_layer_index,
             message_was_scrolled: request.message_was_scrolled,
         })
-    })()
-    .unwrap_or(false)
+        .unwrap_or(false)
 }
 
 /// Plans coordinate translation and recomposition for one grid scroll.
@@ -1237,7 +1266,7 @@ pub unsafe extern "C" fn ui_comp_plan_scroll(
     request: CCompositorScrollRequest,
     output: *mut CCompositorScrollPlan,
 ) -> bool {
-    if layer_grids.is_null() || layer_count == 0 || current_grid.is_null() || output.is_null() {
+    if current_grid.is_null() || output.is_null() {
         return false;
     }
 
@@ -1245,44 +1274,28 @@ pub unsafe extern "C" fn ui_comp_plan_scroll(
         return false;
     };
 
-    // SAFETY: The caller guarantees that the pointer array is readable for
-    // `layer_count` elements for the duration of this synchronous call.
-    let layer_grids = unsafe { slice::from_raw_parts(layer_grids, layer_count) };
-    if layer_grids
-        .iter()
-        .enumerate()
-        .any(|(index, grid)| grid.is_null() || layer_grids[..index].contains(grid))
-    {
-        return false;
-    }
-
-    let Some(current_layer_index) = layer_grids.iter().position(|grid| *grid == current_grid)
+    // SAFETY: The caller satisfies the documented layer-array and grid
+    // ownership requirements.
+    let Some(layer_guards) = (unsafe { CompositorLayerGuards::try_take(layer_grids, layer_count) })
     else {
         return false;
     };
-    let message_layer_index = layer_grids.iter().position(|grid| *grid == message_grid);
-    let plan = (|| {
-        let grid_guards = layer_grids
-            .iter()
-            .map(|grid| {
-                // SAFETY: Null and duplicate pointers were rejected, and the
-                // caller transfers ownership for this operation.
-                unsafe { ScreenGridGuard::take(*grid) }
-            })
-            .collect::<Vec<_>>();
-        let grids = grid_guards.iter().map(|grid| &**grid).collect::<Vec<_>>();
-        let layers = CompositorLayerStack::try_from_grids(&grids)?;
-        layers.plan_scroll(
-            current_layer_index,
-            message_layer_index,
-            message_was_scrolled,
-            request,
-        )
-    })();
-
-    let Some(plan) = plan else {
+    let Some(current_layer_index) = layer_guards.index_of(current_grid) else {
         return false;
     };
+    let message_layer_index = layer_guards.index_of(message_grid);
+    let Some(layers) = layer_guards.layer_stack() else {
+        return false;
+    };
+    let Some(plan) = layers.plan_scroll(
+        current_layer_index,
+        message_layer_index,
+        message_was_scrolled,
+        request,
+    ) else {
+        return false;
+    };
+
     // SAFETY: The caller guarantees writable, aligned storage for one plan.
     unsafe { output.write(plan.into()) };
     true
@@ -1332,6 +1345,45 @@ mod tests {
             disabled,
             is_default: layer_index == 0,
         }
+    }
+
+    #[test]
+    fn layer_guards_validate_identity_and_restore_all_grids() {
+        let first = grid_with_row(&[schar_from_ascii('a')], &[1]);
+        let second = grid_with_row(&[schar_from_ascii('b')], &[2]);
+        // SAFETY: Each conversion transfers its grid allocations to a distinct
+        // C representation.
+        let (mut first_cgrid, mut second_cgrid) = unsafe { (first.to_cgrid(), second.to_cgrid()) };
+        let first_pointer = &mut first_cgrid as *mut CScreenGrid;
+        let second_pointer = &mut second_cgrid as *mut CScreenGrid;
+        let cgrids = [first_pointer, second_pointer];
+
+        {
+            // SAFETY: Both pointers identify distinct, exclusively accessible
+            // C grids and the pointer array remains readable for this scope.
+            let guards =
+                unsafe { CompositorLayerGuards::try_take(cgrids.as_ptr(), cgrids.len()) }.unwrap();
+            assert_eq!(guards.index_of(first_pointer), Some(0));
+            assert_eq!(guards.index_of(second_pointer), Some(1));
+            assert_eq!(
+                guards.grid(0).unwrap().chars.as_slice(),
+                &[schar_from_ascii('a')]
+            );
+            assert_eq!(
+                guards.grid(1).unwrap().chars.as_slice(),
+                &[schar_from_ascii('b')]
+            );
+        }
+
+        // SAFETY: Dropping the collection returned ownership to both C grids.
+        let (first, second) = unsafe {
+            (
+                ScreenGrid::take_from_cgrid(&mut first_cgrid),
+                ScreenGrid::take_from_cgrid(&mut second_cgrid),
+            )
+        };
+        assert_eq!(first.chars.as_slice(), &[schar_from_ascii('a')]);
+        assert_eq!(second.chars.as_slice(), &[schar_from_ascii('b')]);
     }
 
     #[test]
