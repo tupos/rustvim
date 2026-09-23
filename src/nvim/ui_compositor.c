@@ -117,36 +117,24 @@ void ui_comp_layers_adjust(size_t layer_idx, bool raise)
 bool ui_comp_put_grid(ScreenGrid *grid, int row, int col, int height, int width, bool valid,
                       bool on_top)
 {
-  bool moved;
-  grid->pending_comp_index_update = true;
+  bool moved = false;
 
   if (grid->comp_index != 0) {
-    moved = (row != grid->comp_row) || (col != grid->comp_col);
-    if (ui_comp_should_draw()) {
-      // Redraw the area covered by the old position, and is not covered
-      // by the new position. Disable the grid so that compose_area() will not
-      // use it.
-      grid->comp_disabled = true;
-      compose_area(grid->comp_row, row,
-                   grid->comp_col, grid->comp_col + grid->comp_width);
-      if (grid->comp_col < col) {
-        compose_area(MAX(row, grid->comp_row),
-                     MIN(row + height, grid->comp_row + grid->comp_height),
-                     grid->comp_col, col);
-      }
-      if (col + width < grid->comp_col + grid->comp_width) {
-        compose_area(MAX(row, grid->comp_row),
-                     MIN(row + height, grid->comp_row + grid->comp_height),
-                     col + width, grid->comp_col + grid->comp_width);
-      }
-      compose_area(row + height, grid->comp_row + grid->comp_height,
-                   grid->comp_col, grid->comp_col + grid->comp_width);
-      grid->comp_disabled = false;
-    }
-    grid->comp_row = row;
-    grid->comp_col = col;
+    CompositorGridPlacementRequest request = {
+      .row = row,
+      .column = col,
+      .height = height,
+      .width = width,
+      .valid = valid,
+      .should_draw = ui_comp_should_draw(),
+    };
+    bool placed = ui_comp_place_existing_grid(
+      layers.items, layers.size, grid, request, compose_area, &moved);
+    assert(placed);
+    return placed && moved;
   } else {
     moved = true;
+    grid->pending_comp_index_update = true;
 #ifndef NDEBUG
     for (size_t i = 0; i < kv_size(layers); i++) {
       if (kv_A(layers, i) == grid) {

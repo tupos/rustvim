@@ -9,6 +9,15 @@
 #include "nvim/ui_defs.h"  // IWYU pragma: keep
 
 typedef struct {
+  int row;
+  int column;
+  int height;
+  int width;
+  bool valid;
+  bool should_draw;
+} CompositorGridPlacementRequest;
+
+typedef struct {
   Integer row;
   Integer start_col;
   Integer end_col;
@@ -67,6 +76,11 @@ typedef void (*CompositorAreaCallback)(
 
 extern bool ui_comp_resize_buffer(Integer width);
 extern bool ui_comp_release_buffer(void);
+
+extern bool ui_comp_place_existing_grid(
+  ScreenGrid *const *layer_grids, size_t layer_count,
+  ScreenGrid *grid, CompositorGridPlacementRequest request,
+  CompositorAreaCallback compose_area, bool *moved);
 
 extern bool ui_comp_adjust_layer_order(
   ScreenGrid **layer_grids, size_t layer_count,

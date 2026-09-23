@@ -38,6 +38,18 @@ unsafe extern "C" {
     );
 }
 
+/// C representation of one existing-grid placement request.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct CCompositorGridPlacementRequest {
+    row: libc::c_int,
+    column: libc::c_int,
+    height: libc::c_int,
+    width: libc::c_int,
+    valid: bool,
+    should_draw: bool,
+}
+
 /// Result of composing one foreground segment over its background.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct SegmentComposition {
@@ -186,6 +198,12 @@ impl CompositorGridPlacement {
         })
     }
 
+    /// Applies this placement to an owned Rust grid.
+    fn apply_to(self, grid: &mut ScreenGrid) {
+        grid.set_compositor_position(self.origin.row, self.origin.column);
+        grid.set_compositor_size(self.size.height, self.size.width);
+    }
+
     /// Returns the exclusive bottom edge of the requested area.
     fn bottom_edge(self) -> Option<i32> {
         self.origin.row.checked_add(self.size.height)
@@ -202,6 +220,14 @@ impl CompositorGridPlacement {
             rows: self.origin.row..self.origin.row.checked_add(grid.rows)?,
             columns: self.origin.column..self.origin.column.checked_add(grid.cols)?,
         })
+    }
+}
+
+impl TryFrom<CCompositorGridPlacementRequest> for CompositorGridPlacement {
+    type Error = ();
+
+    fn try_from(request: CCompositorGridPlacementRequest) -> Result<Self, Self::Error> {
+        Self::try_new(request.row, request.column, request.height, request.width).ok_or(())
     }
 }
 
@@ -1228,6 +1254,11 @@ impl CompositorLayerGuards {
         self.layers.get(index).map(|layer| &*layer.grid)
     }
 
+    /// Mutably borrows one owned Rust grid by its layer index.
+    fn grid_mut(&mut self, index: usize) -> Option<&mut ScreenGrid> {
+        self.layers.get_mut(index).map(|layer| &mut *layer.grid)
+    }
+
     /// Borrows all owned grids as a validated compositor layer stack.
     fn layer_stack(&self) -> Option<CompositorLayerStack<'_>> {
         let grids = self
@@ -1601,6 +1632,131 @@ pub extern "C" fn ui_comp_resize_buffer(width: Integer) -> bool {
 #[unsafe(no_mangle)]
 pub extern "C" fn ui_comp_release_buffer() -> bool {
     lock_compositor_buffer().release()
+}
+
+/// Repositions and resizes one existing compositor grid.
+///
+/// The C grid identity is converted to a Rust layer index at this boundary.
+/// Planning and grid mutation operate only on owned Rust grids and native
+/// Rust values. Grid ownership is restored before every composition callback.
+///
+/// # Safety
+///
+/// `layer_grids` must point to `layer_count` readable, distinct, non-null grid
+/// pointers. Every grid must be exclusively accessible and its buffers must
+/// satisfy the ownership and layout requirements of `ScreenGrid`.
+///
+/// `grid` must identify one non-default grid in `layer_grids`. When
+/// `request.should_draw` is true, `compose_area` must contain a valid callback.
+/// `moved` must point to writable, properly aligned storage for one `bool` and
+/// must not overlap the layer array or any grid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ui_comp_place_existing_grid(
+    layer_grids: *const *mut CScreenGrid,
+    layer_count: usize,
+    grid: *mut CScreenGrid,
+    request: CCompositorGridPlacementRequest,
+    compose_area: Option<CompositorAreaCallback>,
+    moved: *mut bool,
+) -> bool {
+    if grid.is_null() || moved.is_null() || (request.should_draw && compose_area.is_none()) {
+        return false;
+    }
+    let Ok(placement) = CompositorGridPlacement::try_from(request) else {
+        return false;
+    };
+
+    let plan = {
+        // SAFETY: The caller satisfies the documented layer-array and grid
+        // ownership requirements.
+        let Some(mut layer_guards) =
+            (unsafe { CompositorLayerGuards::try_take(layer_grids, layer_count) })
+        else {
+            return false;
+        };
+        let Some(layer_index) = layer_guards.index_of(grid) else {
+            return false;
+        };
+        if layer_index == 0 {
+            return false;
+        }
+        let plan = {
+            let Some(layers) = layer_guards.layer_stack() else {
+                return false;
+            };
+            let Some(layer) = layers.layer(layer_index) else {
+                return false;
+            };
+            let Some(plan) =
+                layer.try_plan_placement(placement, request.valid, request.should_draw)
+            else {
+                return false;
+            };
+            plan
+        };
+
+        let Some(grid) = layer_guards.grid_mut(layer_index) else {
+            return false;
+        };
+        grid.mark_compositor_index_for_update();
+        if request.should_draw {
+            grid.set_compositor_disabled(true);
+        } else {
+            placement.apply_to(grid);
+        }
+        plan
+    };
+
+    if let Some(compose_area) = compose_area {
+        for area in &plan.exposed_areas {
+            // SAFETY: The caller supplied a valid callback. The layer guards
+            // were dropped above, so every grid is owned by C during the call.
+            unsafe {
+                compose_area(
+                    Integer::from(area.rows.start),
+                    Integer::from(area.rows.end),
+                    Integer::from(area.columns.start),
+                    Integer::from(area.columns.end),
+                );
+            }
+        }
+    }
+
+    if request.should_draw {
+        // SAFETY: Every earlier guard restored its grid before the callbacks,
+        // and the caller guarantees that the layer array remains valid for
+        // this synchronous operation.
+        let Some(mut layer_guards) =
+            (unsafe { CompositorLayerGuards::try_take(layer_grids, layer_count) })
+        else {
+            return false;
+        };
+        let Some(layer_index) = layer_guards.index_of(grid) else {
+            return false;
+        };
+        let Some(grid) = layer_guards.grid_mut(layer_index) else {
+            return false;
+        };
+        grid.set_compositor_disabled(false);
+        plan.placement.apply_to(grid);
+    }
+
+    if let (Some(compose_area), Some(area)) = (compose_area, plan.redraw_area) {
+        // SAFETY: The caller supplied a valid callback. The layer guards were
+        // dropped above, so every grid is owned by C during the call.
+        unsafe {
+            compose_area(
+                Integer::from(area.rows.start),
+                Integer::from(area.rows.end),
+                Integer::from(area.columns.start),
+                Integer::from(area.columns.end),
+            );
+        }
+    }
+
+    // SAFETY: The caller provides valid, non-overlapping output storage.
+    unsafe { moved.write(plan.moved) };
+    true
 }
 
 /// Adjusts one layer's position after its z-index changes.
@@ -2327,6 +2483,55 @@ mod tests {
         assert_eq!(layers.plan_layer_insertion(10, Some(1), false), Some(1));
         assert_eq!(layers.plan_layer_insertion(30, Some(1), true), Some(3));
         assert_eq!(layers.plan_layer_insertion(-1, None, true), None);
+    }
+
+    #[test]
+    fn ffi_places_existing_grid_and_restores_ownership() {
+        let default_grid = grid_with_size(4, 4);
+        let mut moving_grid = grid_with_size(2, 2);
+        moving_grid.set_compositor_index(1);
+        // SAFETY: Each conversion transfers its grid allocations to a distinct
+        // C representation.
+        let (mut default_cgrid, mut moving_cgrid) =
+            unsafe { (default_grid.to_cgrid(), moving_grid.to_cgrid()) };
+        let default_pointer = &mut default_cgrid as *mut CScreenGrid;
+        let moving_pointer = &mut moving_cgrid as *mut CScreenGrid;
+        let cgrids = [default_pointer, moving_pointer];
+        let mut moved = false;
+
+        // SAFETY: Both pointers identify distinct, exclusively accessible
+        // grids. Drawing is disabled, so no callback is required.
+        assert!(unsafe {
+            ui_comp_place_existing_grid(
+                cgrids.as_ptr(),
+                cgrids.len(),
+                moving_pointer,
+                CCompositorGridPlacementRequest {
+                    row: 1,
+                    column: 2,
+                    height: 2,
+                    width: 2,
+                    valid: true,
+                    should_draw: false,
+                },
+                None,
+                &mut moved,
+            )
+        });
+        assert!(moved);
+
+        // SAFETY: The FFI operation restored ownership to both C grids.
+        let (default_grid, moving_grid) = unsafe {
+            (
+                ScreenGrid::take_from_cgrid(&mut default_cgrid),
+                ScreenGrid::take_from_cgrid(&mut moving_cgrid),
+            )
+        };
+        assert_eq!(default_grid.compositor_index(), 0);
+        assert_eq!(moving_grid.compositor_index(), 1);
+        assert_eq!(moving_grid.compositor_position(), (1, 2));
+        assert_eq!(moving_grid.compositor_size(), (2, 2));
+        assert!(!moving_grid.is_compositor_disabled());
     }
 
     #[test]

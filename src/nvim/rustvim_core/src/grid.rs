@@ -328,6 +328,12 @@ impl ScreenGrid {
         (self.comp_row, self.comp_col)
     }
 
+    /// Updates this grid's position in the composed screen.
+    pub(crate) fn set_compositor_position(&mut self, row: i32, column: i32) {
+        self.comp_row = row;
+        self.comp_col = column;
+    }
+
     /// Returns this grid's z-index in the compositor stack.
     pub(crate) fn z_index(&self) -> i32 {
         self.zindex
@@ -338,10 +344,26 @@ impl ScreenGrid {
         (self.comp_width, self.comp_height)
     }
 
+    /// Updates the size requested by the compositor.
+    pub(crate) fn set_compositor_size(&mut self, height: i32, width: i32) {
+        self.comp_height = height;
+        self.comp_width = width;
+    }
+
     /// Assigns a compositor-stack index and records that it must be published.
     pub(crate) fn set_compositor_index(&mut self, index: usize) {
         self.comp_index = index;
+        self.mark_compositor_index_for_update();
+    }
+
+    /// Records that the compositor index must be published.
+    pub(crate) fn mark_compositor_index_for_update(&mut self) {
         self.pending_comp_index_update = true;
+    }
+
+    /// Controls whether composition temporarily ignores this grid.
+    pub(crate) fn set_compositor_disabled(&mut self, disabled: bool) {
+        self.comp_disabled = disabled;
     }
 
     /// Returns this grid's index in the compositor layer stack.
