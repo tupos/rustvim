@@ -21,13 +21,26 @@ typedef struct {
 } CompositorLineRequest;
 
 typedef struct {
-  int top;
-  int bottom;
-  int left;
-  int right;
-  size_t current_layer_index;
+  Integer row;
+  Integer start_col;
+  Integer end_col;
+  Integer clear_col;
+  LineFlags flags;
   bool message_was_scrolled;
-} CompositorCoveredAboveRequest;
+} CompositorRawLineRequest;
+
+typedef struct {
+  Integer row;
+  Integer start_col;
+  Integer end_col;
+  Integer clear_col;
+  Integer requested_clear_col;
+  LineFlags flags;
+  bool row_outside;
+  bool columns_clipped;
+  bool discard;
+  bool recompose;
+} CompositorRawLinePlan;
 
 typedef struct {
   Integer top;
@@ -62,9 +75,10 @@ extern bool ui_comp_emit_clear_line(
 extern bool ui_comp_should_compose_scroll_row(
   ScreenGrid *grid, int row, int start_col);
 
-extern bool ui_comp_is_covered_above(
+extern bool ui_comp_plan_raw_line(
   ScreenGrid *const *layer_grids, size_t layer_count,
-  ScreenGrid *message_grid, CompositorCoveredAboveRequest request);
+  ScreenGrid *current_grid, ScreenGrid *message_grid,
+  CompositorRawLineRequest request, CompositorRawLinePlan *output);
 
 extern bool ui_comp_plan_scroll(
   ScreenGrid *const *layer_grids, size_t layer_count,

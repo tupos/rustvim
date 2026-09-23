@@ -440,49 +440,59 @@ void ui_comp_raw_line(Integer grid, Integer row, Integer startcol, Integer endco
     return;
   }
 
-  row += curgrid->comp_row;
-  startcol += curgrid->comp_col;
-  endcol += curgrid->comp_col;
-  clearcol += curgrid->comp_col;
-  if (curgrid != &default_grid) {
-    flags = flags & ~kLineFlagWrap;
-  }
-
   assert(endcol <= clearcol);
+
+  CompositorRawLineRequest request = {
+    .row = row,
+    .start_col = startcol,
+    .end_col = endcol,
+    .clear_col = clearcol,
+    .flags = flags,
+    .message_was_scrolled = msg_was_scrolled,
+  };
+  CompositorRawLinePlan plan;
+  bool planned = ui_comp_plan_raw_line(
+    layers.items, layers.size, curgrid, &msg_grid, request, &plan);
+  assert(planned);
+  if (!planned) {
+    return;
+  }
 
   // TODO(bfredl): this should not really be necessary. But on some condition
   // when resizing nvim, a window will be attempted to be drawn on the older
   // and possibly larger global screen size.
-  if (row >= default_grid.rows) {
-    DLOG("compositor: invalid row %" PRId64 " on grid %" PRId64, row, grid);
+  if (plan.row_outside) {
+    DLOG("compositor: invalid row %" PRId64 " on grid %" PRId64, plan.row, grid);
     return;
   }
-  if (clearcol > default_grid.cols) {
+  if (plan.columns_clipped) {
     DLOG("compositor: invalid last column %" PRId64 " on grid %" PRId64,
-         clearcol, grid);
-    if (startcol >= default_grid.cols) {
-      return;
-    }
-    clearcol = default_grid.cols;
-    endcol = MIN(endcol, clearcol);
+         plan.requested_clear_col, grid);
+  }
+  if (plan.discard) {
+    return;
   }
 
-  bool covered = curgrid_covered_above((int)row, (int)row, (int)startcol, (int)clearcol);
   // TODO(bfredl): eventually should just fix compose_line to respect clearing
   // and optimize it for uncovered lines.
-  if (flags & kLineFlagInvalid || covered || curgrid->blending) {
-    compose_debug(row, row + 1, startcol, clearcol, dbghl_composed, true);
-    compose_line(row, startcol, clearcol, flags);
+  if (plan.recompose) {
+    compose_debug(
+      plan.row, plan.row + 1, plan.start_col, plan.clear_col, dbghl_composed, true);
+    compose_line(plan.row, plan.start_col, plan.clear_col, plan.flags);
   } else {
-    compose_debug(row, row + 1, startcol, endcol, dbghl_normal, endcol >= clearcol);
-    compose_debug(row, row + 1, endcol, clearcol, dbghl_clear, true);
+    compose_debug(
+      plan.row, plan.row + 1, plan.start_col, plan.end_col,
+      dbghl_normal, plan.end_col >= plan.clear_col);
+    compose_debug(
+      plan.row, plan.row + 1, plan.end_col, plan.clear_col, dbghl_clear, true);
 #ifndef NDEBUG
-    for (int i = 0; i < endcol - startcol; i++) {
+    for (Integer i = 0; i < plan.end_col - plan.start_col; i++) {
       assert(attrs[i] >= 0);
     }
 #endif
-    ui_composed_call_raw_line(1, row, startcol, endcol, clearcol, clearattr,
-                              flags, chunk, attrs);
+    ui_composed_call_raw_line(
+      1, plan.row, plan.start_col, plan.end_col, plan.clear_col,
+      clearattr, plan.flags, chunk, attrs);
   }
 }
 
@@ -533,20 +543,6 @@ void ui_comp_msg_set_pos(Integer grid, Integer row, Boolean scrolled, String sep
 
   msg_current_row = (int)row;
   msg_was_scrolled = scrolled;
-}
-
-/// check if curgrid is covered by any other grid within the rectangle
-static bool curgrid_covered_above(int top, int bot, int left, int right)
-{
-  CompositorCoveredAboveRequest request = {
-    .top = top,
-    .bottom = bot,
-    .left = left,
-    .right = right,
-    .current_layer_index = curgrid->comp_index,
-    .message_was_scrolled = msg_was_scrolled,
-  };
-  return ui_comp_is_covered_above(layers.items, layers.size, &msg_grid, request);
 }
 
 void ui_comp_grid_scroll(Integer grid, Integer top, Integer bot, Integer left, Integer right,

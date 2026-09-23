@@ -58,16 +58,32 @@ pub struct CCompositorLineRequest {
     abort_on_invalid: bool,
 }
 
-/// C representation of one compositor-coverage request.
+/// C representation of one raw-line planning request.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
-pub struct CCompositorCoveredAboveRequest {
-    top: libc::c_int,
-    bottom: libc::c_int,
-    left: libc::c_int,
-    right: libc::c_int,
-    current_layer_index: usize,
+pub struct CCompositorRawLineRequest {
+    row: Integer,
+    start_col: Integer,
+    end_col: Integer,
+    clear_col: Integer,
+    flags: libc::c_int,
     message_was_scrolled: bool,
+}
+
+/// C representation of a validated raw-line plan.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct CCompositorRawLinePlan {
+    row: Integer,
+    start_col: Integer,
+    end_col: Integer,
+    clear_col: Integer,
+    requested_clear_col: Integer,
+    flags: libc::c_int,
+    row_outside: bool,
+    columns_clipped: bool,
+    discard: bool,
+    recompose: bool,
 }
 
 /// C representation of one grid-scroll planning request.
@@ -235,6 +251,74 @@ impl From<CompositorScrollPlan> for CCompositorScrollPlan {
             recompose_end_row,
             first_grid_row,
             grid_start_column,
+            recompose,
+        }
+    }
+}
+
+/// Validated grid-local inputs for planning one raw-line event.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CompositorRawLineRequest {
+    row: Integer,
+    columns: Range<Integer>,
+    clear_column: Integer,
+    flags: libc::c_int,
+}
+
+impl TryFrom<CCompositorRawLineRequest> for CompositorRawLineRequest {
+    type Error = ();
+
+    fn try_from(request: CCompositorRawLineRequest) -> Result<Self, Self::Error> {
+        (request.start_col <= request.end_col && request.end_col <= request.clear_col)
+            .then_some(Self {
+                row: request.row,
+                columns: request.start_col..request.end_col,
+                clear_column: request.clear_col,
+                flags: request.flags,
+            })
+            .ok_or(())
+    }
+}
+
+/// Action selected for a validated raw-line event.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CompositorRawLineAction {
+    DiscardRow,
+    DiscardColumns,
+    Recompose,
+    Forward,
+}
+
+/// Translated and clipped raw-line state returned to the C callback boundary.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CompositorRawLinePlan {
+    row: Integer,
+    columns: Range<Integer>,
+    clear_column: Integer,
+    requested_clear_column: Integer,
+    flags: libc::c_int,
+    action: CompositorRawLineAction,
+}
+
+impl From<CompositorRawLinePlan> for CCompositorRawLinePlan {
+    fn from(plan: CompositorRawLinePlan) -> Self {
+        let row_outside = plan.action == CompositorRawLineAction::DiscardRow;
+        let discard = matches!(
+            plan.action,
+            CompositorRawLineAction::DiscardRow | CompositorRawLineAction::DiscardColumns
+        );
+        let recompose = plan.action == CompositorRawLineAction::Recompose;
+
+        Self {
+            row: plan.row,
+            start_col: plan.columns.start,
+            end_col: plan.columns.end,
+            clear_col: plan.clear_column,
+            requested_clear_col: plan.requested_clear_column,
+            flags: plan.flags,
+            row_outside,
+            columns_clipped: plan.clear_column != plan.requested_clear_column,
+            discard,
             recompose,
         }
     }
@@ -609,6 +693,77 @@ impl<'grid> CompositorLayerStack<'grid> {
             first_grid_row,
             grid_start_column,
         })
+    }
+
+    /// Plans translation, clipping, and composition for one raw-line event.
+    fn plan_raw_line(
+        &self,
+        current_layer_index: usize,
+        message_layer_index: Option<usize>,
+        message_was_scrolled: bool,
+        request: CompositorRawLineRequest,
+    ) -> Option<CompositorRawLinePlan> {
+        let current_layer = self.layer(current_layer_index)?;
+        let default_layer = self.default_layer()?;
+        let row = request
+            .row
+            .checked_add(Integer::from(current_layer.origin_row))?;
+        let start_column = request
+            .columns
+            .start
+            .checked_add(Integer::from(current_layer.origin_column))?;
+        let end_column = request
+            .columns
+            .end
+            .checked_add(Integer::from(current_layer.origin_column))?;
+        let requested_clear_column = request
+            .clear_column
+            .checked_add(Integer::from(current_layer.origin_column))?;
+        let flags = if current_layer.is_default {
+            request.flags
+        } else {
+            request.flags & !LINE_FLAG_WRAP
+        };
+        let mut plan = CompositorRawLinePlan {
+            row,
+            columns: start_column..end_column,
+            clear_column: requested_clear_column,
+            requested_clear_column,
+            flags,
+            action: CompositorRawLineAction::Forward,
+        };
+
+        if row >= Integer::from(default_layer.grid.rows) {
+            plan.action = CompositorRawLineAction::DiscardRow;
+            return Some(plan);
+        }
+
+        let screen_columns = Integer::from(default_layer.grid.cols);
+        if plan.clear_column > screen_columns {
+            plan.clear_column = screen_columns;
+            if plan.columns.start >= screen_columns {
+                plan.action = CompositorRawLineAction::DiscardColumns;
+                return Some(plan);
+            }
+            plan.columns.end = plan.columns.end.min(screen_columns);
+        }
+
+        let covered = self.is_covered_above(CompositorCoveredAboveQuery {
+            rectangle: CompositorRect::try_new(
+                i32::try_from(plan.row).ok()?,
+                i32::try_from(plan.row).ok()?,
+                i32::try_from(plan.columns.start).ok()?,
+                i32::try_from(plan.clear_column).ok()?,
+            )?,
+            current_layer_index,
+            message_layer_index,
+            message_was_scrolled,
+        })?;
+        if plan.flags & LINE_FLAG_INVALID != 0 || covered || current_layer.blending {
+            plan.action = CompositorRawLineAction::Recompose;
+        }
+
+        Some(plan)
     }
 
     /// Selects the topmost layer and its uninterrupted output range.
@@ -1198,8 +1353,7 @@ pub unsafe extern "C" fn ui_comp_should_compose_scroll_row(
     GridRow::try_from_grid(&rust_grid, row).is_some_and(|row| row.is_valid_at(start_col))
 }
 
-/// Reports whether any compositor layer above the selected layer intersects a
-/// requested composed-screen rectangle.
+/// Plans translation, clipping, and composition for one raw-line event.
 ///
 /// # Safety
 ///
@@ -1207,17 +1361,23 @@ pub unsafe extern "C" fn ui_comp_should_compose_scroll_row(
 /// pointers. Every grid must be exclusively accessible and its buffers must
 /// satisfy the ownership and layout requirements of `ScreenGrid`.
 ///
-/// `message_grid` is used only for pointer identity and may be null.
+/// `current_grid` must identify one grid in `layer_grids`. `message_grid` is
+/// used only for pointer identity and may be null. `output` must point to
+/// writable, properly aligned storage for one `CCompositorRawLinePlan`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ui_comp_is_covered_above(
+pub unsafe extern "C" fn ui_comp_plan_raw_line(
     layer_grids: *const *mut CScreenGrid,
     layer_count: usize,
+    current_grid: *mut CScreenGrid,
     message_grid: *mut CScreenGrid,
-    request: CCompositorCoveredAboveRequest,
+    request: CCompositorRawLineRequest,
+    output: *mut CCompositorRawLinePlan,
 ) -> bool {
-    let Some(rectangle) =
-        CompositorRect::try_new(request.top, request.bottom, request.left, request.right)
-    else {
+    if current_grid.is_null() || output.is_null() {
+        return false;
+    }
+
+    let Ok(raw_line) = CompositorRawLineRequest::try_from(request) else {
         return false;
     };
 
@@ -1227,19 +1387,26 @@ pub unsafe extern "C" fn ui_comp_is_covered_above(
     else {
         return false;
     };
+    let Some(current_layer_index) = layer_guards.index_of(current_grid) else {
+        return false;
+    };
     let message_layer_index = layer_guards.index_of(message_grid);
     let Some(layers) = layer_guards.layer_stack() else {
         return false;
     };
 
-    layers
-        .is_covered_above(CompositorCoveredAboveQuery {
-            rectangle,
-            current_layer_index: request.current_layer_index,
-            message_layer_index,
-            message_was_scrolled: request.message_was_scrolled,
-        })
-        .unwrap_or(false)
+    let Some(plan) = layers.plan_raw_line(
+        current_layer_index,
+        message_layer_index,
+        request.message_was_scrolled,
+        raw_line,
+    ) else {
+        return false;
+    };
+
+    // SAFETY: The caller guarantees writable, aligned storage for one plan.
+    unsafe { output.write(plan.into()) };
+    true
 }
 
 /// Plans coordinate translation and recomposition for one grid scroll.
@@ -1323,6 +1490,11 @@ mod tests {
         grid.chars.copy_from_slice(characters);
         grid.attrs.copy_from_slice(attributes);
         grid
+    }
+
+    fn grid_with_size(rows: i32, columns: i32) -> ScreenGrid {
+        let mut line_buffer = LineBuffer::new(columns as usize);
+        ScreenGrid::new(rows, columns, true, &mut line_buffer)
     }
 
     fn compositor_layer(
@@ -1563,6 +1735,123 @@ mod tests {
             }),
             Some(true)
         );
+    }
+
+    #[test]
+    fn plans_forwarded_raw_line_in_composed_screen_coordinates() {
+        let default_grid = grid_with_size(5, 10);
+        let current_grid = grid_with_size(2, 5);
+        let mut current_layer = compositor_layer(&current_grid, 3, 5, 1, false);
+        current_layer.origin_row = 1;
+        let layers = CompositorLayerStack {
+            layers: vec![
+                compositor_layer(&default_grid, 0, 10, 0, false),
+                current_layer,
+            ],
+        };
+
+        let plan = layers
+            .plan_raw_line(
+                1,
+                None,
+                false,
+                CompositorRawLineRequest {
+                    row: 1,
+                    columns: 0..3,
+                    clear_column: 5,
+                    flags: LINE_FLAG_WRAP,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(
+            plan,
+            CompositorRawLinePlan {
+                row: 2,
+                columns: 3..6,
+                clear_column: 8,
+                requested_clear_column: 8,
+                flags: 0,
+                action: CompositorRawLineAction::Forward,
+            }
+        );
+    }
+
+    #[test]
+    fn plans_clipped_raw_line_recomposition() {
+        let default_grid = grid_with_size(5, 8);
+        let overlay_grid = grid_with_size(1, 1);
+        let mut overlay = compositor_layer(&overlay_grid, 6, 1, 1, false);
+        overlay.origin_row = 1;
+        let layers = CompositorLayerStack {
+            layers: vec![compositor_layer(&default_grid, 0, 8, 0, false), overlay],
+        };
+
+        let plan = layers
+            .plan_raw_line(
+                0,
+                None,
+                false,
+                CompositorRawLineRequest {
+                    row: 1,
+                    columns: 4..7,
+                    clear_column: 10,
+                    flags: LINE_FLAG_WRAP,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(
+            plan,
+            CompositorRawLinePlan {
+                row: 1,
+                columns: 4..7,
+                clear_column: 8,
+                requested_clear_column: 10,
+                flags: LINE_FLAG_WRAP,
+                action: CompositorRawLineAction::Recompose,
+            }
+        );
+    }
+
+    #[test]
+    fn discards_raw_lines_outside_the_default_grid() {
+        let default_grid = grid_with_size(5, 8);
+        let layers = CompositorLayerStack {
+            layers: vec![compositor_layer(&default_grid, 0, 8, 0, false)],
+        };
+
+        let row_plan = layers
+            .plan_raw_line(
+                0,
+                None,
+                false,
+                CompositorRawLineRequest {
+                    row: 5,
+                    columns: 0..3,
+                    clear_column: 4,
+                    flags: 0,
+                },
+            )
+            .unwrap();
+        let column_plan = layers
+            .plan_raw_line(
+                0,
+                None,
+                false,
+                CompositorRawLineRequest {
+                    row: 1,
+                    columns: 8..9,
+                    clear_column: 10,
+                    flags: 0,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(row_plan.action, CompositorRawLineAction::DiscardRow);
+        assert_eq!(column_plan.action, CompositorRawLineAction::DiscardColumns);
+        assert_eq!(column_plan.clear_column, 8);
+        assert_eq!(column_plan.requested_clear_column, 10);
     }
 
     #[test]
