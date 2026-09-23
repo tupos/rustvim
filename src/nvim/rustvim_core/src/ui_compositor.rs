@@ -16,6 +16,14 @@ use crate::{
 const LINE_FLAG_WRAP: libc::c_int = 1;
 const LINE_FLAG_INVALID: libc::c_int = 2;
 
+/// C callback used to recompose one half-open screen area.
+type CompositorAreaCallback = unsafe extern "C" fn(
+    start_row: Integer,
+    end_row: Integer,
+    start_column: Integer,
+    end_column: Integer,
+);
+
 unsafe extern "C" {
     fn ui_composed_call_raw_line(
         grid: Integer,
@@ -146,6 +154,13 @@ impl CompositorRect {
             && self.bottom >= other.top
             && self.top <= other.bottom
     }
+}
+
+/// Half-open bounds for recomposing part of the compositor screen.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CompositorRecomposeArea {
+    rows: Range<i32>,
+    columns: Range<i32>,
 }
 
 /// A half-open rectangular region in compositor coordinates.
@@ -557,6 +572,26 @@ impl<'grid> CompositorLayer<'grid> {
         CompositorRect::try_new(top, bottom, self.origin_column, right)
     }
 
+    /// Computes the existing compositor recomposition bounds for two layers.
+    ///
+    /// Empty or inverted bounds are retained because the C area renderer also
+    /// receives them and applies its own clipping and debug behavior.
+    fn recomposition_area_with(self, other: Self) -> Option<CompositorRecomposeArea> {
+        let bottom = self
+            .origin_row
+            .checked_add(self.grid.rows)?
+            .min(other.origin_row.checked_add(other.grid.rows)?);
+        let right = self
+            .origin_column
+            .checked_add(self.grid.cols)?
+            .min(other.origin_column.checked_add(other.grid.cols)?);
+
+        Some(CompositorRecomposeArea {
+            rows: self.origin_row.max(other.origin_row)..bottom,
+            columns: self.origin_column.max(other.origin_column)..right,
+        })
+    }
+
     /// Reports whether this layer participates in selection on `row`.
     fn is_visible_on_row(self, row: i32) -> bool {
         !self.disabled
@@ -647,6 +682,13 @@ enum CompositorLayerAdjustment {
 struct CompositorLayerMove {
     source_index: usize,
     target_index: usize,
+}
+
+/// One explicit raise and the areas exposed by crossing lower layers.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CompositorLayerRaisePlan {
+    movement: CompositorLayerMove,
+    recompose_areas: Vec<CompositorRecomposeArea>,
 }
 
 impl CompositorLayerMove {
@@ -756,6 +798,37 @@ impl<'grid> CompositorLayerStack<'grid> {
         Some(CompositorLayerMove {
             source_index: layer_index,
             target_index,
+        })
+    }
+
+    /// Plans an explicit upward move and recomposition of crossed layers.
+    fn plan_layer_raise(
+        &self,
+        layer_index: usize,
+        target_index: usize,
+    ) -> Option<CompositorLayerRaisePlan> {
+        let layer = self.layer(layer_index)?;
+        if layer.is_default || target_index < layer_index || target_index >= self.layers.len() {
+            return None;
+        }
+
+        let recompose_areas = if target_index == layer_index {
+            Vec::new()
+        } else {
+            self.layers
+                .get(layer_index + 1..=target_index)?
+                .iter()
+                .copied()
+                .map(|crossed_layer| layer.recomposition_area_with(crossed_layer))
+                .collect::<Option<Vec<_>>>()?
+        };
+
+        Some(CompositorLayerRaisePlan {
+            movement: CompositorLayerMove {
+                source_index: layer_index,
+                target_index,
+            },
+            recompose_areas,
         })
     }
 
@@ -1396,6 +1469,70 @@ pub unsafe extern "C" fn ui_comp_adjust_layer_order(
     layer_guards.write_cgrid_order(cgrids)
 }
 
+/// Raises one compositor layer and recomposes every crossed layer intersection.
+///
+/// Grid ownership is restored before `compose_area` is invoked.
+///
+/// # Safety
+///
+/// `layer_grids` must point to `layer_count` writable, distinct, non-null grid
+/// pointers. Every grid must be exclusively accessible and its buffers must
+/// satisfy the ownership and layout requirements of `ScreenGrid`.
+///
+/// `grid` must identify one grid in `layer_grids`, and `compose_area` must be
+/// a valid callback for the duration of this call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ui_comp_raise_layer(
+    layer_grids: *mut *mut CScreenGrid,
+    layer_count: usize,
+    grid: *mut CScreenGrid,
+    target_index: usize,
+    compose_area: Option<CompositorAreaCallback>,
+) -> bool {
+    if grid.is_null() {
+        return false;
+    }
+    let Some(compose_area) = compose_area else {
+        return false;
+    };
+
+    let plan = (|| {
+        // SAFETY: The caller satisfies the documented layer-array and grid
+        // ownership requirements.
+        let mut layer_guards =
+            unsafe { CompositorLayerGuards::try_take(layer_grids, layer_count) }?;
+        let layer_index = layer_guards.index_of(grid)?;
+        let plan = {
+            let layers = layer_guards.layer_stack()?;
+            layers.plan_layer_raise(layer_index, target_index)?
+        };
+        layer_guards.apply_layer_move(plan.movement)?;
+
+        // SAFETY: The caller guarantees that the pointer array is writable for
+        // `layer_count` elements for the duration of this synchronous call.
+        let cgrids = unsafe { slice::from_raw_parts_mut(layer_grids, layer_count) };
+        layer_guards.write_cgrid_order(cgrids).then_some(plan)
+    })();
+    let Some(plan) = plan else {
+        return false;
+    };
+
+    for area in plan.recompose_areas {
+        // SAFETY: The caller supplied a valid callback. The layer guards were
+        // dropped above, so all grid allocations are owned by C again.
+        unsafe {
+            compose_area(
+                Integer::from(area.rows.start),
+                Integer::from(area.rows.end),
+                Integer::from(area.columns.start),
+                Integer::from(area.columns.end),
+            );
+        }
+    }
+
+    true
+}
+
 /// Finds the topmost non-default compositor layer at one screen coordinate.
 ///
 /// Returns `usize::MAX` when no matching layer exists or the layer array is
@@ -1871,6 +2008,66 @@ mod tests {
                 target_index: 2,
             })
         );
+    }
+
+    #[test]
+    fn explicit_layer_raise_plans_every_crossed_layer_area() {
+        let default_grid = grid_with_size(6, 8);
+        let moving_grid = grid_with_size(3, 3);
+        let first_crossed_grid = grid_with_size(2, 2);
+        let second_crossed_grid = grid_with_size(2, 2);
+        let mut moving_layer = compositor_layer(&moving_grid, 1, 1, 1, false);
+        moving_layer.origin_row = 1;
+        let mut first_crossed_layer = compositor_layer(&first_crossed_grid, 0, 2, 2, false);
+        first_crossed_layer.origin_row = 2;
+        let mut second_crossed_layer = compositor_layer(&second_crossed_grid, 3, 2, 3, false);
+        second_crossed_layer.origin_row = 0;
+        let layers = CompositorLayerStack {
+            layers: vec![
+                compositor_layer(&default_grid, 0, 8, 0, false),
+                moving_layer,
+                first_crossed_layer,
+                second_crossed_layer,
+            ],
+        };
+
+        assert_eq!(
+            layers.plan_layer_raise(1, 3),
+            Some(CompositorLayerRaisePlan {
+                movement: CompositorLayerMove {
+                    source_index: 1,
+                    target_index: 3,
+                },
+                recompose_areas: vec![
+                    CompositorRecomposeArea {
+                        rows: 2..4,
+                        columns: 1..2,
+                    },
+                    CompositorRecomposeArea {
+                        rows: 1..2,
+                        columns: 3..4,
+                    },
+                ],
+            })
+        );
+    }
+
+    #[test]
+    fn explicit_layer_raise_rejects_invalid_movements() {
+        let default_grid = grid_with_size(1, 1);
+        let first_grid = grid_with_size(1, 1);
+        let second_grid = grid_with_size(1, 1);
+        let layers = CompositorLayerStack {
+            layers: vec![
+                compositor_layer(&default_grid, 0, 1, 0, false),
+                compositor_layer(&first_grid, 0, 1, 1, false),
+                compositor_layer(&second_grid, 0, 1, 2, false),
+            ],
+        };
+
+        assert_eq!(layers.plan_layer_raise(0, 1), None);
+        assert_eq!(layers.plan_layer_raise(2, 1), None);
+        assert_eq!(layers.plan_layer_raise(1, 3), None);
     }
 
     #[test]

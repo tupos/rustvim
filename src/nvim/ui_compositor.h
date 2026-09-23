@@ -62,12 +62,20 @@ typedef struct {
   bool recompose;
 } CompositorScrollPlan;
 
+typedef void (*CompositorAreaCallback)(
+  Integer start_row, Integer end_row, Integer start_column, Integer end_column);
+
 extern bool ui_comp_resize_buffer(Integer width);
 extern bool ui_comp_release_buffer(void);
 
 extern bool ui_comp_adjust_layer_order(
   ScreenGrid **layer_grids, size_t layer_count,
   size_t layer_index, bool raise);
+
+extern bool ui_comp_raise_layer(
+  ScreenGrid **layer_grids, size_t layer_count,
+  ScreenGrid *grid, size_t target_index,
+  CompositorAreaCallback compose_area);
 
 extern size_t ui_comp_find_layer_at_coord(
   ScreenGrid *const *layer_grids, size_t layer_count,
