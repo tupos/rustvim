@@ -50,6 +50,29 @@ pub struct CCompositorGridPlacementRequest {
     should_draw: bool,
 }
 
+/// C representation of one compositor cursor request.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct CCompositorCursorRequest {
+    grid_handle: libc::c_int,
+    row: libc::c_int,
+    column: libc::c_int,
+    screen_rows: libc::c_int,
+    screen_columns: libc::c_int,
+}
+
+/// C representation of one planned compositor cursor update.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct CCompositorCursorPlan {
+    layer_index: usize,
+    row: libc::c_int,
+    column: libc::c_int,
+    raise_to: usize,
+    should_raise: bool,
+    emit: bool,
+}
+
 /// Result of composing one foreground segment over its background.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct SegmentComposition {
@@ -180,6 +203,52 @@ struct CompositorRecomposeArea {
 struct CompositorSize {
     height: i32,
     width: i32,
+}
+
+/// Validated native inputs for positioning the composed cursor.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CompositorCursorRequest {
+    grid_handle: i32,
+    local_position: CompositorPoint,
+    screen_size: CompositorSize,
+}
+
+impl From<CCompositorCursorRequest> for CompositorCursorRequest {
+    fn from(request: CCompositorCursorRequest) -> Self {
+        Self {
+            grid_handle: request.grid_handle,
+            local_position: CompositorPoint {
+                row: request.row,
+                column: request.column,
+            },
+            screen_size: CompositorSize {
+                height: request.screen_rows,
+                width: request.screen_columns,
+            },
+        }
+    }
+}
+
+/// Selected layer and composed-screen cursor action.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CompositorCursorPlan {
+    layer_index: usize,
+    screen_position: CompositorPoint,
+    raise_to: Option<usize>,
+    emit: bool,
+}
+
+impl From<CompositorCursorPlan> for CCompositorCursorPlan {
+    fn from(plan: CompositorCursorPlan) -> Self {
+        Self {
+            layer_index: plan.layer_index,
+            row: plan.screen_position.row,
+            column: plan.screen_position.column,
+            raise_to: plan.raise_to.unwrap_or(plan.layer_index),
+            should_raise: plan.raise_to.is_some(),
+            emit: plan.emit,
+        }
+    }
 }
 
 /// Requested position and size of one compositor grid.
@@ -954,6 +1023,40 @@ impl<'grid> CompositorLayerStack<'grid> {
         }
 
         Some(insertion_index)
+    }
+
+    /// Selects a grid and plans its composed-screen cursor update.
+    fn plan_cursor(&self, request: CompositorCursorRequest) -> Option<CompositorCursorPlan> {
+        let layer_index = self
+            .layers
+            .iter()
+            .position(|layer| layer.grid.handle() == request.grid_handle)?;
+        let layer = self.layer(layer_index)?;
+        let screen_position = CompositorPoint {
+            row: layer.origin_row.checked_add(request.local_position.row)?,
+            column: layer
+                .origin_column
+                .checked_add(request.local_position.column)?,
+        };
+
+        let raise_to = if layer.is_default {
+            None
+        } else {
+            let mut target_index = self.layers.len().checked_sub(1)?;
+            while target_index > 1 && self.layer(target_index)?.z_index > layer.z_index {
+                target_index -= 1;
+            }
+            (layer_index < target_index).then_some(target_index)
+        };
+        let emit = screen_position.column < request.screen_size.width
+            && screen_position.row < request.screen_size.height;
+
+        Some(CompositorCursorPlan {
+            layer_index,
+            screen_position,
+            raise_to,
+            emit,
+        })
     }
 
     /// Finds the topmost non-default layer containing one screen cell.
@@ -1886,6 +1989,48 @@ pub unsafe extern "C" fn ui_comp_place_new_grid(
     true
 }
 
+/// Plans selecting, positioning, and optionally raising a cursor grid.
+///
+/// The grid handle and C layer array are converted into native Rust state at
+/// this boundary. Every grid is restored before this function returns.
+///
+/// # Safety
+///
+/// `layer_grids` must point to `layer_count` readable, distinct, non-null grid
+/// pointers. Every grid must be exclusively accessible and its buffers must
+/// satisfy the ownership and layout requirements of `ScreenGrid`.
+///
+/// `output` must point to writable, properly aligned storage for one
+/// `CCompositorCursorPlan` and must not overlap the layer array or any grid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ui_comp_plan_cursor(
+    layer_grids: *const *mut CScreenGrid,
+    layer_count: usize,
+    request: CCompositorCursorRequest,
+    output: *mut CCompositorCursorPlan,
+) -> bool {
+    if output.is_null() {
+        return false;
+    }
+
+    // SAFETY: The caller satisfies the documented layer-array and grid
+    // ownership requirements.
+    let Some(layer_guards) = (unsafe { CompositorLayerGuards::try_take(layer_grids, layer_count) })
+    else {
+        return false;
+    };
+    let Some(layers) = layer_guards.layer_stack() else {
+        return false;
+    };
+    let Some(plan) = layers.plan_cursor(request.into()) else {
+        return false;
+    };
+
+    // SAFETY: The caller provides valid, non-overlapping output storage.
+    unsafe { output.write(plan.into()) };
+    true
+}
+
 /// Adjusts one layer's position after its z-index changes.
 ///
 /// Every temporarily owned grid is restored before this function returns.
@@ -2610,6 +2755,56 @@ mod tests {
         assert_eq!(layers.plan_layer_insertion(10, Some(1), false), Some(1));
         assert_eq!(layers.plan_layer_insertion(30, Some(1), true), Some(3));
         assert_eq!(layers.plan_layer_insertion(-1, None, true), None);
+    }
+
+    #[test]
+    fn cursor_planning_selects_translates_and_raises_a_grid() {
+        let default_grid = grid_with_size(10, 12);
+        let mut selected_grid = grid_with_size(2, 2);
+        selected_grid.handle = 7;
+        let upper_grid = grid_with_size(2, 2);
+        let mut selected_layer = compositor_layer(&selected_grid, 3, 2, 1, false);
+        selected_layer.origin_row = 2;
+        selected_layer.z_index = 20;
+        let mut upper_layer = compositor_layer(&upper_grid, 0, 2, 2, false);
+        upper_layer.z_index = 10;
+        let layers = CompositorLayerStack {
+            layers: vec![
+                compositor_layer(&default_grid, 0, 12, 0, false),
+                selected_layer,
+                upper_layer,
+            ],
+        };
+
+        assert_eq!(
+            layers.plan_cursor(CompositorCursorRequest {
+                grid_handle: 7,
+                local_position: CompositorPoint { row: 1, column: 2 },
+                screen_size: CompositorSize {
+                    height: 10,
+                    width: 12,
+                },
+            }),
+            Some(CompositorCursorPlan {
+                layer_index: 1,
+                screen_position: CompositorPoint { row: 3, column: 5 },
+                raise_to: Some(2),
+                emit: true,
+            })
+        );
+        assert_eq!(
+            layers
+                .plan_cursor(CompositorCursorRequest {
+                    grid_handle: 7,
+                    local_position: CompositorPoint { row: 10, column: 2 },
+                    screen_size: CompositorSize {
+                        height: 10,
+                        width: 12,
+                    },
+                })
+                .map(|plan| plan.emit),
+            Some(false)
+        );
     }
 
     #[test]

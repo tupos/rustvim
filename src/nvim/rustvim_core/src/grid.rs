@@ -313,6 +313,11 @@ impl ScreenGrid {
         grid
     }
 
+    /// Returns the identifier used by UI grid events.
+    pub(crate) fn handle(&self) -> i32 {
+        self.handle
+    }
+
     /// Returns whether this grid blends with the default-grid background.
     pub(crate) fn blends_with_background(&self) -> bool {
         self.blending

@@ -200,32 +200,32 @@ void ui_comp_raise_grid(ScreenGrid *grid, size_t new_index)
 
 void ui_comp_grid_cursor_goto(Integer grid_handle, Integer r, Integer c)
 {
-  if (!ui_comp_set_grid((int)grid_handle)) {
+  CompositorCursorRequest request = {
+    .grid_handle = (int)grid_handle,
+    .row = (int)r,
+    .column = (int)c,
+    .screen_rows = default_grid.rows,
+    .screen_columns = default_grid.cols,
+  };
+  CompositorCursorPlan plan;
+  if (!ui_comp_plan_cursor(layers.items, layers.size, request, &plan)) {
     return;
   }
-  int cursor_row = curgrid->comp_row + (int)r;
-  int cursor_col = curgrid->comp_col + (int)c;
+
+  curgrid = kv_A(layers, plan.layer_index);
 
   // TODO(bfredl): maybe not the best time to do this, for efficiency we
   // should configure all grids before entering win_update()
-  if (curgrid != &default_grid) {
-    size_t new_index = kv_size(layers) - 1;
-
-    while (new_index > 1 && kv_A(layers, new_index)->zindex > curgrid->zindex) {
-      new_index--;
-    }
-
-    if (curgrid->comp_index < new_index) {
-      ui_comp_raise_grid(curgrid, new_index);
-    }
+  if (plan.should_raise) {
+    ui_comp_raise_grid(curgrid, plan.raise_to);
   }
 
-  if (cursor_col >= default_grid.cols || cursor_row >= default_grid.rows) {
+  if (!plan.emit) {
     // TODO(bfredl): this happens with 'writedelay', refactor?
     // abort();
     return;
   }
-  ui_composed_call_grid_cursor_goto(1, cursor_row, cursor_col);
+  ui_composed_call_grid_cursor_goto(1, plan.row, plan.column);
 }
 
 ScreenGrid *ui_comp_mouse_focus(int row, int col)

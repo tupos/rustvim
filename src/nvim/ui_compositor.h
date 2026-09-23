@@ -18,6 +18,23 @@ typedef struct {
 } CompositorGridPlacementRequest;
 
 typedef struct {
+  int grid_handle;
+  int row;
+  int column;
+  int screen_rows;
+  int screen_columns;
+} CompositorCursorRequest;
+
+typedef struct {
+  size_t layer_index;
+  int row;
+  int column;
+  size_t raise_to;
+  bool should_raise;
+  bool emit;
+} CompositorCursorPlan;
+
+typedef struct {
   Integer row;
   Integer start_col;
   Integer end_col;
@@ -87,6 +104,10 @@ extern bool ui_comp_place_new_grid(
   ScreenGrid *grid, ScreenGrid *current_window_grid,
   CompositorGridPlacementRequest request, bool on_top,
   CompositorAreaCallback compose_area);
+
+extern bool ui_comp_plan_cursor(
+  ScreenGrid *const *layer_grids, size_t layer_count,
+  CompositorCursorRequest request, CompositorCursorPlan *output);
 
 extern bool ui_comp_adjust_layer_order(
   ScreenGrid **layer_grids, size_t layer_count,
