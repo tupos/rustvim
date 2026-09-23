@@ -39,12 +39,35 @@ typedef struct {
   Integer start_col;
   Integer end_col;
   LineFlags flags;
-  int message_separator_row;
-  schar_T message_separator_character;
   sattr_T message_separator_attribute;
   int screen_columns;
   bool abort_on_invalid;
 } CompositorLineRequest;
+
+typedef struct {
+  Integer row;
+  schar_T separator_character;
+  int screen_rows;
+  int screen_columns;
+  int default_grid_columns;
+  bool scrolled;
+  bool has_separator_character;
+  bool should_draw;
+} CompositorMessagePositionRequest;
+
+typedef struct {
+  Integer scroll_top;
+  Integer scroll_bottom;
+  Integer scroll_left;
+  Integer scroll_right;
+  Integer scroll_rows;
+  Integer recompose_start_row;
+  Integer recompose_end_row;
+  Integer recompose_start_column;
+  Integer recompose_end_column;
+  bool scroll;
+  bool recompose;
+} CompositorMessagePositionPlan;
 
 typedef struct {
   int grid_handle;
@@ -53,7 +76,6 @@ typedef struct {
   Integer end_col;
   Integer clear_col;
   LineFlags flags;
-  bool message_was_scrolled;
 } CompositorRawLineRequest;
 
 typedef struct {
@@ -134,6 +156,12 @@ extern bool ui_comp_compose_line(
   ScreenGrid *const *layer_grids, size_t layer_count,
   ScreenGrid *message_grid, CompositorLineRequest request);
 
+extern void ui_comp_hide_message_separator(void);
+
+extern bool ui_comp_plan_message_position(
+  ScreenGrid *message_grid, CompositorMessagePositionRequest request,
+  CompositorMessagePositionPlan *output);
+
 extern bool ui_comp_emit_clear_line(
   Integer row, Integer start_col, Integer end_col, sattr_T attribute);
 
@@ -147,7 +175,7 @@ extern bool ui_comp_plan_raw_line(
 
 extern bool ui_comp_plan_scroll(
   ScreenGrid *const *layer_grids, size_t layer_count,
-  ScreenGrid *message_grid, bool message_was_scrolled,
+  ScreenGrid *message_grid,
   CompositorScrollRequest request, CompositorScrollPlan *output);
 
 #include "ui_compositor.h.generated.h"

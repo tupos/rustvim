@@ -37,11 +37,6 @@ static int chk_width = 0, chk_height = 0;
 #endif
 
 static bool valid_screen = true;
-static int msg_current_row = INT_MAX;
-static bool msg_was_scrolled = false;
-
-static int msg_sep_row = -1;
-static schar_T msg_sep_char = schar_from_ascii(' ');
 
 static int dbghl_normal, dbghl_clear, dbghl_composed, dbghl_recompose;
 
@@ -255,10 +250,7 @@ static void compose_line(Integer row, Integer startcol, Integer endcol, LineFlag
     .start_col = startcol,
     .end_col = endcol,
     .flags = flags,
-    .message_separator_row = msg_sep_row,
-    .message_separator_character = msg_sep_char,
-    .message_separator_attribute =
-      row == msg_sep_row ? (sattr_T)HL_ATTR(HLF_MSGSEP) : 0,
+    .message_separator_attribute = (sattr_T)HL_ATTR(HLF_MSGSEP),
     .screen_columns = Columns,
     .abort_on_invalid = (rdb_flags & kOptRdbFlagInvalid) != 0,
   };
@@ -344,7 +336,6 @@ void ui_comp_raw_line(Integer grid, Integer row, Integer startcol, Integer endco
     .end_col = endcol,
     .clear_col = clearcol,
     .flags = flags,
-    .message_was_scrolled = msg_was_scrolled,
   };
   CompositorRawLinePlan plan;
   bool planned = ui_comp_plan_raw_line(
@@ -400,7 +391,7 @@ bool ui_comp_set_screen_valid(bool valid)
   bool old_val = valid_screen;
   valid_screen = valid;
   if (!valid) {
-    msg_sep_row = -1;
+    ui_comp_hide_message_separator();
   }
   return old_val;
 }
@@ -408,37 +399,35 @@ bool ui_comp_set_screen_valid(bool valid)
 void ui_comp_msg_set_pos(Integer grid, Integer row, Boolean scrolled, String sep_char,
                          Integer zindex, Integer compindex)
 {
-  msg_grid.pending_comp_index_update = true;
-  msg_grid.comp_row = (int)row;
-  if (scrolled && row > 0) {
-    msg_sep_row = (int)row - 1;
-    if (sep_char.data) {
-      msg_sep_char = schar_from_buf(sep_char.data, sep_char.size);
-    }
-  } else {
-    msg_sep_row = -1;
+  bool has_separator_character = sep_char.data != NULL;
+  CompositorMessagePositionRequest request = {
+    .row = row,
+    .separator_character =
+      has_separator_character ? schar_from_buf(sep_char.data, sep_char.size) : 0,
+    .screen_rows = Rows,
+    .screen_columns = Columns,
+    .default_grid_columns = default_grid.cols,
+    .scrolled = scrolled,
+    .has_separator_character = has_separator_character,
+    .should_draw = ui_comp_should_draw(),
+  };
+  CompositorMessagePositionPlan plan;
+  bool planned = ui_comp_plan_message_position(&msg_grid, request, &plan);
+  assert(planned);
+  if (!planned) {
+    return;
   }
 
-  if (row > msg_current_row && ui_comp_should_draw()) {
-    compose_area(MAX(msg_current_row - 1, 0), row, 0, default_grid.cols);
-  } else if (row < msg_current_row && ui_comp_should_draw()
-             && (msg_current_row < Rows || (scrolled && !msg_was_scrolled))) {
-    int delta = msg_current_row - (int)row;
-    if (msg_grid.blending) {
-      int first_row = MAX((int)row - (scrolled ? 1 : 0), 0);
-      compose_area(first_row, Rows - delta, 0, Columns);
-    } else {
-      // scroll separator together with message text
-      int first_row = MAX((int)row - (msg_was_scrolled ? 1 : 0), 0);
-      ui_composed_call_grid_scroll(1, first_row, Rows, 0, Columns, delta, 0);
-      if (scrolled && !msg_was_scrolled && row > 0) {
-        compose_area(row - 1, row, 0, Columns);
-      }
-    }
+  if (plan.scroll) {
+    ui_composed_call_grid_scroll(
+      1, plan.scroll_top, plan.scroll_bottom,
+      plan.scroll_left, plan.scroll_right, plan.scroll_rows, 0);
   }
-
-  msg_current_row = (int)row;
-  msg_was_scrolled = scrolled;
+  if (plan.recompose) {
+    compose_area(
+      plan.recompose_start_row, plan.recompose_end_row,
+      plan.recompose_start_column, plan.recompose_end_column);
+  }
 }
 
 void ui_comp_grid_scroll(Integer grid, Integer top, Integer bot, Integer left, Integer right,
@@ -458,7 +447,7 @@ void ui_comp_grid_scroll(Integer grid, Integer top, Integer bot, Integer left, I
   };
   CompositorScrollPlan plan;
   bool planned = ui_comp_plan_scroll(
-    layers.items, layers.size, &msg_grid, msg_was_scrolled, request, &plan);
+    layers.items, layers.size, &msg_grid, request, &plan);
   assert(planned);
   if (!planned) {
     return;

@@ -94,11 +94,40 @@ pub struct CCompositorLineRequest {
     start_col: Integer,
     end_col: Integer,
     flags: libc::c_int,
-    message_separator_row: libc::c_int,
-    message_separator_character: VimSCharT,
     message_separator_attribute: VimSAttrT,
     screen_columns: libc::c_int,
     abort_on_invalid: bool,
+}
+
+/// C representation of one message-grid position update.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct CCompositorMessagePositionRequest {
+    row: Integer,
+    separator_character: VimSCharT,
+    screen_rows: libc::c_int,
+    screen_columns: libc::c_int,
+    default_grid_columns: libc::c_int,
+    scrolled: bool,
+    has_separator_character: bool,
+    should_draw: bool,
+}
+
+/// C representation of the effects of one message-grid position update.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct CCompositorMessagePositionPlan {
+    scroll_top: Integer,
+    scroll_bottom: Integer,
+    scroll_left: Integer,
+    scroll_right: Integer,
+    scroll_rows: Integer,
+    recompose_start_row: Integer,
+    recompose_end_row: Integer,
+    recompose_start_column: Integer,
+    recompose_end_column: Integer,
+    scroll: bool,
+    recompose: bool,
 }
 
 /// C representation of one raw-line planning request.
@@ -111,7 +140,6 @@ pub struct CCompositorRawLineRequest {
     end_col: Integer,
     clear_col: Integer,
     flags: libc::c_int,
-    message_was_scrolled: bool,
 }
 
 /// C representation of a validated raw-line plan.
@@ -369,6 +397,223 @@ impl CompositorRegion {
             self.columns.start,
             self.columns.end,
         )
+    }
+}
+
+/// Validated native inputs for positioning the message grid.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CompositorMessagePositionRequest {
+    row: i32,
+    separator_character: Option<VimSCharT>,
+    screen_size: CompositorSize,
+    default_grid_columns: i32,
+    scrolled: bool,
+    should_draw: bool,
+}
+
+impl TryFrom<CCompositorMessagePositionRequest> for CompositorMessagePositionRequest {
+    type Error = ();
+
+    fn try_from(request: CCompositorMessagePositionRequest) -> Result<Self, Self::Error> {
+        let row = i32::try_from(request.row).map_err(|_| ())?;
+        if request.screen_rows < 0 || request.screen_columns < 0 || request.default_grid_columns < 0
+        {
+            return Err(());
+        }
+
+        Ok(Self {
+            row,
+            separator_character: request
+                .has_separator_character
+                .then_some(request.separator_character),
+            screen_size: CompositorSize {
+                height: request.screen_rows,
+                width: request.screen_columns,
+            },
+            default_grid_columns: request.default_grid_columns,
+            scrolled: request.scrolled,
+            should_draw: request.should_draw,
+        })
+    }
+}
+
+/// One message-grid scroll emitted directly to the composed UI.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct MessageGridScroll {
+    region: CompositorRegion,
+    row_delta: i32,
+}
+
+/// Effects required after repositioning the message grid.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct CompositorMessagePositionPlan {
+    scroll: Option<MessageGridScroll>,
+    recompose: Option<CompositorRecomposeArea>,
+}
+
+impl From<CompositorMessagePositionPlan> for CCompositorMessagePositionPlan {
+    fn from(plan: CompositorMessagePositionPlan) -> Self {
+        let scroll = plan.scroll.is_some();
+        let (scroll_top, scroll_bottom, scroll_left, scroll_right, scroll_rows) = match plan.scroll
+        {
+            Some(scroll) => (
+                Integer::from(scroll.region.rows.start),
+                Integer::from(scroll.region.rows.end),
+                Integer::from(scroll.region.columns.start),
+                Integer::from(scroll.region.columns.end),
+                Integer::from(scroll.row_delta),
+            ),
+            None => (0, 0, 0, 0, 0),
+        };
+        let recompose = plan.recompose.is_some();
+        let (recompose_start_row, recompose_end_row, recompose_start_column, recompose_end_column) =
+            match plan.recompose {
+                Some(area) => (
+                    Integer::from(area.rows.start),
+                    Integer::from(area.rows.end),
+                    Integer::from(area.columns.start),
+                    Integer::from(area.columns.end),
+                ),
+                None => (0, 0, 0, 0),
+            };
+
+        Self {
+            scroll_top,
+            scroll_bottom,
+            scroll_left,
+            scroll_right,
+            scroll_rows,
+            recompose_start_row,
+            recompose_end_row,
+            recompose_start_column,
+            recompose_end_column,
+            scroll,
+            recompose,
+        }
+    }
+}
+
+/// Message-grid placement and separator state owned by the compositor.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct MessageCompositorState {
+    current_row: i32,
+    was_scrolled: bool,
+    separator_row: Option<i32>,
+    separator_character: VimSCharT,
+}
+
+impl MessageCompositorState {
+    /// Creates the initial state used before the first message-grid event.
+    const fn new() -> Self {
+        Self {
+            current_row: i32::MAX,
+            was_scrolled: false,
+            separator_row: None,
+            separator_character: VimSCharT::from_ne_bytes([b' ', 0, 0, 0]),
+        }
+    }
+
+    /// Plans the redraw effects without changing the current state.
+    fn plan_redraw(
+        &self,
+        request: CompositorMessagePositionRequest,
+        message_grid_blends: bool,
+    ) -> Option<CompositorMessagePositionPlan> {
+        if !request.should_draw {
+            return Some(CompositorMessagePositionPlan::default());
+        }
+
+        if request.row > self.current_row {
+            return Some(CompositorMessagePositionPlan {
+                scroll: None,
+                recompose: Some(CompositorRecomposeArea {
+                    rows: self.current_row.saturating_sub(1).max(0)..request.row,
+                    columns: 0..request.default_grid_columns,
+                }),
+            });
+        }
+
+        if request.row >= self.current_row
+            || !(self.current_row < request.screen_size.height
+                || (request.scrolled && !self.was_scrolled))
+        {
+            return Some(CompositorMessagePositionPlan::default());
+        }
+
+        let row_delta = self.current_row.checked_sub(request.row)?;
+        if message_grid_blends {
+            let separator_offset = if request.scrolled { 1 } else { 0 };
+            return Some(CompositorMessagePositionPlan {
+                scroll: None,
+                recompose: Some(CompositorRecomposeArea {
+                    rows: request.row.saturating_sub(separator_offset).max(0)
+                        ..request.screen_size.height.checked_sub(row_delta)?,
+                    columns: 0..request.screen_size.width,
+                }),
+            });
+        }
+
+        let previous_separator_offset = if self.was_scrolled { 1 } else { 0 };
+        let scroll = MessageGridScroll {
+            region: CompositorRegion::try_new(
+                request.row.saturating_sub(previous_separator_offset).max(0)
+                    ..request.screen_size.height,
+                0..request.screen_size.width,
+            )?,
+            row_delta,
+        };
+        let recompose = if request.scrolled && !self.was_scrolled && request.row > 0 {
+            Some(CompositorRecomposeArea {
+                rows: request.row.checked_sub(1)?..request.row,
+                columns: 0..request.screen_size.width,
+            })
+        } else {
+            None
+        };
+
+        Some(CompositorMessagePositionPlan {
+            scroll: Some(scroll),
+            recompose,
+        })
+    }
+
+    /// Updates the message grid and records its new compositor state.
+    fn update_position(
+        &mut self,
+        message_grid: &mut ScreenGrid,
+        request: CompositorMessagePositionRequest,
+    ) -> Option<CompositorMessagePositionPlan> {
+        let separator_row = if request.scrolled && request.row > 0 {
+            Some(request.row.checked_sub(1)?)
+        } else {
+            None
+        };
+        let plan = self.plan_redraw(request, message_grid.blends_with_background())?;
+
+        message_grid.mark_compositor_index_for_update();
+        let (_, column) = message_grid.compositor_position();
+        message_grid.set_compositor_position(request.row, column);
+
+        if separator_row.is_some()
+            && let Some(character) = request.separator_character
+        {
+            self.separator_character = character;
+        }
+        self.separator_row = separator_row;
+        self.current_row = request.row;
+        self.was_scrolled = request.scrolled;
+
+        Some(plan)
+    }
+
+    /// Returns the active separator character for `row`.
+    fn separator_character_at(self, row: i32) -> Option<VimSCharT> {
+        (self.separator_row == Some(row)).then_some(self.separator_character)
+    }
+
+    /// Hides the separator while preserving its last configured character.
+    fn hide_separator(&mut self) {
+        self.separator_row = None;
     }
 }
 
@@ -1786,6 +2031,16 @@ impl CompositorBuffer {
     }
 }
 
+static MESSAGE_COMPOSITOR_STATE: Mutex<MessageCompositorState> =
+    Mutex::new(MessageCompositorState::new());
+
+/// Acquires exclusive access to the process-global message compositor state.
+fn lock_message_compositor_state() -> MutexGuard<'static, MessageCompositorState> {
+    MESSAGE_COMPOSITOR_STATE
+        .try_lock()
+        .expect("message compositor state is already borrowed")
+}
+
 static COMPOSITOR_BUFFER: Mutex<CompositorBuffer> = Mutex::new(CompositorBuffer::new());
 
 /// Acquires exclusive access to the process-global compositor buffer.
@@ -1806,6 +2061,53 @@ pub extern "C" fn ui_comp_resize_buffer(width: Integer) -> bool {
 #[unsafe(no_mangle)]
 pub extern "C" fn ui_comp_release_buffer() -> bool {
     lock_compositor_buffer().release()
+}
+
+/// Hides the message separator after the composed screen is invalidated.
+#[unsafe(no_mangle)]
+pub extern "C" fn ui_comp_hide_message_separator() {
+    lock_message_compositor_state().hide_separator();
+}
+
+/// Updates message-grid state and plans its scrolling and recomposition.
+///
+/// The returned plan contains only owned scalar data. The message grid is
+/// restored before C executes any planned compositor callbacks.
+///
+/// # Safety
+///
+/// `message_grid` must point to a valid, exclusively accessible `CScreenGrid`
+/// whose buffers satisfy the ownership and layout requirements of
+/// `ScreenGrid`.
+///
+/// `output` must point to writable, properly aligned storage for one
+/// `CCompositorMessagePositionPlan` and must not overlap `message_grid`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ui_comp_plan_message_position(
+    message_grid: *mut CScreenGrid,
+    request: CCompositorMessagePositionRequest,
+    output: *mut CCompositorMessagePositionPlan,
+) -> bool {
+    if message_grid.is_null() || output.is_null() {
+        return false;
+    }
+    let Ok(request) = CompositorMessagePositionRequest::try_from(request) else {
+        return false;
+    };
+
+    let plan = {
+        // SAFETY: The caller transfers exclusive ownership of the message-grid
+        // buffers into the guard for the duration of this operation.
+        let mut message_grid = unsafe { ScreenGridGuard::take(message_grid) };
+        lock_message_compositor_state().update_position(&mut message_grid, request)
+    };
+    let Some(plan) = plan else {
+        return false;
+    };
+
+    // SAFETY: The caller provides valid, non-overlapping output storage.
+    unsafe { output.write(plan.into()) };
+    true
 }
 
 /// Repositions and resizes one existing compositor grid.
@@ -2314,10 +2616,12 @@ pub unsafe extern "C" fn ui_comp_compose_line(
         return false;
     };
 
-    let separator_active = row == request.message_separator_row;
+    let separator_character = lock_message_compositor_state().separator_character_at(row);
+    let separator_active = separator_character.is_some();
     if separator_active && message_grid.is_null() {
         return false;
     }
+
     let mut compositor = lock_compositor_buffer();
     let submission = (|| {
         // SAFETY: The caller satisfies the documented layer-array and grid
@@ -2345,7 +2649,7 @@ pub unsafe extern "C" fn ui_comp_compose_line(
                     message_grid,
                     std::ptr::eq(message_grid, layer_guards.grid(0)?),
                 )?,
-                character: request.message_separator_character,
+                character: separator_character?,
                 attribute: request.message_separator_attribute,
             })
         } else {
@@ -2487,6 +2791,7 @@ pub unsafe extern "C" fn ui_comp_plan_raw_line(
         return false;
     };
 
+    let message_was_scrolled = lock_message_compositor_state().was_scrolled;
     // SAFETY: The caller satisfies the documented layer-array and grid
     // ownership requirements.
     let Some(layer_guards) = (unsafe { CompositorLayerGuards::try_take(layer_grids, layer_count) })
@@ -2508,7 +2813,7 @@ pub unsafe extern "C" fn ui_comp_plan_raw_line(
     let Some(plan) = layers.plan_raw_line(
         current_layer_index,
         message_layer_index,
-        request.message_was_scrolled,
+        message_was_scrolled,
         raw_line,
     ) else {
         return false;
@@ -2540,7 +2845,6 @@ pub unsafe extern "C" fn ui_comp_plan_scroll(
     layer_grids: *const *mut CScreenGrid,
     layer_count: usize,
     message_grid: *mut CScreenGrid,
-    message_was_scrolled: bool,
     request: CCompositorScrollRequest,
     output: *mut CCompositorScrollPlan,
 ) -> bool {
@@ -2553,6 +2857,7 @@ pub unsafe extern "C" fn ui_comp_plan_scroll(
         return false;
     };
 
+    let message_was_scrolled = lock_message_compositor_state().was_scrolled;
     // SAFETY: The caller satisfies the documented layer-array and grid
     // ownership requirements.
     let Some(layer_guards) = (unsafe { CompositorLayerGuards::try_take(layer_grids, layer_count) })
@@ -2635,6 +2940,102 @@ mod tests {
             accepts_mouse_input: true,
             is_default: layer_index == 0,
         }
+    }
+
+    fn message_position_request(row: i32, scrolled: bool) -> CompositorMessagePositionRequest {
+        CompositorMessagePositionRequest {
+            row,
+            separator_character: Some(schar_from_ascii('-')),
+            screen_size: CompositorSize {
+                height: 10,
+                width: 20,
+            },
+            default_grid_columns: 18,
+            scrolled,
+            should_draw: true,
+        }
+    }
+
+    #[test]
+    fn moving_message_grid_down_recomposes_the_exposed_rows() {
+        let mut state = MessageCompositorState::new();
+        let mut message_grid = grid_with_size(10, 20);
+        let mut initial = message_position_request(5, false);
+        initial.should_draw = false;
+        assert_eq!(
+            state.update_position(&mut message_grid, initial),
+            Some(CompositorMessagePositionPlan::default())
+        );
+
+        let plan = state
+            .update_position(&mut message_grid, message_position_request(7, false))
+            .unwrap();
+
+        assert_eq!(
+            plan,
+            CompositorMessagePositionPlan {
+                scroll: None,
+                recompose: Some(CompositorRecomposeArea {
+                    rows: 4..7,
+                    columns: 0..18,
+                }),
+            }
+        );
+        assert_eq!(message_grid.compositor_position(), (7, 0));
+    }
+
+    #[test]
+    fn moving_message_grid_up_scrolls_text_and_recomposes_a_new_separator() {
+        let mut state = MessageCompositorState::new();
+        let mut message_grid = grid_with_size(10, 20);
+        let mut initial = message_position_request(5, false);
+        initial.should_draw = false;
+        state.update_position(&mut message_grid, initial).unwrap();
+
+        let plan = state
+            .update_position(&mut message_grid, message_position_request(2, true))
+            .unwrap();
+
+        assert_eq!(
+            plan,
+            CompositorMessagePositionPlan {
+                scroll: Some(MessageGridScroll {
+                    region: CompositorRegion::try_new(2..10, 0..20).unwrap(),
+                    row_delta: 3,
+                }),
+                recompose: Some(CompositorRecomposeArea {
+                    rows: 1..2,
+                    columns: 0..20,
+                }),
+            }
+        );
+        assert_eq!(state.separator_character_at(1), Some(schar_from_ascii('-')));
+        state.hide_separator();
+        assert_eq!(state.separator_character_at(1), None);
+    }
+
+    #[test]
+    fn moving_a_blended_message_grid_up_recomposes_instead_of_scrolling() {
+        let mut state = MessageCompositorState::new();
+        let mut message_grid = grid_with_size(10, 20);
+        let mut initial = message_position_request(5, false);
+        initial.should_draw = false;
+        state.update_position(&mut message_grid, initial).unwrap();
+
+        let plan = state
+            .plan_redraw(message_position_request(2, true), true)
+            .unwrap();
+
+        assert_eq!(
+            plan,
+            CompositorMessagePositionPlan {
+                scroll: None,
+                recompose: Some(CompositorRecomposeArea {
+                    rows: 1..7,
+                    columns: 0..20,
+                }),
+            }
+        );
     }
 
     #[test]
