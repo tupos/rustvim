@@ -72,6 +72,10 @@ extern bool ui_comp_adjust_layer_order(
   ScreenGrid **layer_grids, size_t layer_count,
   size_t layer_index, bool raise);
 
+extern bool ui_comp_remove_layer(
+  ScreenGrid **layer_grids, size_t layer_count,
+  ScreenGrid *grid, bool *removed);
+
 extern bool ui_comp_raise_layer(
   ScreenGrid **layer_grids, size_t layer_count,
   ScreenGrid *grid, size_t target_index,

@@ -1098,6 +1098,24 @@ impl CompositorLayerGuards {
         Some(())
     }
 
+    /// Removes one non-default layer from the active prefix.
+    ///
+    /// The removed layer is moved to the inactive tail so the C boundary can
+    /// shrink its vector after every grid allocation has been restored.
+    fn remove_layer(&mut self, layer_index: usize) -> Option<()> {
+        if layer_index == 0 {
+            return None;
+        }
+
+        let last_index = self.layers.len().checked_sub(1)?;
+        self.apply_layer_move(CompositorLayerMove {
+            source_index: layer_index,
+            target_index: last_index,
+        })?;
+        self.layers.last_mut()?.grid.set_compositor_index(0);
+        Some(())
+    }
+
     /// Writes the current grid identity order into a C pointer slice.
     fn write_cgrid_order(&self, cgrids: &mut [*mut CScreenGrid]) -> bool {
         if cgrids.len() != self.layers.len() {
@@ -1472,6 +1490,65 @@ pub unsafe extern "C" fn ui_comp_adjust_layer_order(
     // `layer_count` elements for the duration of this synchronous call.
     let cgrids = unsafe { slice::from_raw_parts_mut(layer_grids, layer_count) };
     layer_guards.write_cgrid_order(cgrids)
+}
+
+/// Removes one non-default grid from the active compositor-layer prefix.
+///
+/// The C grid identity is converted into a Rust layer index at this boundary.
+/// Safe removal logic works only with that index and the owned Rust grids.
+///
+/// The removed grid is moved to the final array position so C can shrink its
+/// layer vector after this function restores ownership. If the grid is not an
+/// active layer, the array is unchanged and `was_removed` receives `false`.
+///
+/// # Safety
+///
+/// `layer_grids` must point to `layer_count` writable, distinct, non-null grid
+/// pointers. Every grid must be exclusively accessible and its buffers must
+/// satisfy the ownership and layout requirements of `ScreenGrid`.
+///
+/// `grid` must be non-null. If it identifies an entry in `layer_grids`, that
+/// entry must not be the default layer. `was_removed` must point to writable,
+/// properly aligned storage for one `bool` and must not overlap the layer
+/// array or any grid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ui_comp_remove_layer(
+    layer_grids: *mut *mut CScreenGrid,
+    layer_count: usize,
+    grid: *mut CScreenGrid,
+    was_removed: *mut bool,
+) -> bool {
+    if grid.is_null() || was_removed.is_null() {
+        return false;
+    }
+
+    // SAFETY: The caller satisfies the documented layer-array and grid
+    // ownership requirements.
+    let Some(mut layer_guards) =
+        (unsafe { CompositorLayerGuards::try_take(layer_grids, layer_count) })
+    else {
+        return false;
+    };
+    let removed = match layer_guards.index_of(grid) {
+        Some(layer_index) => {
+            if layer_guards.remove_layer(layer_index).is_none() {
+                return false;
+            }
+            true
+        }
+        None => false,
+    };
+
+    // SAFETY: The caller guarantees that the pointer array is writable for
+    // `layer_count` elements for the duration of this synchronous call.
+    let cgrids = unsafe { slice::from_raw_parts_mut(layer_grids, layer_count) };
+    if !layer_guards.write_cgrid_order(cgrids) {
+        return false;
+    }
+
+    // SAFETY: The caller provides valid, non-overlapping output storage.
+    unsafe { was_removed.write(removed) };
+    true
 }
 
 /// Raises one compositor layer and recomposes every crossed layer intersection.
@@ -2121,6 +2198,53 @@ mod tests {
         assert_eq!(default_grid.compositor_index(), 0);
         assert_eq!(lower_grid.compositor_index(), 2);
         assert_eq!(upper_grid.compositor_index(), 1);
+    }
+
+    #[test]
+    fn guarded_layer_removal_updates_order_and_indices() {
+        let default_grid = grid_with_row(&[schar_from_ascii('d')], &[1]);
+        let removed_grid = grid_with_row(&[schar_from_ascii('r')], &[2]);
+        let remaining_grid = grid_with_row(&[schar_from_ascii('k')], &[3]);
+        // SAFETY: Each conversion transfers its grid allocations to a distinct
+        // C representation.
+        let (mut default_cgrid, mut removed_cgrid, mut remaining_cgrid) = unsafe {
+            (
+                default_grid.to_cgrid(),
+                removed_grid.to_cgrid(),
+                remaining_grid.to_cgrid(),
+            )
+        };
+        let default_pointer = &mut default_cgrid as *mut CScreenGrid;
+        let removed_pointer = &mut removed_cgrid as *mut CScreenGrid;
+        let remaining_pointer = &mut remaining_cgrid as *mut CScreenGrid;
+        let mut cgrids = [default_pointer, removed_pointer, remaining_pointer];
+
+        {
+            // SAFETY: The pointers identify distinct, exclusively accessible
+            // C grids and the pointer array remains readable for this scope.
+            let mut guards =
+                unsafe { CompositorLayerGuards::try_take(cgrids.as_ptr(), cgrids.len()) }.unwrap();
+            assert_eq!(guards.remove_layer(0), None);
+            assert_eq!(guards.remove_layer(1), Some(()));
+            assert!(guards.write_cgrid_order(&mut cgrids));
+        }
+
+        assert_eq!(
+            cgrids,
+            [default_pointer, remaining_pointer, removed_pointer]
+        );
+
+        // SAFETY: Dropping the collection returned ownership to every C grid.
+        let (default_grid, removed_grid, remaining_grid) = unsafe {
+            (
+                ScreenGrid::take_from_cgrid(&mut default_cgrid),
+                ScreenGrid::take_from_cgrid(&mut removed_cgrid),
+                ScreenGrid::take_from_cgrid(&mut remaining_cgrid),
+            )
+        };
+        assert_eq!(default_grid.compositor_index(), 0);
+        assert_eq!(removed_grid.compositor_index(), 0);
+        assert_eq!(remaining_grid.compositor_index(), 1);
     }
 
     #[test]
