@@ -82,6 +82,12 @@ extern bool ui_comp_place_existing_grid(
   ScreenGrid *grid, CompositorGridPlacementRequest request,
   CompositorAreaCallback compose_area, bool *moved);
 
+extern bool ui_comp_place_new_grid(
+  ScreenGrid **layer_grids, size_t layer_count,
+  ScreenGrid *grid, ScreenGrid *current_window_grid,
+  CompositorGridPlacementRequest request, bool on_top,
+  CompositorAreaCallback compose_area);
+
 extern bool ui_comp_adjust_layer_order(
   ScreenGrid **layer_grids, size_t layer_count,
   size_t layer_index, bool raise);

@@ -118,23 +118,21 @@ bool ui_comp_put_grid(ScreenGrid *grid, int row, int col, int height, int width,
                       bool on_top)
 {
   bool moved = false;
+  CompositorGridPlacementRequest request = {
+    .row = row,
+    .column = col,
+    .height = height,
+    .width = width,
+    .valid = valid,
+    .should_draw = ui_comp_should_draw(),
+  };
 
   if (grid->comp_index != 0) {
-    CompositorGridPlacementRequest request = {
-      .row = row,
-      .column = col,
-      .height = height,
-      .width = width,
-      .valid = valid,
-      .should_draw = ui_comp_should_draw(),
-    };
     bool placed = ui_comp_place_existing_grid(
       layers.items, layers.size, grid, request, compose_area, &moved);
     assert(placed);
     return placed && moved;
   } else {
-    moved = true;
-    grid->pending_comp_index_update = true;
 #ifndef NDEBUG
     for (size_t i = 0; i < kv_size(layers); i++) {
       if (kv_A(layers, i) == grid) {
@@ -142,39 +140,13 @@ bool ui_comp_put_grid(ScreenGrid *grid, int row, int col, int height, int width,
       }
     }
 #endif
-
-    size_t insert_at = kv_size(layers);
-    while (insert_at > 0 && kv_A(layers, insert_at - 1)->zindex > grid->zindex) {
-      insert_at--;
-    }
-
-    if (curwin && kv_A(layers, insert_at - 1) == &curwin->w_grid_alloc
-        && kv_A(layers, insert_at - 1)->zindex == grid->zindex
-        && !on_top) {
-      insert_at--;
-    }
-    // not found: new grid
-    kv_pushp(layers);
-    for (size_t i = kv_size(layers) - 1; i > insert_at; i--) {
-      kv_A(layers, i) = kv_A(layers, i - 1);
-      kv_A(layers, i)->comp_index = i;
-      kv_A(layers, i)->pending_comp_index_update = true;
-    }
-    kv_A(layers, insert_at) = grid;
-
-    grid->comp_row = row;
-    grid->comp_col = col;
-    grid->comp_index = insert_at;
-    grid->pending_comp_index_update = true;
+    kv_push(layers, grid);
+    ScreenGrid *current_window_grid = curwin ? &curwin->w_grid_alloc : NULL;
+    bool placed = ui_comp_place_new_grid(
+      layers.items, layers.size, grid, current_window_grid, request, on_top, compose_area);
+    assert(placed);
+    return placed;
   }
-
-  grid->comp_height = height;
-  grid->comp_width = width;
-  if (moved && valid && ui_comp_should_draw()) {
-    compose_area(grid->comp_row, grid->comp_row + grid->rows,
-                 grid->comp_col, grid->comp_col + grid->cols);
-  }
-  return moved;
 }
 
 void ui_comp_remove_grid(ScreenGrid *grid)
