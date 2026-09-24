@@ -115,7 +115,8 @@ bool ui_comp_put_grid(ScreenGrid *grid, int row, int col, int height, int width,
   ScreenGrid *current_window_grid = curwin ? &curwin->w_grid_alloc : NULL;
   bool placed = ui_comp_place_grid_in_layer_stack(
     layers.items, &layers.size, grid, current_window_grid,
-    request, compose_area, &moved);
+    request, &msg_grid, compositor_area_callbacks(),
+    &moved);
   assert(placed);
   return placed && moved;
 }
@@ -249,25 +250,6 @@ static void debug_delay(Integer lines)
   uint64_t wd = (uint64_t)llabs(p_wd);
   uint64_t factor = (uint64_t)MAX(MIN(lines, 5), 1);
   os_sleep(factor * wd);
-}
-
-static void compose_area(Integer startrow, Integer endrow, Integer startcol, Integer endcol)
-{
-  compose_debug(startrow, endrow, startcol, endcol, dbghl_recompose, true);
-
-  CompositorAreaRequest request = {
-    .area = {
-      .start_row = startrow,
-      .end_row = endrow,
-      .start_column = startcol,
-      .end_column = endcol,
-    },
-    .settings = compositor_line_settings(),
-  };
-  bool composed = ui_comp_compose_area(
-    layers.items, layers.size, &msg_grid, request);
-  assert(composed);
-  (void)composed;
 }
 
 /// compose the area under the grid.

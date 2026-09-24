@@ -31,11 +31,6 @@ typedef struct {
 } CompositorLineSettings;
 
 typedef struct {
-  CompositorRecomposeArea area;
-  CompositorLineSettings settings;
-} CompositorAreaRequest;
-
-typedef struct {
   Integer row;
   schar_T separator_character;
   int screen_rows;
@@ -97,9 +92,6 @@ typedef struct {
   bool delay_after_forward;
 } CompositorScrollCallbacks;
 
-typedef void (*CompositorAreaCallback)(
-  Integer start_row, Integer end_row, Integer start_column, Integer end_column);
-
 extern void ui_comp_register_composed_ui(void);
 extern bool ui_comp_unregister_composed_ui(void);
 extern bool ui_comp_set_screen_valid(bool valid);
@@ -112,7 +104,8 @@ extern bool ui_comp_place_grid_in_layer_stack(
   ScreenGrid **layer_grids, size_t *layer_count,
   ScreenGrid *grid, ScreenGrid *current_window_grid,
   CompositorGridPlacementRequest request,
-  CompositorAreaCallback compose_area, bool *moved);
+  ScreenGrid *message_grid, CompositorAreaCallbacks callbacks,
+  bool *moved);
 
 extern bool ui_comp_clip_recompose_area(
   ScreenGrid *grid, CompositorRecomposeArea area,
@@ -155,10 +148,6 @@ extern bool ui_comp_cursor_is_covered_by_higher_layer(
 extern bool ui_comp_cursor_is_covered_by_higher_layer_in_stack(
   ScreenGrid *const *layer_grids, size_t layer_count,
   ScreenGrid *current_grid, int row, int column, int minimum_z_index_gap);
-
-extern bool ui_comp_compose_area(
-  ScreenGrid *const *layer_grids, size_t layer_count,
-  ScreenGrid *message_grid, CompositorAreaRequest request);
 
 extern void ui_comp_hide_message_separator(void);
 

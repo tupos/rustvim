@@ -16,14 +16,6 @@ use crate::{
 const LINE_FLAG_WRAP: libc::c_int = 1;
 const LINE_FLAG_INVALID: libc::c_int = 2;
 
-/// C callback used to recompose one half-open screen area.
-type CompositorAreaCallback = unsafe extern "C" fn(
-    start_row: Integer,
-    end_row: Integer,
-    start_column: Integer,
-    end_column: Integer,
-);
-
 /// C callback used to visualize one compositor operation.
 type CompositorDebugCallback = unsafe extern "C" fn(
     start_row: Integer,
@@ -108,14 +100,6 @@ pub struct CCompositorLineSettings {
     message_separator_attribute: VimSAttrT,
     screen_columns: libc::c_int,
     abort_on_invalid: bool,
-}
-
-/// C representation of one compositor-area request.
-#[repr(C)]
-#[derive(Clone, Copy, Debug)]
-pub struct CCompositorAreaRequest {
-    area: CCompositorRecomposeArea,
-    settings: CCompositorLineSettings,
 }
 
 /// C callbacks and settings required to recompose one screen area.
@@ -1866,22 +1850,11 @@ impl TryFrom<CCompositorLineSettings> for CompositorLineSettings {
     }
 }
 
-/// Validated inputs received from C for composing one screen area.
+/// Validated inputs for composing one screen area.
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct CompositorAreaInput {
+struct CompositorAreaRequest {
     area: CompositorRecomposeArea,
     settings: CompositorLineSettings,
-}
-
-impl TryFrom<CCompositorAreaRequest> for CompositorAreaInput {
-    type Error = ();
-
-    fn try_from(request: CCompositorAreaRequest) -> Result<Self, Self::Error> {
-        Ok(Self {
-            area: request.area.try_into()?,
-            settings: request.settings.try_into()?,
-        })
-    }
 }
 
 /// Validated inputs for composing one line from temporarily C-owned grids.
@@ -2438,26 +2411,168 @@ pub unsafe extern "C" fn ui_comp_recompose_grid(
     unsafe { recompose_area_from_c_grids(layer_grids, layer_count, message_grid, area, callbacks) }
 }
 
+/// Places a new or existing grid among temporarily C-owned compositor layers.
+///
+/// The active count is updated before recomposing a newly inserted grid. An
+/// existing grid is restored to its requested placement even if recomposing an
+/// exposed area fails.
+///
+/// # Safety
+///
+/// `layer_grids` must point to `*active_layer_count + 1` readable and writable
+/// grid pointer slots. The active prefix must contain distinct, non-null,
+/// exclusively accessible grids whose buffers satisfy the ownership and
+/// layout requirements of `ScreenGrid`. The final slot must contain `grid`. If
+/// `grid` is not active, it must satisfy the same ownership requirements.
+///
+/// `current_window_grid` may be null or identify an active grid. The
+/// recomposition closure may reenter the compositor because all grid guards
+/// are dropped before it is called.
+unsafe fn place_grid_in_c_layers(
+    layer_grids: *mut *mut CScreenGrid,
+    active_layer_count: &mut usize,
+    grid: *mut CScreenGrid,
+    current_window_grid: *mut CScreenGrid,
+    request: CompositorGridPlacementRequest,
+    should_draw: bool,
+    mut recompose_area: impl FnMut(usize, CompositorRecomposeArea) -> bool,
+) -> Option<bool> {
+    if *active_layer_count == 0 {
+        return None;
+    }
+    let candidate_layer_count = active_layer_count.checked_add(1)?;
+
+    // SAFETY: The caller guarantees that the active prefix and initialized
+    // candidate slot are readable.
+    let candidate_grids = unsafe { slice::from_raw_parts(layer_grids, candidate_layer_count) };
+    if candidate_grids.get(*active_layer_count).copied() != Some(grid) {
+        return None;
+    }
+    let existing_layer_index = candidate_grids[..*active_layer_count]
+        .iter()
+        .position(|candidate| *candidate == grid);
+    let owned_layer_count = if existing_layer_index.is_some() {
+        *active_layer_count
+    } else {
+        candidate_layer_count
+    };
+
+    let plan = {
+        // SAFETY: The caller satisfies the documented layer-array and grid
+        // ownership requirements. A duplicate candidate slot is excluded when
+        // the grid is already active.
+        let mut layer_guards =
+            (unsafe { CompositorLayerGuards::try_take(layer_grids, owned_layer_count) })?;
+
+        if let Some(layer_index) = existing_layer_index {
+            if layer_index == 0 || layer_guards.index_of(grid) != Some(layer_index) {
+                return None;
+            }
+            let plan = {
+                let layers = layer_guards.layer_stack()?;
+                let layer = layers.layer(layer_index)?;
+                layer.try_plan_placement(request.placement, request.valid, should_draw)?
+            };
+
+            let grid = layer_guards.grid_mut(layer_index)?;
+            grid.mark_compositor_index_for_update();
+            if should_draw {
+                grid.set_compositor_disabled(true);
+            } else {
+                request.placement.apply_to(grid);
+            }
+            plan
+        } else {
+            let appended_index = *active_layer_count;
+            if layer_guards.index_of(grid) != Some(appended_index) {
+                return None;
+            }
+            let current_window_layer = layer_guards.index_of(current_window_grid);
+            let (insertion_index, plan) = {
+                let grid = layer_guards.grid(appended_index)?;
+                let layers = layer_guards.layer_stack_prefix(appended_index)?;
+                let insertion_index = layers.plan_layer_insertion(
+                    grid.z_index(),
+                    current_window_layer,
+                    request.on_top,
+                )?;
+                let plan = CompositorGridPlacementPlan::try_for_new_grid(
+                    grid,
+                    request.placement,
+                    request.valid,
+                    should_draw,
+                )?;
+                (insertion_index, plan)
+            };
+
+            layer_guards.place_appended_layer(insertion_index, request.placement)?;
+            // SAFETY: The caller guarantees writable storage for the active
+            // prefix and candidate slot.
+            let cgrids = unsafe { slice::from_raw_parts_mut(layer_grids, owned_layer_count) };
+            if !layer_guards.write_cgrid_order(cgrids) {
+                return None;
+            }
+            plan
+        }
+    };
+
+    if existing_layer_index.is_none() {
+        *active_layer_count = owned_layer_count;
+    }
+
+    let mut exposed_areas_composed = true;
+    for area in plan.exposed_areas.iter().cloned() {
+        if !recompose_area(*active_layer_count, area) {
+            exposed_areas_composed = false;
+            break;
+        }
+    }
+
+    if should_draw && existing_layer_index.is_some() {
+        // SAFETY: Every earlier guard restored its grid before the callbacks,
+        // and the caller guarantees that the layer array remains valid for
+        // this synchronous operation.
+        let mut layer_guards =
+            (unsafe { CompositorLayerGuards::try_take(layer_grids, owned_layer_count) })?;
+        let layer_index = layer_guards.index_of(grid)?;
+        if Some(layer_index) != existing_layer_index {
+            return None;
+        }
+        let grid = layer_guards.grid_mut(layer_index)?;
+        grid.set_compositor_disabled(false);
+        plan.placement.apply_to(grid);
+    }
+
+    if !exposed_areas_composed {
+        return None;
+    }
+
+    if let Some(area) = plan.redraw_area
+        && !recompose_area(*active_layer_count, area)
+    {
+        return None;
+    }
+
+    Some(plan.moved)
+}
+
 /// Places a new or existing grid in the compositor layer stack.
 ///
 /// The final pointer slot supplies the candidate grid without initially
 /// changing the active layer count. Rust determines whether it is already an
 /// active layer and performs either repositioning or insertion. Grid ownership
-/// is restored before every composition callback.
+/// is restored before every recomposition operation.
 ///
 /// # Safety
 ///
 /// `layer_count` must point to the writable active length of `layer_grids` and
 /// must not overlap the layer array, any grid, or `moved`.
 ///
-/// `layer_grids` must point to `*layer_count + 1` readable and writable grid
-/// pointer slots. The active prefix must contain distinct, non-null,
-/// exclusively accessible grids whose buffers satisfy the ownership and
-/// layout requirements of `ScreenGrid`. The final slot must contain `grid`.
-/// If `grid` is not active, it must satisfy the same ownership requirements.
+/// `layer_grids` must satisfy `place_grid_in_c_layers` requirements.
+/// `message_grid` must satisfy `recompose_area_from_c_grids` requirements.
+/// `callbacks.debug` must remain valid for this call and may reenter the
+/// compositor because every grid guard is dropped before it is invoked.
 ///
-/// `current_window_grid` may be null or identify an active grid. When the
-/// compositor is drawing, `compose_area` must contain a valid callback.
 /// `moved` must point to writable, properly aligned storage for one `bool` and
 /// must not overlap the layer array, layer count, or any grid.
 #[unsafe(no_mangle)]
@@ -2467,7 +2582,8 @@ pub unsafe extern "C" fn ui_comp_place_grid_in_layer_stack(
     grid: *mut CScreenGrid,
     current_window_grid: *mut CScreenGrid,
     request: CCompositorGridPlacementRequest,
-    compose_area: Option<CompositorAreaCallback>,
+    message_grid: *mut CScreenGrid,
+    callbacks: CCompositorAreaCallbacks,
     moved: *mut bool,
 ) -> bool {
     if layer_grids.is_null() || layer_count.is_null() || grid.is_null() || moved.is_null() {
@@ -2477,180 +2593,38 @@ pub unsafe extern "C" fn ui_comp_place_grid_in_layer_stack(
         return false;
     };
     let should_draw = lock_compositor_draw_state().should_draw();
-    if should_draw && compose_area.is_none() {
-        return false;
-    }
 
-    // SAFETY: The caller guarantees readable, properly aligned storage for the
-    // active layer count.
-    let active_layer_count = unsafe { layer_count.read() };
-    if active_layer_count == 0 {
-        return false;
-    }
-    let Some(candidate_layer_count) = active_layer_count.checked_add(1) else {
-        return false;
-    };
-
-    // SAFETY: The caller guarantees that the active prefix and initialized
-    // candidate slot are readable.
-    let candidate_grids = unsafe { slice::from_raw_parts(layer_grids, candidate_layer_count) };
-    if candidate_grids.get(active_layer_count).copied() != Some(grid) {
-        return false;
-    }
-    let existing_layer_index = candidate_grids[..active_layer_count]
-        .iter()
-        .position(|candidate| *candidate == grid);
-    let owned_layer_count = if existing_layer_index.is_some() {
-        active_layer_count
-    } else {
-        candidate_layer_count
-    };
-
-    let plan = {
-        // SAFETY: The caller satisfies the documented layer-array and grid
-        // ownership requirements. A duplicate candidate slot is excluded when
-        // the grid is already active.
-        let Some(mut layer_guards) =
-            (unsafe { CompositorLayerGuards::try_take(layer_grids, owned_layer_count) })
-        else {
-            return false;
-        };
-
-        if let Some(layer_index) = existing_layer_index {
-            if layer_index == 0 || layer_guards.index_of(grid) != Some(layer_index) {
-                return false;
-            }
-            let plan = {
-                let Some(layers) = layer_guards.layer_stack() else {
-                    return false;
-                };
-                let Some(layer) = layers.layer(layer_index) else {
-                    return false;
-                };
-                let Some(plan) =
-                    layer.try_plan_placement(request.placement, request.valid, should_draw)
-                else {
-                    return false;
-                };
-                plan
-            };
-
-            let Some(grid) = layer_guards.grid_mut(layer_index) else {
-                return false;
-            };
-            grid.mark_compositor_index_for_update();
-            if should_draw {
-                grid.set_compositor_disabled(true);
-            } else {
-                request.placement.apply_to(grid);
-            }
-            plan
-        } else {
-            let appended_index = active_layer_count;
-            if layer_guards.index_of(grid) != Some(appended_index) {
-                return false;
-            }
-            let current_window_layer = layer_guards.index_of(current_window_grid);
-            let (insertion_index, plan) = {
-                let Some(grid) = layer_guards.grid(appended_index) else {
-                    return false;
-                };
-                let Some(layers) = layer_guards.layer_stack_prefix(appended_index) else {
-                    return false;
-                };
-                let Some(insertion_index) = layers.plan_layer_insertion(
-                    grid.z_index(),
-                    current_window_layer,
-                    request.on_top,
-                ) else {
-                    return false;
-                };
-                let Some(plan) = CompositorGridPlacementPlan::try_for_new_grid(
-                    grid,
-                    request.placement,
-                    request.valid,
-                    should_draw,
-                ) else {
-                    return false;
-                };
-                (insertion_index, plan)
-            };
-
-            if layer_guards
-                .place_appended_layer(insertion_index, request.placement)
-                .is_none()
-            {
-                return false;
-            }
-            // SAFETY: The caller guarantees writable storage for the active
-            // prefix and candidate slot.
-            let cgrids = unsafe { slice::from_raw_parts_mut(layer_grids, owned_layer_count) };
-            if !layer_guards.write_cgrid_order(cgrids) {
-                return false;
-            }
-            plan
-        }
-    };
-
-    if existing_layer_index.is_none() {
-        // SAFETY: The inserted grid and reordered layer array have been
-        // restored to C ownership. Publishing the new count before callbacks
-        // makes the new layer visible to recomposition.
-        unsafe { layer_count.write(owned_layer_count) };
-    }
-
-    if let Some(compose_area) = compose_area {
-        for area in &plan.exposed_areas {
-            // SAFETY: The caller supplied a valid callback. The layer guards
-            // were dropped above, so every grid is owned by C during the call.
-            unsafe {
-                compose_area(
-                    Integer::from(area.rows.start),
-                    Integer::from(area.rows.end),
-                    Integer::from(area.columns.start),
-                    Integer::from(area.columns.end),
-                );
-            }
-        }
-    }
-
-    if should_draw && existing_layer_index.is_some() {
-        // SAFETY: Every earlier guard restored its grid before the callbacks,
-        // and the caller guarantees that the layer array remains valid for
-        // this synchronous operation.
-        let Some(mut layer_guards) =
-            (unsafe { CompositorLayerGuards::try_take(layer_grids, owned_layer_count) })
-        else {
-            return false;
-        };
-        let Some(layer_index) = layer_guards.index_of(grid) else {
-            return false;
-        };
-        if Some(layer_index) != existing_layer_index {
-            return false;
-        }
-        let Some(grid) = layer_guards.grid_mut(layer_index) else {
-            return false;
-        };
-        grid.set_compositor_disabled(false);
-        plan.placement.apply_to(grid);
-    }
-
-    if let (Some(compose_area), Some(area)) = (compose_area, plan.redraw_area) {
-        // SAFETY: The caller supplied a valid callback. The layer guards were
-        // dropped above, so every grid is owned by C during the call.
+    // SAFETY: The caller provides readable storage for the active layer count.
+    let mut active_layer_count = unsafe { layer_count.read() };
+    let recompose_area = |layer_count, area| {
+        // SAFETY: Every grid guard is dropped before this closure, and the
+        // outer caller satisfies the recomposition requirements.
         unsafe {
-            compose_area(
-                Integer::from(area.rows.start),
-                Integer::from(area.rows.end),
-                Integer::from(area.columns.start),
-                Integer::from(area.columns.end),
-            );
+            recompose_area_from_c_grids(layer_grids, layer_count, message_grid, area, callbacks)
         }
-    }
+    };
+    // SAFETY: The caller satisfies the helper's pointer, layer ownership, and
+    // recomposition requirements.
+    let result = unsafe {
+        place_grid_in_c_layers(
+            layer_grids,
+            &mut active_layer_count,
+            grid,
+            current_window_grid,
+            request,
+            should_draw,
+            recompose_area,
+        )
+    };
 
+    // SAFETY: The caller provides valid, non-overlapping output storage. The
+    // count may have changed even if recomposition failed after insertion.
+    unsafe { layer_count.write(active_layer_count) };
+    let Some(was_moved) = result else {
+        return false;
+    };
     // SAFETY: The caller provides valid, non-overlapping output storage.
-    unsafe { moved.write(plan.moved) };
+    unsafe { moved.write(was_moved) };
     true
 }
 
@@ -3220,9 +3194,9 @@ unsafe fn compose_area_from_c_grids(
     layer_grids: *const *mut CScreenGrid,
     layer_count: usize,
     message_grid: *mut CScreenGrid,
-    input: CompositorAreaInput,
+    request: CompositorAreaRequest,
 ) -> bool {
-    let CompositorAreaInput { area, settings } = input;
+    let CompositorAreaRequest { area, settings } = request;
     let Some(area) = (|| {
         // SAFETY: The caller satisfies the documented layer-array and grid
         // ownership requirements.
@@ -3301,29 +3275,9 @@ unsafe fn recompose_area_from_c_grids(
             layer_grids,
             layer_count,
             message_grid,
-            CompositorAreaInput { area, settings },
+            CompositorAreaRequest { area, settings },
         )
     }
-}
-
-/// Composes and submits a complete screen area from an ordered C grid array.
-///
-/// # Safety
-///
-/// The pointers must satisfy `compose_area_from_c_grids` requirements.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn ui_comp_compose_area(
-    layer_grids: *const *mut CScreenGrid,
-    layer_count: usize,
-    message_grid: *mut CScreenGrid,
-    request: CCompositorAreaRequest,
-) -> bool {
-    let Ok(input) = CompositorAreaInput::try_from(request) else {
-        return false;
-    };
-
-    // SAFETY: The caller satisfies the helper's pointer requirements.
-    unsafe { compose_area_from_c_grids(layer_grids, layer_count, message_grid, input) }
 }
 
 #[unsafe(no_mangle)]
@@ -3743,14 +3697,6 @@ mod tests {
         }
     }
 
-    unsafe extern "C" fn noop_compose_area(
-        _start_row: Integer,
-        _end_row: Integer,
-        _start_column: Integer,
-        _end_column: Integer,
-    ) {
-    }
-
     fn message_position_request(row: i32, scrolled: bool) -> CompositorMessagePositionRequest {
         CompositorMessagePositionRequest {
             row,
@@ -3764,42 +3710,41 @@ mod tests {
     }
 
     #[test]
-    fn area_input_converts_and_validates_ffi_settings() {
-        let request = CCompositorAreaRequest {
-            area: CCompositorRecomposeArea {
+    fn recompose_area_converts_ffi_coordinates() {
+        assert_eq!(
+            CompositorRecomposeArea::try_from(CCompositorRecomposeArea {
                 start_row: 3,
                 end_row: 5,
                 start_column: 2,
                 end_column: 7,
-            },
-            settings: CCompositorLineSettings {
-                message_separator_attribute: 9,
-                screen_columns: 10,
-                abort_on_invalid: true,
-            },
+            }),
+            Ok(CompositorRecomposeArea {
+                rows: 3..5,
+                columns: 2..7,
+            })
+        );
+    }
+
+    #[test]
+    fn line_settings_convert_and_validate_ffi_values() {
+        let settings = CCompositorLineSettings {
+            message_separator_attribute: 9,
+            screen_columns: 10,
+            abort_on_invalid: true,
         };
 
         assert_eq!(
-            CompositorAreaInput::try_from(request),
-            Ok(CompositorAreaInput {
-                area: CompositorRecomposeArea {
-                    rows: 3..5,
-                    columns: 2..7,
-                },
-                settings: CompositorLineSettings {
-                    message_separator_attribute: 9,
-                    screen_columns: 10,
-                    abort_on_invalid: true,
-                },
+            CompositorLineSettings::try_from(settings),
+            Ok(CompositorLineSettings {
+                message_separator_attribute: 9,
+                screen_columns: 10,
+                abort_on_invalid: true,
             })
         );
         assert!(
-            CompositorAreaInput::try_from(CCompositorAreaRequest {
-                settings: CCompositorLineSettings {
-                    screen_columns: -1,
-                    ..request.settings
-                },
-                ..request
+            CompositorLineSettings::try_from(CCompositorLineSettings {
+                screen_columns: -1,
+                ..settings
             })
             .is_err()
         );
@@ -4306,10 +4251,11 @@ mod tests {
     }
 
     #[test]
-    fn ffi_places_existing_grid_and_restores_ownership() {
+    fn c_layers_place_existing_grid_and_restore_ownership() {
         let default_grid = grid_with_size(4, 4);
         let mut moving_grid = grid_with_size(2, 2);
         moving_grid.set_compositor_index(1);
+        moving_grid.set_compositor_size(2, 2);
         // SAFETY: Each conversion transfers its grid allocations to a distinct
         // C representation.
         let (mut default_cgrid, mut moving_cgrid) =
@@ -4318,32 +4264,66 @@ mod tests {
         let moving_pointer = &mut moving_cgrid as *mut CScreenGrid;
         let mut cgrids = [default_pointer, moving_pointer, moving_pointer];
         let mut layer_count = 2;
-        let mut moved = false;
+        let mut recomposed_areas = Vec::new();
 
         // SAFETY: The active prefix contains distinct, exclusively accessible
-        // grids. The final slot contains the candidate grid, and the callback
-        // remains valid throughout this call.
-        assert!(unsafe {
-            ui_comp_place_grid_in_layer_stack(
-                cgrids.as_mut_ptr(),
-                &mut layer_count,
-                moving_pointer,
-                std::ptr::null_mut(),
-                CCompositorGridPlacementRequest {
-                    row: 1,
-                    column: 2,
-                    height: 2,
-                    width: 2,
-                    valid: true,
-                    on_top: false,
-                },
-                Some(noop_compose_area),
-                &mut moved,
-            )
-        });
+        // grids, and the final slot contains the candidate grid.
+        assert_eq!(
+            unsafe {
+                place_grid_in_c_layers(
+                    cgrids.as_mut_ptr(),
+                    &mut layer_count,
+                    moving_pointer,
+                    std::ptr::null_mut(),
+                    CompositorGridPlacementRequest {
+                        placement: CompositorGridPlacement::try_new(1, 2, 2, 2).unwrap(),
+                        valid: true,
+                        on_top: false,
+                    },
+                    true,
+                    |layer_count, area| {
+                        recomposed_areas.push((layer_count, area));
+                        true
+                    },
+                )
+            },
+            Some(true)
+        );
+        assert_eq!(
+            recomposed_areas,
+            vec![
+                (
+                    2,
+                    CompositorRecomposeArea {
+                        rows: 0..1,
+                        columns: 0..2,
+                    },
+                ),
+                (
+                    2,
+                    CompositorRecomposeArea {
+                        rows: 1..2,
+                        columns: 0..2,
+                    },
+                ),
+                (
+                    2,
+                    CompositorRecomposeArea {
+                        rows: Range { start: 3, end: 2 },
+                        columns: 0..2,
+                    },
+                ),
+                (
+                    2,
+                    CompositorRecomposeArea {
+                        rows: 1..3,
+                        columns: 2..4,
+                    },
+                ),
+            ]
+        );
         assert_eq!(layer_count, 2);
         assert_eq!(&cgrids[..layer_count], &[default_pointer, moving_pointer]);
-        assert!(moved);
 
         // SAFETY: The FFI operation restored ownership to both C grids.
         let (default_grid, moving_grid) = unsafe {
@@ -4360,7 +4340,7 @@ mod tests {
     }
 
     #[test]
-    fn ffi_places_appended_grid_and_restores_ownership() {
+    fn c_layers_place_appended_grid_and_restore_ownership() {
         let default_grid = grid_with_size(4, 4);
         let mut current_grid = grid_with_size(2, 2);
         current_grid.set_compositor_index(1);
@@ -4379,32 +4359,43 @@ mod tests {
         let appended_pointer = &mut appended_cgrid as *mut CScreenGrid;
         let mut cgrids = [default_pointer, current_pointer, appended_pointer];
         let mut layer_count = 2;
-        let mut moved = false;
+        let mut recomposed_areas = Vec::new();
 
         // SAFETY: The active prefix contains distinct, exclusively accessible
-        // grids. The final slot contains the new candidate grid, and the
-        // callback remains valid throughout this call.
-        assert!(unsafe {
-            ui_comp_place_grid_in_layer_stack(
-                cgrids.as_mut_ptr(),
-                &mut layer_count,
-                appended_pointer,
-                current_pointer,
-                CCompositorGridPlacementRequest {
-                    row: 1,
-                    column: 2,
-                    height: 2,
-                    width: 2,
-                    valid: true,
-                    on_top: false,
+        // grids, and the final slot contains the new candidate grid.
+        assert_eq!(
+            unsafe {
+                place_grid_in_c_layers(
+                    cgrids.as_mut_ptr(),
+                    &mut layer_count,
+                    appended_pointer,
+                    current_pointer,
+                    CompositorGridPlacementRequest {
+                        placement: CompositorGridPlacement::try_new(1, 2, 2, 2).unwrap(),
+                        valid: true,
+                        on_top: false,
+                    },
+                    true,
+                    |layer_count, area| {
+                        recomposed_areas.push((layer_count, area));
+                        true
+                    },
+                )
+            },
+            Some(true)
+        );
+        assert_eq!(
+            recomposed_areas,
+            vec![(
+                3,
+                CompositorRecomposeArea {
+                    rows: 1..3,
+                    columns: 2..4,
                 },
-                Some(noop_compose_area),
-                &mut moved,
-            )
-        });
+            )]
+        );
         assert_eq!(layer_count, 3);
         assert_eq!(cgrids, [default_pointer, appended_pointer, current_pointer]);
-        assert!(moved);
 
         // SAFETY: The FFI operation restored ownership to every C grid.
         let (default_grid, current_grid, appended_grid) = unsafe {
