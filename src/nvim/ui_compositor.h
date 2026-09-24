@@ -57,12 +57,14 @@ typedef struct {
   bool recompose;
 } CompositorMessagePositionPlan;
 
-typedef void (*CompositorRawLineDebugCallback)(
+typedef void (*CompositorDebugCallback)(
   Integer start_row, Integer end_row, Integer start_column, Integer end_column,
   int highlight, bool delay);
 
-typedef void (*CompositorRawLineComposeCallback)(
+typedef void (*CompositorLineCallback)(
   Integer row, Integer start_column, Integer end_column, LineFlags flags);
+
+typedef void (*CompositorDelayCallback)(Integer lines);
 
 typedef void (*CompositorRawLineDiagnosticCallback)(
   Integer value, Integer grid_handle);
@@ -78,8 +80,8 @@ typedef struct {
 } CompositorRawLineRequest;
 
 typedef struct {
-  CompositorRawLineDebugCallback debug;
-  CompositorRawLineComposeCallback compose_line;
+  CompositorDebugCallback debug;
+  CompositorLineCallback compose_line;
   CompositorRawLineDiagnosticCallback log_invalid_row;
   CompositorRawLineDiagnosticCallback log_clipped_columns;
   int normal_debug_highlight;
@@ -88,27 +90,22 @@ typedef struct {
 } CompositorRawLineCallbacks;
 
 typedef struct {
-  int grid_handle;
+  Integer grid_handle;
   Integer top;
   Integer bottom;
   Integer left;
   Integer right;
   Integer row_delta;
+  Integer column_delta;
 } CompositorScrollRequest;
 
 typedef struct {
-  size_t current_layer_index;
-  Integer top;
-  Integer bottom;
-  Integer left;
-  Integer right;
-  Integer first_recompose_row;
-  Integer recompose_end_row;
-  int first_grid_row;
-  int grid_start_column;
-  bool discard;
-  bool recompose;
-} CompositorScrollPlan;
+  CompositorDebugCallback debug;
+  CompositorLineCallback compose_line;
+  CompositorDelayCallback delay;
+  int recomposed_debug_highlight;
+  bool delay_after_forward;
+} CompositorScrollCallbacks;
 
 typedef void (*CompositorAreaCallback)(
   Integer start_row, Integer end_row, Integer start_column, Integer end_column);
@@ -178,18 +175,15 @@ extern bool ui_comp_plan_message_position(
 extern bool ui_comp_emit_clear_line(
   Integer row, Integer start_col, Integer end_col, sattr_T attribute);
 
-extern bool ui_comp_should_compose_scroll_row(
-  ScreenGrid *grid, int row, int start_col);
-
 extern bool ui_comp_process_raw_line(
   ScreenGrid *const *layer_grids, size_t layer_count,
   ScreenGrid *message_grid, CompositorRawLineRequest request,
   const schar_T *characters, const sattr_T *attributes,
   CompositorRawLineCallbacks callbacks);
 
-extern bool ui_comp_plan_scroll(
+extern bool ui_comp_process_scroll(
   ScreenGrid *const *layer_grids, size_t layer_count,
-  ScreenGrid *message_grid,
-  CompositorScrollRequest request, CompositorScrollPlan *output);
+  ScreenGrid *message_grid, CompositorScrollRequest request,
+  CompositorScrollCallbacks callbacks);
 
 #include "ui_compositor.h.generated.h"

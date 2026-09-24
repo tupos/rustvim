@@ -363,49 +363,25 @@ void ui_comp_grid_scroll(Integer grid, Integer top, Integer bot, Integer left, I
                          Integer rows, Integer cols)
 {
   CompositorScrollRequest request = {
-    .grid_handle = (int)grid,
+    .grid_handle = grid,
     .top = top,
     .bottom = bot,
     .left = left,
     .right = right,
     .row_delta = rows,
+    .column_delta = cols,
   };
-  CompositorScrollPlan plan;
-  bool planned = ui_comp_plan_scroll(
-    layers.items, layers.size, &msg_grid, request, &plan);
-  assert(planned);
-  if (!planned) {
-    return;
-  }
-  if (plan.discard) {
-    return;
-  }
-
-  if (plan.recompose) {
-    ScreenGrid *scroll_grid = kv_A(layers, plan.current_layer_index);
-    // TODO(bfredl):
-    // 1. check if rectangles actually overlap
-    // 2. calculate subareas that can scroll.
-    compose_debug(plan.top, plan.bottom, plan.left, plan.right, dbghl_recompose, true);
-    int grid_row = plan.first_grid_row;
-    for (Integer row = plan.first_recompose_row; row < plan.recompose_end_row;
-         row++, grid_row++) {
-      // TODO(bfredl): workaround for win_update() performing two scrolls in a
-      // row, where the latter might scroll invalid space created by the first.
-      // ideally win_update() should keep track of this itself and not scroll
-      // the invalid space.
-      if (ui_comp_should_compose_scroll_row(
-            scroll_grid, grid_row, plan.grid_start_column)) {
-        compose_line(row, plan.left, plan.right, 0);
-      }
-    }
-  } else {
-    ui_composed_call_grid_scroll(
-      1, plan.top, plan.bottom, plan.left, plan.right, rows, cols);
-    if (rdb_flags & kOptRdbFlagCompositor) {
-      debug_delay(2);
-    }
-  }
+  CompositorScrollCallbacks callbacks = {
+    .debug = compose_debug,
+    .compose_line = compose_line,
+    .delay = debug_delay,
+    .recomposed_debug_highlight = dbghl_recompose,
+    .delay_after_forward = (rdb_flags & kOptRdbFlagCompositor) != 0,
+  };
+  bool processed = ui_comp_process_scroll(
+    layers.items, layers.size, &msg_grid, request, callbacks);
+  assert(processed);
+  (void)processed;
 }
 
 void ui_comp_grid_resize(Integer grid, Integer width, Integer height)
