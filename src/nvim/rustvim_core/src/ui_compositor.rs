@@ -24,6 +24,24 @@ type CompositorAreaCallback = unsafe extern "C" fn(
     end_column: Integer,
 );
 
+/// C callback used to visualize one raw-line compositor operation.
+type CompositorRawLineDebugCallback = unsafe extern "C" fn(
+    start_row: Integer,
+    end_row: Integer,
+    start_column: Integer,
+    end_column: Integer,
+    highlight: libc::c_int,
+    delay: bool,
+);
+
+/// C callback used to recompose one translated raw line.
+type CompositorRawLineComposeCallback =
+    unsafe extern "C" fn(row: Integer, start_column: Integer, end_column: Integer, flags: i32);
+
+/// C callback used to report one rejected or clipped raw-line coordinate.
+type CompositorRawLineDiagnosticCallback =
+    unsafe extern "C" fn(value: Integer, grid_handle: Integer);
+
 unsafe extern "C" {
     fn ui_composed_call_grid_cursor_goto(grid: Integer, row: Integer, column: Integer);
     fn ui_composed_call_raw_line(
@@ -116,32 +134,30 @@ pub struct CCompositorMessagePositionPlan {
     recompose: bool,
 }
 
-/// C representation of one raw-line planning request.
+/// C representation of one complete raw-line request.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct CCompositorRawLineRequest {
-    grid_handle: libc::c_int,
+    grid_handle: Integer,
     row: Integer,
     start_col: Integer,
     end_col: Integer,
     clear_col: Integer,
+    clear_attr: Integer,
     flags: libc::c_int,
 }
 
-/// C representation of a validated raw-line plan.
+/// C callbacks and debug inputs required to execute one raw-line request.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
-pub struct CCompositorRawLinePlan {
-    row: Integer,
-    start_col: Integer,
-    end_col: Integer,
-    clear_col: Integer,
-    requested_clear_col: Integer,
-    flags: libc::c_int,
-    row_outside: bool,
-    columns_clipped: bool,
-    discard: bool,
-    recompose: bool,
+pub struct CCompositorRawLineCallbacks {
+    debug: CompositorRawLineDebugCallback,
+    compose_line: CompositorRawLineComposeCallback,
+    log_invalid_row: CompositorRawLineDiagnosticCallback,
+    log_clipped_columns: CompositorRawLineDiagnosticCallback,
+    normal_debug_highlight: libc::c_int,
+    clear_debug_highlight: libc::c_int,
+    composed_debug_highlight: libc::c_int,
 }
 
 /// C representation of one grid-scroll planning request.
@@ -846,7 +862,7 @@ struct CompositorRawLineRequest {
     row: i32,
     columns: Range<i32>,
     clear_column: i32,
-    flags: libc::c_int,
+    flags: i32,
 }
 
 impl TryFrom<CCompositorRawLineRequest> for CompositorRawLineRequest {
@@ -882,57 +898,15 @@ enum CompositorRawLineAction {
     Forward,
 }
 
-/// Translated and clipped raw-line state returned to the C callback boundary.
+/// Translated and clipped state for one complete raw-line operation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct CompositorRawLinePlan {
     row: i32,
     columns: Range<i32>,
     clear_column: i32,
     requested_clear_column: i32,
-    flags: libc::c_int,
+    flags: i32,
     action: CompositorRawLineAction,
-}
-
-impl From<CompositorRawLinePlan> for CCompositorRawLinePlan {
-    fn from(plan: CompositorRawLinePlan) -> Self {
-        let row_outside = plan.action == CompositorRawLineAction::DiscardRow;
-        let discard = matches!(
-            plan.action,
-            CompositorRawLineAction::DiscardRow | CompositorRawLineAction::DiscardColumns
-        );
-        let recompose = plan.action == CompositorRawLineAction::Recompose;
-
-        Self {
-            row: Integer::from(plan.row),
-            start_col: Integer::from(plan.columns.start),
-            end_col: Integer::from(plan.columns.end),
-            clear_col: Integer::from(plan.clear_column),
-            requested_clear_col: Integer::from(plan.requested_clear_column),
-            flags: plan.flags,
-            row_outside,
-            columns_clipped: plan.clear_column != plan.requested_clear_column,
-            discard,
-            recompose,
-        }
-    }
-}
-
-impl CCompositorRawLinePlan {
-    /// Constructs a successful no-op.
-    const fn discarded() -> Self {
-        Self {
-            row: 0,
-            start_col: 0,
-            end_col: 0,
-            clear_col: 0,
-            requested_clear_col: 0,
-            flags: 0,
-            row_outside: false,
-            columns_clipped: false,
-            discard: true,
-            recompose: false,
-        }
-    }
 }
 
 /// Output range prepared for one raw-line UI event.
@@ -3183,7 +3157,7 @@ pub unsafe extern "C" fn ui_comp_should_compose_scroll_row(
     GridRow::try_from_grid(&rust_grid, row).is_some_and(|row| row.is_valid_at(start_col))
 }
 
-/// Plans translation, clipping, and composition for one raw-line event.
+/// Processes one complete raw-line event against an ordered C grid array.
 ///
 /// # Safety
 ///
@@ -3191,67 +3165,172 @@ pub unsafe extern "C" fn ui_comp_should_compose_scroll_row(
 /// pointers. Every grid must be exclusively accessible and its buffers must
 /// satisfy the ownership and layout requirements of `ScreenGrid`.
 ///
+/// When the forwarded character count is nonzero, `characters` and
+/// `attributes` must point to readable arrays containing at least that many
+/// initialized elements.
+///
+/// Every function pointer in `callbacks` must remain valid for this call.
+/// Callback implementations may reenter the compositor because all grid
+/// guards are dropped before any callback is invoked.
+///
 /// A disabled compositor or a grid handle absent from `layer_grids` produces
-/// a successful discarded plan, preserving the behavior of the former C
-/// checks. `message_grid` is
-/// used only for pointer identity and may be null. `output` must point to
-/// writable, properly aligned storage for one
-/// `CCompositorRawLinePlan`.
+/// a successful no-op. `message_grid` is used only for pointer identity and
+/// may be null.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ui_comp_plan_raw_line(
+pub unsafe extern "C" fn ui_comp_process_raw_line(
     layer_grids: *const *mut CScreenGrid,
     layer_count: usize,
     message_grid: *mut CScreenGrid,
     request: CCompositorRawLineRequest,
-    output: *mut CCompositorRawLinePlan,
+    characters: *const VimSCharT,
+    attributes: *const VimSAttrT,
+    callbacks: CCompositorRawLineCallbacks,
 ) -> bool {
-    if output.is_null() {
-        return false;
-    }
     if !lock_compositor_draw_state().should_draw() {
-        // SAFETY: The caller guarantees writable, aligned output storage.
-        unsafe {
-            output.write(CCompositorRawLinePlan::discarded());
-        }
         return true;
     }
 
-    let grid_handle = request.grid_handle;
+    let Ok(grid_handle) = i32::try_from(request.grid_handle) else {
+        return false;
+    };
     let Ok(raw_line) = CompositorRawLineRequest::try_from(request) else {
         return false;
     };
 
     let message_was_scrolled = lock_message_compositor_state().was_scrolled;
-    // SAFETY: The caller satisfies the documented layer-array and grid
-    // ownership requirements.
-    let Some(layer_guards) = (unsafe { CompositorLayerGuards::try_take(layer_grids, layer_count) })
-    else {
-        return false;
+    let plan = {
+        // SAFETY: The caller satisfies the documented layer-array and grid
+        // ownership requirements.
+        let Some(layer_guards) =
+            (unsafe { CompositorLayerGuards::try_take(layer_grids, layer_count) })
+        else {
+            return false;
+        };
+        let message_layer_index = layer_guards.index_of(message_grid);
+        let Some(layers) = layer_guards.layer_stack() else {
+            return false;
+        };
+        let Some(current_layer_index) = layers.layer_index_with_handle(grid_handle) else {
+            return true;
+        };
+
+        let Some(plan) = layers.plan_raw_line(
+            current_layer_index,
+            message_layer_index,
+            message_was_scrolled,
+            raw_line,
+        ) else {
+            return false;
+        };
+        plan
     };
-    let message_layer_index = layer_guards.index_of(message_grid);
-    let Some(layers) = layer_guards.layer_stack() else {
-        return false;
-    };
-    let Some(current_layer_index) = layers.layer_index_with_handle(grid_handle) else {
-        // SAFETY: The caller guarantees writable, aligned output storage.
+
+    let row = Integer::from(plan.row);
+    let start_column = Integer::from(plan.columns.start);
+    let end_column = Integer::from(plan.columns.end);
+    let clear_column = Integer::from(plan.clear_column);
+
+    if plan.clear_column != plan.requested_clear_column {
+        // SAFETY: The caller guarantees that every callback remains valid.
         unsafe {
-            output.write(CCompositorRawLinePlan::discarded());
+            (callbacks.log_clipped_columns)(
+                Integer::from(plan.requested_clear_column),
+                request.grid_handle,
+            );
         }
-        return true;
-    };
+    }
 
-    let Some(plan) = layers.plan_raw_line(
-        current_layer_index,
-        message_layer_index,
-        message_was_scrolled,
-        raw_line,
-    ) else {
-        return false;
-    };
+    match plan.action {
+        CompositorRawLineAction::DiscardRow => {
+            // SAFETY: The caller guarantees that every callback remains valid.
+            unsafe {
+                (callbacks.log_invalid_row)(row, request.grid_handle);
+            }
+            true
+        }
+        CompositorRawLineAction::DiscardColumns => true,
+        CompositorRawLineAction::Recompose => {
+            // SAFETY: Grid ownership was restored before invoking either
+            // callback, and the caller guarantees both functions are valid.
+            unsafe {
+                (callbacks.debug)(
+                    row,
+                    row + 1,
+                    start_column,
+                    clear_column,
+                    callbacks.composed_debug_highlight,
+                    true,
+                );
+                (callbacks.compose_line)(row, start_column, clear_column, plan.flags);
+            }
+            true
+        }
+        CompositorRawLineAction::Forward => {
+            let Some(payload_len) = plan
+                .columns
+                .end
+                .checked_sub(plan.columns.start)
+                .and_then(|length| usize::try_from(length).ok())
+            else {
+                return false;
+            };
+            if payload_len != 0 && (characters.is_null() || attributes.is_null()) {
+                return false;
+            }
 
-    // SAFETY: The caller guarantees writable, aligned storage for one plan.
-    unsafe { output.write(plan.into()) };
-    true
+            let (characters, attributes): (&[VimSCharT], &[VimSAttrT]) = if payload_len == 0 {
+                (&[], &[])
+            } else {
+                // SAFETY: The caller guarantees two readable arrays with
+                // at least the forwarded number of initialized elements.
+                unsafe {
+                    (
+                        slice::from_raw_parts(characters, payload_len),
+                        slice::from_raw_parts(attributes, payload_len),
+                    )
+                }
+            };
+
+            // SAFETY: Grid ownership was restored before invoking the debug
+            // callback, which the caller guarantees remains valid.
+            unsafe {
+                (callbacks.debug)(
+                    row,
+                    row + 1,
+                    start_column,
+                    end_column,
+                    callbacks.normal_debug_highlight,
+                    end_column >= clear_column,
+                );
+                (callbacks.debug)(
+                    row,
+                    row + 1,
+                    end_column,
+                    clear_column,
+                    callbacks.clear_debug_highlight,
+                    true,
+                );
+            }
+            debug_assert!(attributes.iter().all(|attribute| *attribute >= 0));
+
+            // SAFETY: The validated slices have equal lengths and remain
+            // readable for the duration of the synchronous UI call.
+            unsafe {
+                ui_composed_call_raw_line(
+                    1,
+                    row,
+                    start_column,
+                    end_column,
+                    clear_column,
+                    request.clear_attr,
+                    plan.flags,
+                    characters.as_ptr(),
+                    attributes.as_ptr(),
+                );
+            }
+            true
+        }
+    }
 }
 
 /// Plans coordinate translation and recomposition for one grid scroll.

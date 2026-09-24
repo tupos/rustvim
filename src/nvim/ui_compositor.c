@@ -288,6 +288,17 @@ void ui_comp_compose_grid(ScreenGrid *grid)
   (void)recomposed;
 }
 
+static void log_invalid_raw_line_row(Integer row, Integer grid)
+{
+  DLOG("compositor: invalid row %" PRId64 " on grid %" PRId64, row, grid);
+}
+
+static void log_clipped_raw_line_columns(Integer requested_clear_col, Integer grid)
+{
+  DLOG("compositor: invalid last column %" PRId64 " on grid %" PRId64,
+       requested_clear_col, grid);
+}
+
 void ui_comp_raw_line(Integer grid, Integer row, Integer startcol, Integer endcol, Integer clearcol,
                       Integer clearattr, LineFlags flags, const schar_T *chunk,
                       const sattr_T *attrs)
@@ -298,52 +309,22 @@ void ui_comp_raw_line(Integer grid, Integer row, Integer startcol, Integer endco
     .start_col = startcol,
     .end_col = endcol,
     .clear_col = clearcol,
+    .clear_attr = clearattr,
     .flags = flags,
   };
-  CompositorRawLinePlan plan;
-  bool planned = ui_comp_plan_raw_line(
-    layers.items, layers.size, &msg_grid, request, &plan);
-  assert(planned);
-  if (!planned) {
-    return;
-  }
-
-  // TODO(bfredl): this should not really be necessary. But on some condition
-  // when resizing nvim, a window will be attempted to be drawn on the older
-  // and possibly larger global screen size.
-  if (plan.row_outside) {
-    DLOG("compositor: invalid row %" PRId64 " on grid %" PRId64, plan.row, grid);
-    return;
-  }
-  if (plan.columns_clipped) {
-    DLOG("compositor: invalid last column %" PRId64 " on grid %" PRId64,
-         plan.requested_clear_col, grid);
-  }
-  if (plan.discard) {
-    return;
-  }
-
-  // TODO(bfredl): eventually should just fix compose_line to respect clearing
-  // and optimize it for uncovered lines.
-  if (plan.recompose) {
-    compose_debug(
-      plan.row, plan.row + 1, plan.start_col, plan.clear_col, dbghl_composed, true);
-    compose_line(plan.row, plan.start_col, plan.clear_col, plan.flags);
-  } else {
-    compose_debug(
-      plan.row, plan.row + 1, plan.start_col, plan.end_col,
-      dbghl_normal, plan.end_col >= plan.clear_col);
-    compose_debug(
-      plan.row, plan.row + 1, plan.end_col, plan.clear_col, dbghl_clear, true);
-#ifndef NDEBUG
-    for (Integer i = 0; i < plan.end_col - plan.start_col; i++) {
-      assert(attrs[i] >= 0);
-    }
-#endif
-    ui_composed_call_raw_line(
-      1, plan.row, plan.start_col, plan.end_col, plan.clear_col,
-      clearattr, plan.flags, chunk, attrs);
-  }
+  CompositorRawLineCallbacks callbacks = {
+    .debug = compose_debug,
+    .compose_line = compose_line,
+    .log_invalid_row = log_invalid_raw_line_row,
+    .log_clipped_columns = log_clipped_raw_line_columns,
+    .normal_debug_highlight = dbghl_normal,
+    .clear_debug_highlight = dbghl_clear,
+    .composed_debug_highlight = dbghl_composed,
+  };
+  bool processed = ui_comp_process_raw_line(
+    layers.items, layers.size, &msg_grid, request, chunk, attrs, callbacks);
+  assert(processed);
+  (void)processed;
 }
 
 void ui_comp_msg_set_pos(Integer grid, Integer row, Boolean scrolled, String sep_char,
