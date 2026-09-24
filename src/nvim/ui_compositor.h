@@ -48,6 +48,12 @@ typedef void (*CompositorDebugCallback)(
   Integer start_row, Integer end_row, Integer start_column, Integer end_column,
   int highlight, bool delay);
 
+typedef struct {
+  CompositorDebugCallback debug;
+  CompositorLineSettings line_settings;
+  int recomposed_debug_highlight;
+} CompositorAreaCallbacks;
+
 typedef void (*CompositorDelayCallback)(Integer lines);
 
 typedef void (*CompositorRawLineDiagnosticCallback)(
@@ -113,7 +119,8 @@ extern bool ui_comp_clip_recompose_area(
   CompositorRecomposeArea *output);
 
 extern bool ui_comp_recompose_grid(
-  ScreenGrid *grid, CompositorAreaCallback compose_area);
+  ScreenGrid *const *layer_grids, size_t layer_count,
+  ScreenGrid *message_grid, ScreenGrid *grid, CompositorAreaCallbacks callbacks);
 
 extern bool ui_comp_grid_cursor_goto_in_layer_stack(
   ScreenGrid **layer_grids, size_t layer_count,

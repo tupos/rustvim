@@ -118,6 +118,15 @@ pub struct CCompositorAreaRequest {
     settings: CCompositorLineSettings,
 }
 
+/// C callbacks and settings required to recompose one screen area.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct CCompositorAreaCallbacks {
+    debug: CompositorDebugCallback,
+    line_settings: CCompositorLineSettings,
+    recomposed_debug_highlight: libc::c_int,
+}
+
 /// C representation of one message-grid position update.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -2362,19 +2371,26 @@ pub unsafe extern "C" fn ui_comp_clip_recompose_area(
 
 /// Recomposes the screen area occupied by one grid when drawing is enabled.
 ///
-/// Grid ownership is restored before the C composition callback is invoked.
-///
 /// # Safety
 ///
 /// `grid` must point to a valid, exclusively accessible `CScreenGrid` whose
 /// buffers satisfy the ownership and layout requirements of `ScreenGrid`.
 ///
-/// When the compositor is drawing, `compose_area` must contain a valid callback
-/// for the duration of this call.
+/// When the compositor is drawing, `layer_grids` must point to `layer_count`
+/// readable, distinct, non-null grid pointers. Every grid must be exclusively
+/// accessible and satisfy the same ownership and layout requirements.
+///
+/// `message_grid` must satisfy the message-grid requirements of
+/// `compose_area_from_c_grids`. `callbacks.debug` must remain valid for this
+/// call and may reenter the compositor because all grid guards are dropped
+/// before it is invoked.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ui_comp_recompose_grid(
+    layer_grids: *const *mut CScreenGrid,
+    layer_count: usize,
+    message_grid: *mut CScreenGrid,
     grid: *mut CScreenGrid,
-    compose_area: Option<CompositorAreaCallback>,
+    callbacks: CCompositorAreaCallbacks,
 ) -> bool {
     if grid.is_null() {
         return false;
@@ -2382,9 +2398,6 @@ pub unsafe extern "C" fn ui_comp_recompose_grid(
     if !lock_compositor_draw_state().should_draw() {
         return true;
     }
-    let Some(compose_area) = compose_area else {
-        return false;
-    };
 
     let area = {
         // SAFETY: The caller transfers exclusive ownership of the grid buffers
@@ -2396,17 +2409,33 @@ pub unsafe extern "C" fn ui_comp_recompose_grid(
         return false;
     };
 
-    // SAFETY: The caller supplied a valid callback, and the grid guard was
-    // dropped above, so the grid is owned by C during the call.
+    // SAFETY: The caller supplied a valid callback. The grid guard was dropped
+    // above, so every grid is owned by C while the callback runs.
     unsafe {
-        compose_area(
+        (callbacks.debug)(
             Integer::from(area.rows.start),
             Integer::from(area.rows.end),
             Integer::from(area.columns.start),
             Integer::from(area.columns.end),
+            callbacks.recomposed_debug_highlight,
+            true,
         );
     }
-    true
+    let Ok(settings) = CompositorLineSettings::try_from(callbacks.line_settings) else {
+        return false;
+    };
+
+    // SAFETY: The caller satisfies the helper's grid-array, grid-ownership,
+    // and message-grid requirements. The previous grid guard and debug
+    // callback have completed.
+    unsafe {
+        compose_area_from_c_grids(
+            layer_grids,
+            layer_count,
+            message_grid,
+            CompositorAreaInput { area, settings },
+        )
+    }
 }
 
 /// Places a new or existing grid in the compositor layer stack.

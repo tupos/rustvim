@@ -265,7 +265,17 @@ static void compose_area(Integer startrow, Integer endrow, Integer startcol, Int
 /// such as 'pumblend' for popupmenu grid.
 void ui_comp_compose_grid(ScreenGrid *grid)
 {
-  bool recomposed = ui_comp_recompose_grid(grid, compose_area);
+  CompositorAreaCallbacks callbacks = {
+    .debug = compose_debug,
+    .line_settings = compositor_line_settings(),
+    .recomposed_debug_highlight = dbghl_recompose,
+  };
+  bool recomposed = ui_comp_recompose_grid(
+    layers.items,
+    layers.size,
+    &msg_grid,
+    grid,
+    callbacks);
   assert(recomposed);
   (void)recomposed;
 }
