@@ -132,7 +132,8 @@ void ui_comp_remove_grid(ScreenGrid *grid)
 void ui_comp_grid_cursor_goto(Integer grid_handle, Integer r, Integer c)
 {
   bool updated = ui_comp_grid_cursor_goto_in_layer_stack(
-    layers.items, layers.size, grid_handle, r, c, compose_area);
+    layers.items, layers.size, &msg_grid, grid_handle, r, c,
+    compositor_area_callbacks());
   assert(updated);
   (void)updated;
 }
@@ -188,6 +189,15 @@ static CompositorLineSettings compositor_line_settings(void)
     .message_separator_attribute = (sattr_T)HL_ATTR(HLF_MSGSEP),
     .screen_columns = Columns,
     .abort_on_invalid = (rdb_flags & kOptRdbFlagInvalid) != 0,
+  };
+}
+
+static CompositorAreaCallbacks compositor_area_callbacks(void)
+{
+  return (CompositorAreaCallbacks) {
+    .debug = compose_debug,
+    .line_settings = compositor_line_settings(),
+    .recomposed_debug_highlight = dbghl_recompose,
   };
 }
 
@@ -265,17 +275,8 @@ static void compose_area(Integer startrow, Integer endrow, Integer startcol, Int
 /// such as 'pumblend' for popupmenu grid.
 void ui_comp_compose_grid(ScreenGrid *grid)
 {
-  CompositorAreaCallbacks callbacks = {
-    .debug = compose_debug,
-    .line_settings = compositor_line_settings(),
-    .recomposed_debug_highlight = dbghl_recompose,
-  };
   bool recomposed = ui_comp_recompose_grid(
-    layers.items,
-    layers.size,
-    &msg_grid,
-    grid,
-    callbacks);
+    layers.items, layers.size, &msg_grid, grid, compositor_area_callbacks());
   assert(recomposed);
   (void)recomposed;
 }
@@ -332,15 +333,10 @@ void ui_comp_msg_set_pos(Integer grid, Integer row, Boolean scrolled, String sep
     .scrolled = scrolled,
     .has_separator_character = has_separator_character,
   };
-  CompositorAreaCallbacks callbacks = {
-    .debug = compose_debug,
-    .line_settings = compositor_line_settings(),
-    .recomposed_debug_highlight = dbghl_recompose,
-  };
   bool updated = ui_comp_update_message_position(
     layers.items, layers.size,
     &msg_grid, &default_grid,
-    request, callbacks);
+    request, compositor_area_callbacks());
   assert(updated);
   (void)updated;
 }

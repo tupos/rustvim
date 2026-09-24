@@ -357,6 +357,16 @@ enum CompositorCursorAction {
     Update(CompositorCursorPlan),
 }
 
+/// Applied cursor update and any areas exposed by its layer movement.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum CompositorCursorUpdate {
+    Ignore,
+    Apply {
+        plan: CompositorCursorPlan,
+        recompose_areas: Vec<CompositorRecomposeArea>,
+    },
+}
+
 /// Requested position and size of one compositor grid.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct CompositorGridPlacement {
@@ -2322,32 +2332,10 @@ pub unsafe extern "C" fn ui_comp_update_message_position(
         }
     }
     if let Some(area) = plan.recompose {
-        // SAFETY: Both grid guards were dropped, and the caller supplied a
-        // valid callback.
-        unsafe {
-            (callbacks.debug)(
-                Integer::from(area.rows.start),
-                Integer::from(area.rows.end),
-                Integer::from(area.columns.start),
-                Integer::from(area.columns.end),
-                callbacks.recomposed_debug_highlight,
-                true,
-            );
-        }
-        let Ok(settings) = CompositorLineSettings::try_from(callbacks.line_settings) else {
-            return false;
-        };
-
-        // SAFETY: The caller satisfies the helper's grid-array,
-        // grid-ownership, and message-grid requirements. The earlier guards
-        // and debug callback have completed.
+        // SAFETY: The caller satisfies the helper's pointer, grid-ownership,
+        // and callback requirements. The earlier guards were dropped above.
         if !unsafe {
-            compose_area_from_c_grids(
-                layer_grids,
-                layer_count,
-                message_grid,
-                CompositorAreaInput { area, settings },
-            )
+            recompose_area_from_c_grids(layer_grids, layer_count, message_grid, area, callbacks)
         } {
             return false;
         }
@@ -2435,33 +2423,9 @@ pub unsafe extern "C" fn ui_comp_recompose_grid(
         return false;
     };
 
-    // SAFETY: The caller supplied a valid callback. The grid guard was dropped
-    // above, so every grid is owned by C while the callback runs.
-    unsafe {
-        (callbacks.debug)(
-            Integer::from(area.rows.start),
-            Integer::from(area.rows.end),
-            Integer::from(area.columns.start),
-            Integer::from(area.columns.end),
-            callbacks.recomposed_debug_highlight,
-            true,
-        );
-    }
-    let Ok(settings) = CompositorLineSettings::try_from(callbacks.line_settings) else {
-        return false;
-    };
-
-    // SAFETY: The caller satisfies the helper's grid-array, grid-ownership,
-    // and message-grid requirements. The previous grid guard and debug
-    // callback have completed.
-    unsafe {
-        compose_area_from_c_grids(
-            layer_grids,
-            layer_count,
-            message_grid,
-            CompositorAreaInput { area, settings },
-        )
-    }
+    // SAFETY: The caller satisfies the helper's pointer, grid-ownership, and
+    // callback requirements. The grid guard was dropped above.
+    unsafe { recompose_area_from_c_grids(layer_grids, layer_count, message_grid, area, callbacks) }
 }
 
 /// Places a new or existing grid in the compositor layer stack.
@@ -2680,10 +2644,60 @@ pub unsafe extern "C" fn ui_comp_place_grid_in_layer_stack(
     true
 }
 
+/// Applies one validated cursor request to temporarily C-owned grids.
+///
+/// The returned update contains only owned Rust values. Every grid is restored
+/// before this function returns.
+///
+/// # Safety
+///
+/// `layer_grids` must point to `layer_count` writable, distinct, non-null grid
+/// pointers. Every grid must be exclusively accessible and its buffers must
+/// satisfy the ownership and layout requirements of `ScreenGrid`.
+unsafe fn apply_cursor_update_to_c_grids(
+    layer_grids: *mut *mut CScreenGrid,
+    layer_count: usize,
+    request: CompositorCursorRequest,
+) -> Option<CompositorCursorUpdate> {
+    // SAFETY: The caller satisfies the documented layer-array and grid
+    // ownership requirements.
+    let mut layer_guards = unsafe { CompositorLayerGuards::try_take(layer_grids, layer_count) }?;
+    let action = {
+        let layers = layer_guards.layer_stack()?;
+        layers.plan_cursor(request)?
+    };
+    let CompositorCursorAction::Update(plan) = action else {
+        return Some(CompositorCursorUpdate::Ignore);
+    };
+
+    let recompose_areas = if let Some(target_index) = plan.raise_to {
+        let raise_plan = {
+            let layers = layer_guards.layer_stack()?;
+            layers.plan_layer_raise(plan.layer_index, target_index)?
+        };
+        layer_guards.apply_layer_move(raise_plan.movement)?;
+
+        // SAFETY: The caller guarantees that the pointer array is writable
+        // for `layer_count` elements during this synchronous call.
+        let cgrids = unsafe { slice::from_raw_parts_mut(layer_grids, layer_count) };
+        if !layer_guards.write_cgrid_order(cgrids) {
+            return None;
+        }
+        raise_plan.recompose_areas
+    } else {
+        Vec::new()
+    };
+
+    Some(CompositorCursorUpdate::Apply {
+        plan,
+        recompose_areas,
+    })
+}
+
 /// Applies one cursor update to the compositor layer stack.
 ///
-/// Any required layer movement is completed before recomposition callbacks and
-/// cursor output are emitted. Every grid is restored before a callback runs.
+/// Any required layer movement is completed before recomposition and cursor
+/// output are emitted. Every grid is restored before debug or UI callbacks.
 ///
 /// # Safety
 ///
@@ -2691,19 +2705,19 @@ pub unsafe extern "C" fn ui_comp_place_grid_in_layer_stack(
 /// pointers. Every grid must be exclusively accessible and its buffers must
 /// satisfy the ownership and layout requirements of `ScreenGrid`.
 ///
-/// `compose_area` must be a valid callback for the duration of this call.
+/// `message_grid` must satisfy the message-grid requirements of
+/// `recompose_area_from_c_grids`. `callbacks.debug` must remain valid for this
+/// call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ui_comp_grid_cursor_goto_in_layer_stack(
     layer_grids: *mut *mut CScreenGrid,
     layer_count: usize,
+    message_grid: *mut CScreenGrid,
     grid_handle: Integer,
     row: Integer,
     column: Integer,
-    compose_area: Option<CompositorAreaCallback>,
+    callbacks: CCompositorAreaCallbacks,
 ) -> bool {
-    let Some(compose_area) = compose_area else {
-        return false;
-    };
     let (Ok(grid_handle), Ok(row), Ok(column)) = (
         i32::try_from(grid_handle),
         i32::try_from(row),
@@ -2716,58 +2730,30 @@ pub unsafe extern "C" fn ui_comp_grid_cursor_goto_in_layer_stack(
         local_position: CompositorPoint { row, column },
     };
 
-    let Some((cursor_plan, recompose_areas)) = (|| {
-        // SAFETY: The caller satisfies the documented layer-array and grid
-        // ownership requirements.
-        let mut layer_guards =
-            unsafe { CompositorLayerGuards::try_take(layer_grids, layer_count) }?;
-        let action = {
-            let layers = layer_guards.layer_stack()?;
-            layers.plan_cursor(request)?
-        };
-        let CompositorCursorAction::Update(plan) = action else {
-            return Some((None, Vec::new()));
-        };
-
-        let recompose_areas = if let Some(target_index) = plan.raise_to {
-            let raise_plan = {
-                let layers = layer_guards.layer_stack()?;
-                layers.plan_layer_raise(plan.layer_index, target_index)?
-            };
-            layer_guards.apply_layer_move(raise_plan.movement)?;
-
-            // SAFETY: The caller guarantees that the pointer array is writable
-            // for `layer_count` elements during this synchronous call.
-            let cgrids = unsafe { slice::from_raw_parts_mut(layer_grids, layer_count) };
-            if !layer_guards.write_cgrid_order(cgrids) {
-                return None;
-            }
-            raise_plan.recompose_areas
-        } else {
-            Vec::new()
-        };
-
-        Some((Some(plan), recompose_areas))
-    })() else {
+    // SAFETY: The caller satisfies the helper's layer-array and grid-ownership
+    // requirements.
+    let Some(update) =
+        (unsafe { apply_cursor_update_to_c_grids(layer_grids, layer_count, request) })
+    else {
         return false;
+    };
+    let CompositorCursorUpdate::Apply {
+        plan,
+        recompose_areas,
+    } = update
+    else {
+        return true;
     };
 
     for area in recompose_areas {
-        // SAFETY: The caller supplied a valid callback. The layer guards were
-        // dropped above, so all grid allocations are owned by C again.
-        unsafe {
-            compose_area(
-                Integer::from(area.rows.start),
-                Integer::from(area.rows.end),
-                Integer::from(area.columns.start),
-                Integer::from(area.columns.end),
-            );
+        // SAFETY: The caller satisfies the helper's pointer, grid-ownership,
+        // and callback requirements. The cursor-update guards were dropped.
+        if !unsafe {
+            recompose_area_from_c_grids(layer_grids, layer_count, message_grid, area, callbacks)
+        } {
+            return false;
         }
     }
-
-    let Some(plan) = cursor_plan else {
-        return true;
-    };
 
     if plan.emit {
         // SAFETY: The layer guards were dropped above, and the planned
@@ -3233,6 +3219,54 @@ unsafe fn compose_area_from_c_grids(
         }
     }
     true
+}
+
+/// Visualizes, composes, and submits one screen area from C-owned grids.
+///
+/// # Safety
+///
+/// `layer_grids` must point to `layer_count` readable, distinct, non-null grid
+/// pointers. Every grid must be exclusively accessible and its buffers must
+/// satisfy the ownership and layout requirements of `ScreenGrid`.
+///
+/// When a requested row is the message-separator row, `message_grid` must
+/// either identify a grid in `layer_grids` or identify another exclusively
+/// accessible grid satisfying the same requirements.
+///
+/// `callbacks.debug` must remain valid for this call. It may reenter the
+/// compositor because no grid guard is held while it runs.
+unsafe fn recompose_area_from_c_grids(
+    layer_grids: *const *mut CScreenGrid,
+    layer_count: usize,
+    message_grid: *mut CScreenGrid,
+    area: CompositorRecomposeArea,
+    callbacks: CCompositorAreaCallbacks,
+) -> bool {
+    // SAFETY: The caller supplied a valid callback, and no grid guard is held.
+    unsafe {
+        (callbacks.debug)(
+            Integer::from(area.rows.start),
+            Integer::from(area.rows.end),
+            Integer::from(area.columns.start),
+            Integer::from(area.columns.end),
+            callbacks.recomposed_debug_highlight,
+            true,
+        );
+    }
+    let Ok(settings) = CompositorLineSettings::try_from(callbacks.line_settings) else {
+        return false;
+    };
+
+    // SAFETY: The caller satisfies the helper's grid-array, grid-ownership,
+    // and message-grid requirements. The debug callback has completed.
+    unsafe {
+        compose_area_from_c_grids(
+            layer_grids,
+            layer_count,
+            message_grid,
+            CompositorAreaInput { area, settings },
+        )
+    }
 }
 
 /// Composes and submits a complete screen area from an ordered C grid array.
@@ -4139,7 +4173,7 @@ mod tests {
     }
 
     #[test]
-    fn ffi_cursor_update_raises_the_layer_and_restores_grid_ownership() {
+    fn c_grid_cursor_update_raises_the_layer_and_restores_grid_ownership() {
         let mut default_grid = grid_with_size(10, 12);
         default_grid.set_compositor_size(10, 12);
         let mut selected_grid = grid_with_size(2, 2);
@@ -4166,39 +4200,52 @@ mod tests {
         let upper_pointer = &mut upper_cgrid as *mut CScreenGrid;
         let mut cgrids = [default_pointer, selected_pointer, upper_pointer];
 
-        // An unregistered multigrid cursor is an expected no-op. The
-        // transaction still succeeds and restores all grid ownership.
-        // SAFETY: The array contains distinct, exclusively accessible grids
-        // and the callback remains valid throughout the synchronous call.
-        assert!(unsafe {
-            ui_comp_grid_cursor_goto_in_layer_stack(
-                cgrids.as_mut_ptr(),
-                cgrids.len(),
-                99,
-                0,
-                0,
-                Some(noop_compose_area),
-            )
-        });
+        // SAFETY: The array contains distinct, exclusively accessible grids.
+        assert_eq!(
+            unsafe {
+                apply_cursor_update_to_c_grids(
+                    cgrids.as_mut_ptr(),
+                    cgrids.len(),
+                    CompositorCursorRequest {
+                        grid_handle: 99,
+                        local_position: CompositorPoint { row: 0, column: 0 },
+                    },
+                )
+            },
+            Some(CompositorCursorUpdate::Ignore)
+        );
         assert_eq!(cgrids, [default_pointer, selected_pointer, upper_pointer]);
 
-        // The cursor lies outside the default grid, so the operation raises
-        // the selected layer without calling the process-global UI emitter.
-        // SAFETY: The array contains distinct, exclusively accessible grids
-        // and the callback remains valid throughout the synchronous call.
-        assert!(unsafe {
-            ui_comp_grid_cursor_goto_in_layer_stack(
-                cgrids.as_mut_ptr(),
-                cgrids.len(),
-                7,
-                10,
-                0,
-                Some(noop_compose_area),
-            )
-        });
+        // The cursor lies outside the default grid, so production code will
+        // recompose the exposed area before suppressing cursor output.
+        // SAFETY: The array contains distinct, exclusively accessible grids.
+        assert_eq!(
+            unsafe {
+                apply_cursor_update_to_c_grids(
+                    cgrids.as_mut_ptr(),
+                    cgrids.len(),
+                    CompositorCursorRequest {
+                        grid_handle: 7,
+                        local_position: CompositorPoint { row: 10, column: 0 },
+                    },
+                )
+            },
+            Some(CompositorCursorUpdate::Apply {
+                plan: CompositorCursorPlan {
+                    layer_index: 1,
+                    screen_position: CompositorPoint { row: 12, column: 3 },
+                    raise_to: Some(2),
+                    emit: false,
+                },
+                recompose_areas: vec![CompositorRecomposeArea {
+                    rows: 2..4,
+                    columns: 3..5,
+                }],
+            })
+        );
         assert_eq!(cgrids, [default_pointer, upper_pointer, selected_pointer]);
 
-        // SAFETY: The cursor operation restored every grid allocation.
+        // SAFETY: Both cursor updates restored every grid allocation.
         let (default_grid, selected_grid, upper_grid) = unsafe {
             (
                 ScreenGrid::take_from_cgrid(&mut default_cgrid),

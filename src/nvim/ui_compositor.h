@@ -124,8 +124,9 @@ extern bool ui_comp_recompose_grid(
 
 extern bool ui_comp_grid_cursor_goto_in_layer_stack(
   ScreenGrid **layer_grids, size_t layer_count,
-  Integer grid_handle, Integer row, Integer column,
-  CompositorAreaCallback compose_area);
+  ScreenGrid *message_grid, Integer grid_handle,
+  Integer row, Integer column,
+  CompositorAreaCallbacks callbacks);
 
 extern bool ui_comp_adjust_layer_order(
   ScreenGrid **layer_grids, size_t layer_count,
