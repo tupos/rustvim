@@ -127,19 +127,10 @@ bool ui_comp_put_grid(ScreenGrid *grid, int row, int col, int height, int width,
 void ui_comp_remove_grid(ScreenGrid *grid)
 {
   assert(grid != &default_grid);
-  bool removed = false;
-  bool valid = ui_comp_remove_layer(
-    layers.items, layers.size, grid, &removed);
+  bool valid = ui_comp_remove_grid_from_layer_stack(
+    layers.items, &layers.size, grid, compose_area);
   assert(valid);
-  if (!valid || !removed) {
-    return;
-  }
-
-  (void)kv_pop(layers);
-
-  // recompose the area under the grid
-  // inefficient when being overlapped: only draw up to grid->comp_index
-  ui_comp_compose_grid(grid);
+  (void)valid;
 }
 
 void ui_comp_grid_cursor_goto(Integer grid_handle, Integer r, Integer c)

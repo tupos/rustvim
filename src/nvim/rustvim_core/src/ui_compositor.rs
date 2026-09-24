@@ -2758,62 +2758,101 @@ pub unsafe extern "C" fn ui_comp_adjust_layer_order(
     layer_guards.write_cgrid_order(cgrids)
 }
 
-/// Removes one non-default grid from the active compositor-layer prefix.
+/// Removes one grid from the compositor layer stack and recomposes its area.
 ///
 /// The C grid identity is converted into a Rust layer index at this boundary.
-/// Safe removal logic works only with that index and the owned Rust grids.
-///
-/// The removed grid is moved to the final array position so C can shrink its
-/// layer vector after this function restores ownership. If the grid is not an
-/// active layer, the array is unchanged and `was_removed` receives `false`.
+/// An unregistered grid is an expected successful no-op. For an active grid,
+/// Rust updates the layer order and count before invoking the recomposition
+/// callback.
 ///
 /// # Safety
 ///
-/// `layer_grids` must point to `layer_count` writable, distinct, non-null grid
+/// `layer_count` must point to the writable active length of `layer_grids` and
+/// must not overlap the layer array or any grid.
+///
+/// `layer_grids` must point to `*layer_count` writable, distinct, non-null grid
 /// pointers. Every grid must be exclusively accessible and its buffers must
 /// satisfy the ownership and layout requirements of `ScreenGrid`.
 ///
-/// `grid` must be non-null. If it identifies an entry in `layer_grids`, that
-/// entry must not be the default layer. `was_removed` must point to writable,
-/// properly aligned storage for one `bool` and must not overlap the layer
-/// array or any grid.
+/// `grid` must be non-null. If it identifies an active layer, that layer must
+/// not be the default layer. When the compositor is drawing, `compose_area`
+/// must contain a valid callback.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ui_comp_remove_layer(
+pub unsafe extern "C" fn ui_comp_remove_grid_from_layer_stack(
     layer_grids: *mut *mut CScreenGrid,
-    layer_count: usize,
+    layer_count: *mut usize,
     grid: *mut CScreenGrid,
-    was_removed: *mut bool,
+    compose_area: Option<CompositorAreaCallback>,
 ) -> bool {
-    if grid.is_null() || was_removed.is_null() {
+    if layer_grids.is_null() || layer_count.is_null() || grid.is_null() {
         return false;
     }
 
-    // SAFETY: The caller satisfies the documented layer-array and grid
-    // ownership requirements.
-    let Some(mut layer_guards) =
-        (unsafe { CompositorLayerGuards::try_take(layer_grids, layer_count) })
-    else {
+    // SAFETY: The caller guarantees readable, properly aligned storage for the
+    // active layer count.
+    let active_layer_count = unsafe { layer_count.read() };
+    let Some(remaining_layer_count) = active_layer_count.checked_sub(1) else {
         return false;
     };
-    let removed = match layer_guards.index_of(grid) {
-        Some(layer_index) => {
-            if layer_guards.remove_layer(layer_index).is_none() {
-                return false;
-            }
-            true
+    let should_draw = lock_compositor_draw_state().should_draw();
+
+    let area = {
+        // SAFETY: The caller satisfies the documented layer-array and grid
+        // ownership requirements.
+        let Some(mut layer_guards) =
+            (unsafe { CompositorLayerGuards::try_take(layer_grids, active_layer_count) })
+        else {
+            return false;
+        };
+        let Some(layer_index) = layer_guards.index_of(grid) else {
+            return true;
+        };
+        if layer_index == 0 || should_draw && compose_area.is_none() {
+            return false;
         }
-        None => false,
+
+        let area = if should_draw {
+            let Some(grid) = layer_guards.grid(layer_index) else {
+                return false;
+            };
+            let Some(area) = CompositorRecomposeArea::try_from_grid(grid) else {
+                return false;
+            };
+            Some(area)
+        } else {
+            None
+        };
+
+        if layer_guards.remove_layer(layer_index).is_none() {
+            return false;
+        }
+
+        // SAFETY: The caller guarantees that the pointer array is writable for
+        // `active_layer_count` elements during this synchronous call.
+        let cgrids = unsafe { slice::from_raw_parts_mut(layer_grids, active_layer_count) };
+        if !layer_guards.write_cgrid_order(cgrids) {
+            return false;
+        }
+        area
     };
 
-    // SAFETY: The caller guarantees that the pointer array is writable for
-    // `layer_count` elements for the duration of this synchronous call.
-    let cgrids = unsafe { slice::from_raw_parts_mut(layer_grids, layer_count) };
-    if !layer_guards.write_cgrid_order(cgrids) {
-        return false;
+    // SAFETY: Every grid has been restored and the removed grid occupies the
+    // inactive final slot.
+    unsafe { layer_count.write(remaining_layer_count) };
+
+    if let (Some(compose_area), Some(area)) = (compose_area, area) {
+        // SAFETY: The caller supplied a valid callback. The reduced layer
+        // count has been published and every grid is owned by C again.
+        unsafe {
+            compose_area(
+                Integer::from(area.rows.start),
+                Integer::from(area.rows.end),
+                Integer::from(area.columns.start),
+                Integer::from(area.columns.end),
+            );
+        }
     }
 
-    // SAFETY: The caller provides valid, non-overlapping output storage.
-    unsafe { was_removed.write(removed) };
     true
 }
 
@@ -4136,6 +4175,72 @@ mod tests {
         );
 
         // SAFETY: Dropping the collection returned ownership to every C grid.
+        let (default_grid, removed_grid, remaining_grid) = unsafe {
+            (
+                ScreenGrid::take_from_cgrid(&mut default_cgrid),
+                ScreenGrid::take_from_cgrid(&mut removed_cgrid),
+                ScreenGrid::take_from_cgrid(&mut remaining_cgrid),
+            )
+        };
+        assert_eq!(default_grid.compositor_index(), 0);
+        assert_eq!(removed_grid.compositor_index(), 0);
+        assert_eq!(remaining_grid.compositor_index(), 1);
+    }
+
+    #[test]
+    fn ffi_removes_layer_updates_count_and_restores_ownership() {
+        let default_grid = grid_with_size(4, 4);
+        let mut removed_grid = grid_with_size(2, 2);
+        removed_grid.set_compositor_position(1, 1);
+        removed_grid.set_compositor_index(1);
+        let mut remaining_grid = grid_with_size(2, 2);
+        remaining_grid.set_compositor_index(2);
+
+        // SAFETY: Each conversion transfers its grid allocations to a distinct
+        // C representation.
+        let (mut default_cgrid, mut removed_cgrid, mut remaining_cgrid) = unsafe {
+            (
+                default_grid.to_cgrid(),
+                removed_grid.to_cgrid(),
+                remaining_grid.to_cgrid(),
+            )
+        };
+        let default_pointer = &mut default_cgrid as *mut CScreenGrid;
+        let removed_pointer = &mut removed_cgrid as *mut CScreenGrid;
+        let remaining_pointer = &mut remaining_cgrid as *mut CScreenGrid;
+        let mut cgrids = [default_pointer, removed_pointer, remaining_pointer];
+        let mut layer_count = cgrids.len();
+
+        // SAFETY: The active prefix contains distinct, exclusively accessible
+        // grids, and the callback remains valid throughout this call.
+        assert!(unsafe {
+            ui_comp_remove_grid_from_layer_stack(
+                cgrids.as_mut_ptr(),
+                &mut layer_count,
+                removed_pointer,
+                Some(noop_compose_area),
+            )
+        });
+        assert_eq!(layer_count, 2);
+        assert_eq!(
+            cgrids,
+            [default_pointer, remaining_pointer, removed_pointer]
+        );
+
+        // Removing an already inactive grid is an expected successful no-op.
+        // SAFETY: The active prefix still contains distinct, exclusively
+        // accessible grids.
+        assert!(unsafe {
+            ui_comp_remove_grid_from_layer_stack(
+                cgrids.as_mut_ptr(),
+                &mut layer_count,
+                removed_pointer,
+                Some(noop_compose_area),
+            )
+        });
+        assert_eq!(layer_count, 2);
+
+        // SAFETY: Both removal calls restored every grid allocation.
         let (default_grid, removed_grid, remaining_grid) = unsafe {
             (
                 ScreenGrid::take_from_cgrid(&mut default_cgrid),
