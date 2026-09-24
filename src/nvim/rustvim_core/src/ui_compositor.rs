@@ -204,6 +204,41 @@ struct CompositorPoint {
     column: i32,
 }
 
+/// A Rust-owned grid positioned at an explicit screen origin.
+#[derive(Clone, Copy, Debug)]
+struct PositionedGrid<'grid> {
+    grid: &'grid ScreenGrid,
+    origin: CompositorPoint,
+}
+
+impl<'grid> PositionedGrid<'grid> {
+    /// Constructs a positioned view of a grid with valid dimensions.
+    fn try_new(grid: &'grid ScreenGrid, origin: CompositorPoint) -> Option<Self> {
+        (grid.rows >= 0 && grid.cols >= 0).then_some(Self { grid, origin })
+    }
+
+    /// Reports whether the allocated grid contains one screen cell.
+    fn contains(self, point: CompositorPoint) -> bool {
+        point.row >= self.origin.row
+            && self
+                .origin
+                .row
+                .checked_add(self.grid.rows)
+                .is_some_and(|bottom| point.row < bottom)
+            && point.column >= self.origin.column
+            && self
+                .origin
+                .column
+                .checked_add(self.grid.cols)
+                .is_some_and(|right| point.column < right)
+    }
+
+    /// Applies one compositor hit-test policy to this grid.
+    fn matches(self, point: CompositorPoint, hit_test: LayerHitTest) -> bool {
+        self.contains(point) && hit_test.accepts(self)
+    }
+}
+
 /// An inclusive rectangle in composed-screen coordinates.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct CompositorRect {
@@ -1025,7 +1060,6 @@ struct CompositorLayer<'grid> {
     layer_index: usize,
     blending: bool,
     disabled: bool,
-    accepts_mouse_input: bool,
     is_default: bool,
 }
 
@@ -1052,7 +1086,6 @@ impl<'grid> CompositorLayer<'grid> {
             layer_index: grid.compositor_index(),
             blending: grid.blends_with_background(),
             disabled: grid.is_compositor_disabled(),
-            accepts_mouse_input: grid.accepts_mouse_input(),
             is_default,
         })
     }
@@ -1170,22 +1203,15 @@ impl<'grid> CompositorLayer<'grid> {
             && self.right_edge().is_some_and(|right| column < right)
     }
 
-    /// Reports whether the allocated grid contains one composed-screen cell.
-    ///
-    /// Hit testing follows the original compositor behavior and therefore
-    /// uses the allocated grid size, independently of its requested visible
-    /// size and temporary compositor-disabled state.
-    fn contains_allocated_cell(self, point: CompositorPoint) -> bool {
-        point.row >= self.origin_row
-            && self
-                .origin_row
-                .checked_add(self.grid.rows)
-                .is_some_and(|bottom| point.row < bottom)
-            && point.column >= self.origin_column
-            && self
-                .origin_column
-                .checked_add(self.grid.cols)
-                .is_some_and(|right| point.column < right)
+    /// Returns this layer as a positioned allocated grid.
+    fn positioned_grid(self) -> Option<PositionedGrid<'grid>> {
+        PositionedGrid::try_new(
+            self.grid,
+            CompositorPoint {
+                row: self.origin_row,
+                column: self.origin_column,
+            },
+        )
     }
 
     /// Borrows the grid cells corresponding to composed-screen columns.
@@ -1222,11 +1248,11 @@ enum LayerHitTest {
 }
 
 impl LayerHitTest {
-    /// Reports whether one layer participates in this hit test.
-    fn accepts(self, layer: CompositorLayer<'_>) -> bool {
+    /// Reports whether one positioned grid participates in this hit test.
+    fn accepts(self, grid: PositionedGrid<'_>) -> bool {
         match self {
             Self::Any => true,
-            Self::MouseEnabled => layer.accepts_mouse_input,
+            Self::MouseEnabled => grid.grid.accepts_mouse_input(),
         }
     }
 }
@@ -1390,7 +1416,9 @@ impl<'grid> CompositorLayerStack<'grid> {
     fn topmost_layer_at(&self, point: CompositorPoint, hit_test: LayerHitTest) -> Option<usize> {
         self.layers.get(1..)?.iter().rev().find_map(|layer| {
             let layer = *layer;
-            (layer.contains_allocated_cell(point) && hit_test.accepts(layer))
+            layer
+                .positioned_grid()?
+                .matches(point, hit_test)
                 .then_some(layer.layer_index)
         })
     }
@@ -2661,6 +2689,40 @@ pub unsafe extern "C" fn ui_comp_find_layer_at_coord(
         .unwrap_or(usize::MAX)
 }
 
+/// Reports whether one window grid accepts mouse input at a screen coordinate.
+///
+/// Unlike compositor layers, multigrid window fallbacks use the window's
+/// screen origin supplied by C.
+///
+/// # Safety
+///
+/// `grid` must point to a valid, exclusively accessible `CScreenGrid` whose
+/// buffers satisfy the ownership and layout requirements of `ScreenGrid`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ui_comp_grid_accepts_mouse_at(
+    grid: *mut CScreenGrid,
+    origin_row: libc::c_int,
+    origin_column: libc::c_int,
+    row: libc::c_int,
+    column: libc::c_int,
+) -> bool {
+    if grid.is_null() {
+        return false;
+    }
+
+    // SAFETY: The caller transfers exclusive ownership of the grid buffers
+    // into the guard for the duration of this operation.
+    let grid = unsafe { ScreenGridGuard::take(grid) };
+    PositionedGrid::try_new(
+        &grid,
+        CompositorPoint {
+            row: origin_row,
+            column: origin_column,
+        },
+    )
+    .is_some_and(|grid| grid.matches(CompositorPoint { row, column }, LayerHitTest::MouseEnabled))
+}
+
 /// Composes and submits one complete line from an ordered C grid array.
 ///
 /// # Safety
@@ -3009,7 +3071,6 @@ mod tests {
             layer_index,
             blending: false,
             disabled,
-            accepts_mouse_input: true,
             is_default: layer_index == 0,
         }
     }
@@ -3699,13 +3760,37 @@ mod tests {
     }
 
     #[test]
+    fn positioned_grid_hit_testing_uses_external_half_open_bounds() {
+        let grid = grid_with_size(2, 3);
+        let positioned =
+            PositionedGrid::try_new(&grid, CompositorPoint { row: 4, column: 5 }).unwrap();
+
+        assert!(positioned.matches(
+            CompositorPoint { row: 4, column: 5 },
+            LayerHitTest::MouseEnabled,
+        ));
+        assert!(positioned.matches(
+            CompositorPoint { row: 5, column: 7 },
+            LayerHitTest::MouseEnabled,
+        ));
+        assert!(!positioned.matches(
+            CompositorPoint { row: 6, column: 5 },
+            LayerHitTest::MouseEnabled,
+        ));
+        assert!(!positioned.matches(
+            CompositorPoint { row: 5, column: 8 },
+            LayerHitTest::MouseEnabled,
+        ));
+    }
+
+    #[test]
     fn mouse_hit_testing_skips_layers_that_reject_mouse_input() {
         let default_grid = grid_with_size(3, 3);
         let lower_grid = grid_with_size(2, 2);
-        let upper_grid = grid_with_size(2, 2);
+        let mut upper_grid = grid_with_size(2, 2);
+        upper_grid.set_accepts_mouse_input(false);
         let lower_layer = compositor_layer(&lower_grid, 1, 2, 1, false);
-        let mut upper_layer = compositor_layer(&upper_grid, 1, 2, 2, false);
-        upper_layer.accepts_mouse_input = false;
+        let upper_layer = compositor_layer(&upper_grid, 1, 2, 2, false);
         let layers = CompositorLayerStack {
             layers: vec![
                 compositor_layer(&default_grid, 0, 3, 0, false),
