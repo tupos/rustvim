@@ -260,6 +260,13 @@ static void compose_line(Integer row, Integer startcol, Integer endcol, LineFlag
   (void)composed;
 }
 
+static bool clip_area_to_default_grid(CompositorRecomposeArea *area)
+{
+  bool clipped = ui_comp_clip_recompose_area(&default_grid, *area, area);
+  assert(clipped);
+  return clipped;
+}
+
 static void compose_debug(Integer startrow, Integer endrow, Integer startcol, Integer endcol,
                           int syn_id, bool delay)
 {
@@ -267,22 +274,30 @@ static void compose_debug(Integer startrow, Integer endrow, Integer startcol, In
     return;
   }
 
-  endrow = MIN(endrow, default_grid.rows);
-  endcol = MIN(endcol, default_grid.cols);
+  CompositorRecomposeArea area = {
+    .start_row = startrow,
+    .end_row = endrow,
+    .start_column = startcol,
+    .end_column = endcol,
+  };
+  if (!clip_area_to_default_grid(&area)) {
+    return;
+  }
   int attr = syn_id2attr(syn_id);
 
   if (delay) {
-    debug_delay(endrow - startrow);
+    debug_delay(area.end_row - area.start_row);
   }
 
-  for (int row = (int)startrow; row < endrow; row++) {
-    bool emitted = ui_comp_emit_clear_line(row, startcol, endcol, attr);
+  for (int row = (int)area.start_row; row < area.end_row; row++) {
+    bool emitted =
+      ui_comp_emit_clear_line(row, area.start_column, area.end_column, attr);
     assert(emitted);
     (void)emitted;
   }
 
   if (delay) {
-    debug_delay(endrow - startrow);
+    debug_delay(area.end_row - area.start_row);
   }
 }
 
@@ -297,13 +312,19 @@ static void debug_delay(Integer lines)
 static void compose_area(Integer startrow, Integer endrow, Integer startcol, Integer endcol)
 {
   compose_debug(startrow, endrow, startcol, endcol, dbghl_recompose, true);
-  endrow = MIN(endrow, default_grid.rows);
-  endcol = MIN(endcol, default_grid.cols);
-  if (endcol <= startcol) {
+
+  CompositorRecomposeArea area = {
+    .start_row = startrow,
+    .end_row = endrow,
+    .start_column = startcol,
+    .end_column = endcol,
+  };
+  if (!clip_area_to_default_grid(&area)
+      || area.end_column <= area.start_column) {
     return;
   }
-  for (int r = (int)startrow; r < endrow; r++) {
-    compose_line(r, startcol, endcol, kLineFlagInvalid);
+  for (int row = (int)area.start_row; row < area.end_row; row++) {
+    compose_line(row, area.start_column, area.end_column, kLineFlagInvalid);
   }
 }
 

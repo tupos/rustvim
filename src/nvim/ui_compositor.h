@@ -129,6 +129,10 @@ extern bool ui_comp_place_existing_grid(
   ScreenGrid *grid, CompositorGridPlacementRequest request,
   CompositorAreaCallback compose_area, bool *moved);
 
+extern bool ui_comp_clip_recompose_area(
+  ScreenGrid *grid, CompositorRecomposeArea area,
+  CompositorRecomposeArea *output);
+
 extern bool ui_comp_grid_recompose_area(
   ScreenGrid *grid, CompositorRecomposeArea *output);
 

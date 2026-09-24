@@ -291,6 +291,34 @@ impl CompositorRecomposeArea {
             columns: column..column.checked_add(grid.cols)?,
         })
     }
+
+    /// Clamps this area's exclusive ends to an allocated grid's dimensions.
+    ///
+    /// Start coordinates remain unchanged to preserve the compositor's
+    /// established clipping behavior.
+    fn with_ends_clamped_to_grid(self, grid: &ScreenGrid) -> Option<Self> {
+        if grid.rows < 0 || grid.cols < 0 {
+            return None;
+        }
+
+        Some(Self {
+            rows: self.rows.start..self.rows.end.min(grid.rows),
+            columns: self.columns.start..self.columns.end.min(grid.cols),
+        })
+    }
+}
+
+impl TryFrom<CCompositorRecomposeArea> for CompositorRecomposeArea {
+    type Error = ();
+
+    fn try_from(area: CCompositorRecomposeArea) -> Result<Self, Self::Error> {
+        Ok(Self {
+            rows: i32::try_from(area.start_row).map_err(|_| ())?
+                ..i32::try_from(area.end_row).map_err(|_| ())?,
+            columns: i32::try_from(area.start_column).map_err(|_| ())?
+                ..i32::try_from(area.end_column).map_err(|_| ())?,
+        })
+    }
 }
 
 impl From<CompositorRecomposeArea> for CCompositorRecomposeArea {
@@ -2193,6 +2221,46 @@ pub unsafe extern "C" fn ui_comp_plan_message_position(
     true
 }
 
+/// Clamps a recomposition area's exclusive ends to an allocated grid.
+///
+/// The returned area contains only owned scalar data. Grid ownership is
+/// restored before this function returns.
+///
+/// # Safety
+///
+/// `grid` must point to a valid, exclusively accessible `CScreenGrid` whose
+/// buffers satisfy the ownership and layout requirements of `ScreenGrid`.
+///
+/// `output` must point to writable, properly aligned storage for one
+/// `CCompositorRecomposeArea` and must not overlap `grid`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ui_comp_clip_recompose_area(
+    grid: *mut CScreenGrid,
+    area: CCompositorRecomposeArea,
+    output: *mut CCompositorRecomposeArea,
+) -> bool {
+    if grid.is_null() || output.is_null() {
+        return false;
+    }
+    let Ok(area) = CompositorRecomposeArea::try_from(area) else {
+        return false;
+    };
+
+    let area = {
+        // SAFETY: The caller transfers exclusive ownership of the grid buffers
+        // into the guard for the duration of this operation.
+        let grid = unsafe { ScreenGridGuard::take(grid) };
+        area.with_ends_clamped_to_grid(&grid)
+    };
+    let Some(area) = area else {
+        return false;
+    };
+
+    // SAFETY: The caller provides valid, non-overlapping output storage.
+    unsafe { output.write(area.into()) };
+    true
+}
+
 /// Returns the composed-screen area occupied by one grid.
 ///
 /// The returned area contains only owned scalar values. Grid ownership is
@@ -3291,6 +3359,23 @@ mod tests {
         grid.set_compositor_position(i32::MAX, i32::MAX);
 
         assert_eq!(CompositorRecomposeArea::try_from_grid(&grid), None);
+    }
+
+    #[test]
+    fn recomposition_area_clamps_ends_to_allocated_grid_size() {
+        let grid = grid_with_size(3, 4);
+
+        assert_eq!(
+            CompositorRecomposeArea {
+                rows: 1..5,
+                columns: 2..6,
+            }
+            .with_ends_clamped_to_grid(&grid),
+            Some(CompositorRecomposeArea {
+                rows: 1..3,
+                columns: 2..4,
+            })
+        );
     }
 
     #[test]
