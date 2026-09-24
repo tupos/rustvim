@@ -227,6 +227,13 @@ ScreenGrid *ui_comp_get_grid_at_coord(int row, int col)
   return &default_grid;
 }
 
+bool ui_comp_cursor_is_covered_by_higher_layer(ScreenGrid *current_grid, int row, int col,
+                                               int minimum_z_index_gap)
+{
+  return ui_comp_cursor_is_covered_by_higher_layer_in_stack(
+    layers.items, layers.size, current_grid, row, col, minimum_z_index_gap);
+}
+
 /// Baseline implementation. This is always correct, but we can sometimes
 /// do something more efficient (where efficiency means smaller deltas to
 /// the downstream UI.)

@@ -1500,6 +1500,23 @@ impl<'grid> CompositorLayerStack<'grid> {
         })
     }
 
+    /// Reports whether a sufficiently higher layer covers `current_grid`'s cursor.
+    fn is_cursor_covered_by_higher_layer(
+        &self,
+        point: CompositorPoint,
+        current_grid: &ScreenGrid,
+        minimum_z_index_gap: u32,
+    ) -> bool {
+        self.topmost_layer_at(point, LayerHitTest::Any)
+            .and_then(|layer_index| self.layer(layer_index))
+            .is_some_and(|top_layer| {
+                !std::ptr::eq(top_layer.grid, current_grid)
+                    && top_layer
+                        .grid
+                        .is_at_least_z_index_above(current_grid, minimum_z_index_gap)
+            })
+    }
+
     /// Plans a stable relocation after one layer's z-index changes.
     fn plan_layer_adjustment(
         &self,
@@ -2212,12 +2229,6 @@ pub extern "C" fn ui_comp_unregister_composed_ui() -> bool {
     lock_compositor_draw_state()
         .unregister_ui()
         .expect("cannot unregister a composed UI when none are attached")
-}
-
-/// Reports whether the compositor should currently emit composed output.
-#[unsafe(no_mangle)]
-pub extern "C" fn ui_comp_should_draw() -> bool {
-    lock_compositor_draw_state().should_draw()
 }
 
 /// Updates screen validity and returns its previous value.
@@ -2940,41 +2951,60 @@ pub unsafe extern "C" fn ui_comp_grid_accepts_mouse_at(
     .is_some_and(|grid| grid.matches(CompositorPoint { row, column }, LayerHitTest::MouseEnabled))
 }
 
-/// Reports whether the selected top grid obscures the current grid's cursor.
-///
-/// The top grid must be distinct from both the current and default grids, and
-/// its z-index must exceed the current grid's by at least the requested gap.
+/// Reports whether a sufficiently higher compositor layer covers the cursor.
 ///
 /// # Safety
 ///
-/// `top_grid`, `current_grid`, and `default_grid` must point to valid
-/// `CScreenGrid` values. When `top_grid` differs from the other grids,
-/// `top_grid` and `current_grid` must be exclusively accessible and their
-/// buffers must satisfy the ownership and layout requirements of `ScreenGrid`.
+/// `layer_grids` must point to `layer_count` readable, distinct, non-null grid
+/// pointers. Every grid must be exclusively accessible and its buffers must
+/// satisfy the ownership and layout requirements of `ScreenGrid`.
+///
+/// `current_grid` must either identify one grid in `layer_grids` or identify
+/// another exclusively accessible grid satisfying the same requirements.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ui_comp_cursor_is_obscured_by_grid(
-    top_grid: *mut CScreenGrid,
+pub unsafe extern "C" fn ui_comp_cursor_is_covered_by_higher_layer_in_stack(
+    layer_grids: *const *mut CScreenGrid,
+    layer_count: usize,
     current_grid: *mut CScreenGrid,
-    default_grid: *mut CScreenGrid,
+    row: libc::c_int,
+    column: libc::c_int,
     minimum_z_index_gap: libc::c_int,
 ) -> bool {
-    if top_grid.is_null()
-        || current_grid.is_null()
-        || default_grid.is_null()
-        || top_grid == current_grid
-        || top_grid == default_grid
-    {
+    if !lock_compositor_draw_state().should_draw() {
+        return false;
+    }
+    if current_grid.is_null() {
         return false;
     }
     let Ok(minimum_z_index_gap) = u32::try_from(minimum_z_index_gap) else {
         return false;
     };
 
-    // SAFETY: The checks above establish that the two grids are non-null and
-    // distinct, and the caller guarantees their validity and exclusive access.
-    let top_grid = unsafe { ScreenGridGuard::take(top_grid) };
+    // SAFETY: The caller satisfies the documented layer-array and grid
+    // ownership requirements.
+    let Some(layer_guards) = (unsafe { CompositorLayerGuards::try_take(layer_grids, layer_count) })
+    else {
+        return false;
+    };
+    let current_layer_index = layer_guards.index_of(current_grid);
+    let Some(layers) = layer_guards.layer_stack() else {
+        return false;
+    };
+    let point = CompositorPoint { row, column };
+
+    if let Some(current_layer_index) = current_layer_index {
+        return layer_guards
+            .grid(current_layer_index)
+            .is_some_and(|current_grid| {
+                layers.is_cursor_covered_by_higher_layer(point, current_grid, minimum_z_index_gap)
+            });
+    }
+
+    // SAFETY: The current-grid pointer was not present in the validated layer
+    // array, and the caller guarantees that it is otherwise distinct, valid,
+    // and exclusively accessible.
     let current_grid = unsafe { ScreenGridGuard::take(current_grid) };
-    top_grid.is_at_least_z_index_above(&current_grid, minimum_z_index_gap)
+    layers.is_cursor_covered_by_higher_layer(point, &current_grid, minimum_z_index_gap)
 }
 
 /// Composes and submits one complete line from an ordered C grid array.
@@ -4173,6 +4203,29 @@ mod tests {
             layers.topmost_layer_at(CompositorPoint { row: 0, column: 0 }, LayerHitTest::Any,),
             None
         );
+    }
+
+    #[test]
+    fn cursor_coverage_requires_a_distinct_layer_with_a_sufficient_z_index() {
+        let default_grid = grid_with_size(3, 3);
+        let current_grid = grid_with_size(3, 3);
+        let upper_grid = grid_with_size(2, 2);
+        let layers = CompositorLayerStack {
+            layers: vec![
+                compositor_layer(&default_grid, 0, 3, 0, false),
+                compositor_layer(&upper_grid, 1, 2, 1, false),
+            ],
+        };
+        let covered_point = CompositorPoint { row: 0, column: 1 };
+
+        assert!(layers.is_cursor_covered_by_higher_layer(covered_point, &current_grid, 0));
+        assert!(!layers.is_cursor_covered_by_higher_layer(covered_point, &current_grid, 1,));
+        assert!(!layers.is_cursor_covered_by_higher_layer(covered_point, &upper_grid, 0,));
+        assert!(!layers.is_cursor_covered_by_higher_layer(
+            CompositorPoint { row: 2, column: 2 },
+            &current_grid,
+            0,
+        ));
     }
 
     #[test]

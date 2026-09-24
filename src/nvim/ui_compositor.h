@@ -121,7 +121,6 @@ typedef void (*CompositorAreaCallback)(
 
 extern void ui_comp_register_composed_ui(void);
 extern bool ui_comp_unregister_composed_ui(void);
-extern bool ui_comp_should_draw(void);
 extern bool ui_comp_set_screen_valid(bool valid);
 
 extern bool ui_comp_resize_buffer(Integer width);
@@ -173,9 +172,13 @@ extern bool ui_comp_grid_accepts_mouse_at(
   ScreenGrid *grid, int origin_row, int origin_column,
   int row, int column);
 
-extern bool ui_comp_cursor_is_obscured_by_grid(
-  ScreenGrid *top_grid, ScreenGrid *current_grid,
-  ScreenGrid *default_grid, int minimum_z_index_gap);
+extern bool ui_comp_cursor_is_covered_by_higher_layer(
+  ScreenGrid *current_grid, int row, int column,
+  int minimum_z_index_gap);
+
+extern bool ui_comp_cursor_is_covered_by_higher_layer_in_stack(
+  ScreenGrid *const *layer_grids, size_t layer_count,
+  ScreenGrid *current_grid, int row, int column, int minimum_z_index_gap);
 
 extern bool ui_comp_compose_line(
   ScreenGrid *const *layer_grids, size_t layer_count,

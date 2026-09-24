@@ -651,7 +651,7 @@ void ui_cursor_shape(void)
 /// zindex of the current window by 50).
 static bool ui_cursor_is_behind_floatwin(void)
 {
-  if ((State & MODE_CMDLINE) || !ui_comp_should_draw()) {
+  if (State & MODE_CMDLINE) {
     return false;
   }
 
@@ -659,10 +659,8 @@ static bool ui_cursor_is_behind_floatwin(void)
   int ccol = curwin->w_wincol + curwin->w_wincol_off
              + (curwin->w_p_rl ? curwin->w_view_width - curwin->w_wcol - 1 : curwin->w_wcol);
 
-  ScreenGrid *top_grid = ui_comp_get_grid_at_coord(crow, ccol);
-  return ui_comp_cursor_is_obscured_by_grid(
-    top_grid, &curwin->w_grid_alloc, &default_grid,
-    kZIndexFloatDefault);
+  return ui_comp_cursor_is_covered_by_higher_layer(
+    &curwin->w_grid_alloc, crow, ccol, kZIndexFloatDefault);
 }
 
 /// Returns true if the given UI extension is enabled.
