@@ -118,7 +118,6 @@ bool ui_comp_put_grid(ScreenGrid *grid, int row, int col, int height, int width,
     .height = height,
     .width = width,
     .valid = valid,
-    .should_draw = ui_comp_should_draw(),
   };
 
   if (ui_comp_has_grid(grid)) {
@@ -415,7 +414,6 @@ void ui_comp_msg_set_pos(Integer grid, Integer row, Boolean scrolled, String sep
     .screen_columns = Columns,
     .scrolled = scrolled,
     .has_separator_character = has_separator_character,
-    .should_draw = ui_comp_should_draw(),
   };
   CompositorMessagePositionPlan plan;
   bool planned = ui_comp_plan_message_position(&msg_grid, &default_grid, request, &plan);

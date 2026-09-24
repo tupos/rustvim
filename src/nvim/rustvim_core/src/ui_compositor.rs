@@ -47,7 +47,6 @@ pub struct CCompositorGridPlacementRequest {
     height: libc::c_int,
     width: libc::c_int,
     valid: bool,
-    should_draw: bool,
 }
 
 /// C representation of one half-open compositor recomposition area.
@@ -117,7 +116,6 @@ pub struct CCompositorMessagePositionRequest {
     screen_columns: libc::c_int,
     scrolled: bool,
     has_separator_character: bool,
-    should_draw: bool,
 }
 
 /// C representation of the effects of one message-grid position update.
@@ -504,7 +502,6 @@ struct CompositorMessagePositionRequest {
     separator_character: Option<VimSCharT>,
     screen_size: CompositorSize,
     scrolled: bool,
-    should_draw: bool,
 }
 
 impl TryFrom<CCompositorMessagePositionRequest> for CompositorMessagePositionRequest {
@@ -526,7 +523,6 @@ impl TryFrom<CCompositorMessagePositionRequest> for CompositorMessagePositionReq
                 width: request.screen_columns,
             },
             scrolled: request.scrolled,
-            should_draw: request.should_draw,
         })
     }
 }
@@ -654,12 +650,13 @@ impl MessageCompositorState {
         request: CompositorMessagePositionRequest,
         message_grid: &ScreenGrid,
         default_grid: &ScreenGrid,
+        should_draw: bool,
     ) -> Option<CompositorMessagePositionPlan> {
         if default_grid.cols < 0 {
             return None;
         }
 
-        if !request.should_draw {
+        if !should_draw {
             return Some(CompositorMessagePositionPlan::default());
         }
 
@@ -723,13 +720,14 @@ impl MessageCompositorState {
         message_grid: &mut ScreenGrid,
         default_grid: &ScreenGrid,
         request: CompositorMessagePositionRequest,
+        should_draw: bool,
     ) -> Option<CompositorMessagePositionPlan> {
         let separator_row = if request.scrolled && request.row > 0 {
             Some(request.row.checked_sub(1)?)
         } else {
             None
         };
-        let plan = self.plan_redraw(request, message_grid, default_grid)?;
+        let plan = self.plan_redraw(request, message_grid, default_grid, should_draw)?;
 
         message_grid.mark_compositor_index_for_update();
         let (_, column) = message_grid.compositor_position();
@@ -2286,13 +2284,19 @@ pub unsafe extern "C" fn ui_comp_plan_message_position(
     let Ok(request) = CompositorMessagePositionRequest::try_from(request) else {
         return false;
     };
+    let should_draw = lock_compositor_draw_state().should_draw();
 
     let plan = {
         // SAFETY: The caller transfers exclusive ownership of both grids'
         // buffers into distinct guards for the duration of this operation.
         let mut message_grid = unsafe { ScreenGridGuard::take(message_grid) };
         let default_grid = unsafe { ScreenGridGuard::take(default_grid) };
-        lock_message_compositor_state().update_position(&mut message_grid, &default_grid, request)
+        lock_message_compositor_state().update_position(
+            &mut message_grid,
+            &default_grid,
+            request,
+            should_draw,
+        )
     };
     let Some(plan) = plan else {
         return false;
@@ -2391,8 +2395,8 @@ pub unsafe extern "C" fn ui_comp_grid_recompose_area(
 /// pointers. Every grid must be exclusively accessible and its buffers must
 /// satisfy the ownership and layout requirements of `ScreenGrid`.
 ///
-/// `grid` must identify one non-default grid in `layer_grids`. When
-/// `request.should_draw` is true, `compose_area` must contain a valid callback.
+/// `grid` must identify one non-default grid in `layer_grids`. When the
+/// compositor is drawing, `compose_area` must contain a valid callback.
 /// `moved` must point to writable, properly aligned storage for one `bool` and
 /// must not overlap the layer array or any grid.
 #[unsafe(no_mangle)]
@@ -2404,12 +2408,16 @@ pub unsafe extern "C" fn ui_comp_place_existing_grid(
     compose_area: Option<CompositorAreaCallback>,
     moved: *mut bool,
 ) -> bool {
-    if grid.is_null() || moved.is_null() || (request.should_draw && compose_area.is_none()) {
+    if grid.is_null() || moved.is_null() {
         return false;
     }
     let Ok(placement) = CompositorGridPlacement::try_from(request) else {
         return false;
     };
+    let should_draw = lock_compositor_draw_state().should_draw();
+    if should_draw && compose_area.is_none() {
+        return false;
+    }
 
     let plan = {
         // SAFETY: The caller satisfies the documented layer-array and grid
@@ -2432,9 +2440,7 @@ pub unsafe extern "C" fn ui_comp_place_existing_grid(
             let Some(layer) = layers.layer(layer_index) else {
                 return false;
             };
-            let Some(plan) =
-                layer.try_plan_placement(placement, request.valid, request.should_draw)
-            else {
+            let Some(plan) = layer.try_plan_placement(placement, request.valid, should_draw) else {
                 return false;
             };
             plan
@@ -2444,7 +2450,7 @@ pub unsafe extern "C" fn ui_comp_place_existing_grid(
             return false;
         };
         grid.mark_compositor_index_for_update();
-        if request.should_draw {
+        if should_draw {
             grid.set_compositor_disabled(true);
         } else {
             placement.apply_to(grid);
@@ -2467,7 +2473,7 @@ pub unsafe extern "C" fn ui_comp_place_existing_grid(
         }
     }
 
-    if request.should_draw {
+    if should_draw {
         // SAFETY: Every earlier guard restored its grid before the callbacks,
         // and the caller guarantees that the layer array remains valid for
         // this synchronous operation.
@@ -2518,7 +2524,7 @@ pub unsafe extern "C" fn ui_comp_place_existing_grid(
 ///
 /// `grid` must identify the final, newly appended entry in `layer_grids`.
 /// `current_window_grid` may be null or identify an entry in `layer_grids`.
-/// When `request.should_draw` is true, `compose_area` must contain a valid
+/// When the compositor is drawing, `compose_area` must contain a valid
 /// callback.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ui_comp_place_new_grid(
@@ -2530,12 +2536,16 @@ pub unsafe extern "C" fn ui_comp_place_new_grid(
     on_top: bool,
     compose_area: Option<CompositorAreaCallback>,
 ) -> bool {
-    if grid.is_null() || (request.should_draw && compose_area.is_none()) {
+    if grid.is_null() {
         return false;
     }
     let Ok(placement) = CompositorGridPlacement::try_from(request) else {
         return false;
     };
+    let should_draw = lock_compositor_draw_state().should_draw();
+    if should_draw && compose_area.is_none() {
+        return false;
+    }
 
     let plan = {
         // SAFETY: The caller satisfies the documented layer-array and grid
@@ -2568,7 +2578,7 @@ pub unsafe extern "C" fn ui_comp_place_new_grid(
                 grid,
                 placement,
                 request.valid,
-                request.should_draw,
+                should_draw,
             ) else {
                 return false;
             };
@@ -3306,6 +3316,14 @@ mod tests {
         }
     }
 
+    unsafe extern "C" fn noop_compose_area(
+        _start_row: Integer,
+        _end_row: Integer,
+        _start_column: Integer,
+        _end_column: Integer,
+    ) {
+    }
+
     fn message_position_request(row: i32, scrolled: bool) -> CompositorMessagePositionRequest {
         CompositorMessagePositionRequest {
             row,
@@ -3315,7 +3333,6 @@ mod tests {
                 width: 20,
             },
             scrolled,
-            should_draw: true,
         }
     }
 
@@ -3345,10 +3362,13 @@ mod tests {
         let mut state = MessageCompositorState::new();
         let mut message_grid = grid_with_size(10, 20);
         let default_grid = grid_with_size(10, 18);
-        let mut initial = message_position_request(5, false);
-        initial.should_draw = false;
         assert_eq!(
-            state.update_position(&mut message_grid, &default_grid, initial),
+            state.update_position(
+                &mut message_grid,
+                &default_grid,
+                message_position_request(5, false),
+                false,
+            ),
             Some(CompositorMessagePositionPlan::default())
         );
 
@@ -3357,6 +3377,7 @@ mod tests {
                 &mut message_grid,
                 &default_grid,
                 message_position_request(7, false),
+                true,
             )
             .unwrap();
 
@@ -3378,10 +3399,13 @@ mod tests {
         let mut state = MessageCompositorState::new();
         let mut message_grid = grid_with_size(10, 20);
         let default_grid = grid_with_size(10, 18);
-        let mut initial = message_position_request(5, false);
-        initial.should_draw = false;
         state
-            .update_position(&mut message_grid, &default_grid, initial)
+            .update_position(
+                &mut message_grid,
+                &default_grid,
+                message_position_request(5, false),
+                false,
+            )
             .unwrap();
 
         let plan = state
@@ -3389,6 +3413,7 @@ mod tests {
                 &mut message_grid,
                 &default_grid,
                 message_position_request(2, true),
+                true,
             )
             .unwrap();
 
@@ -3416,10 +3441,13 @@ mod tests {
         let mut message_grid = grid_with_size(10, 20);
         message_grid.set_blends_with_background(true);
         let default_grid = grid_with_size(10, 18);
-        let mut initial = message_position_request(5, false);
-        initial.should_draw = false;
         state
-            .update_position(&mut message_grid, &default_grid, initial)
+            .update_position(
+                &mut message_grid,
+                &default_grid,
+                message_position_request(5, false),
+                false,
+            )
             .unwrap();
 
         let plan = state
@@ -3427,6 +3455,7 @@ mod tests {
                 message_position_request(2, true),
                 &message_grid,
                 &default_grid,
+                true,
             )
             .unwrap();
 
@@ -3726,7 +3755,7 @@ mod tests {
         let mut moved = false;
 
         // SAFETY: Both pointers identify distinct, exclusively accessible
-        // grids. Drawing is disabled, so no callback is required.
+        // grids, and the callback remains valid throughout this call.
         assert!(unsafe {
             ui_comp_place_existing_grid(
                 cgrids.as_ptr(),
@@ -3738,9 +3767,8 @@ mod tests {
                     height: 2,
                     width: 2,
                     valid: true,
-                    should_draw: false,
                 },
-                None,
+                Some(noop_compose_area),
                 &mut moved,
             )
         });
@@ -3781,8 +3809,8 @@ mod tests {
         let mut cgrids = [default_pointer, current_pointer, appended_pointer];
 
         // SAFETY: The pointers identify distinct, exclusively accessible
-        // grids. The new grid occupies the appended slot, and drawing is
-        // disabled, so no callback is required.
+        // grids. The new grid occupies the appended slot, and the callback
+        // remains valid throughout this call.
         assert!(unsafe {
             ui_comp_place_new_grid(
                 cgrids.as_mut_ptr(),
@@ -3795,10 +3823,9 @@ mod tests {
                     height: 2,
                     width: 2,
                     valid: true,
-                    should_draw: false,
                 },
                 false,
-                None,
+                Some(noop_compose_area),
             )
         });
         assert_eq!(cgrids, [default_pointer, appended_pointer, current_pointer]);

@@ -14,7 +14,6 @@ typedef struct {
   int height;
   int width;
   bool valid;
-  bool should_draw;
 } CompositorGridPlacementRequest;
 
 typedef struct {
@@ -56,7 +55,6 @@ typedef struct {
   int screen_columns;
   bool scrolled;
   bool has_separator_character;
-  bool should_draw;
 } CompositorMessagePositionRequest;
 
 typedef struct {
