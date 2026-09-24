@@ -422,10 +422,6 @@ void ui_comp_msg_set_pos(Integer grid, Integer row, Boolean scrolled, String sep
 void ui_comp_grid_scroll(Integer grid, Integer top, Integer bot, Integer left, Integer right,
                          Integer rows, Integer cols)
 {
-  if (!ui_comp_should_draw()) {
-    return;
-  }
-
   CompositorScrollRequest request = {
     .grid_handle = (int)grid,
     .top = top,
