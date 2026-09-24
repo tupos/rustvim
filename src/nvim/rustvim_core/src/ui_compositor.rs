@@ -25,6 +25,7 @@ type CompositorAreaCallback = unsafe extern "C" fn(
 );
 
 unsafe extern "C" {
+    fn ui_composed_call_grid_cursor_goto(grid: Integer, row: Integer, column: Integer);
     fn ui_composed_call_raw_line(
         grid: Integer,
         row: Integer,
@@ -57,27 +58,6 @@ pub struct CCompositorRecomposeArea {
     end_row: Integer,
     start_column: Integer,
     end_column: Integer,
-}
-
-/// C representation of one compositor cursor request.
-#[repr(C)]
-#[derive(Clone, Copy, Debug)]
-pub struct CCompositorCursorRequest {
-    grid_handle: libc::c_int,
-    row: libc::c_int,
-    column: libc::c_int,
-}
-
-/// C representation of one planned compositor cursor update.
-#[repr(C)]
-#[derive(Clone, Copy, Debug)]
-pub struct CCompositorCursorPlan {
-    layer_index: usize,
-    row: libc::c_int,
-    column: libc::c_int,
-    raise_to: usize,
-    should_raise: bool,
-    emit: bool,
 }
 
 /// Result of composing one foreground segment over its background.
@@ -344,18 +324,6 @@ struct CompositorCursorRequest {
     local_position: CompositorPoint,
 }
 
-impl From<CCompositorCursorRequest> for CompositorCursorRequest {
-    fn from(request: CCompositorCursorRequest) -> Self {
-        Self {
-            grid_handle: request.grid_handle,
-            local_position: CompositorPoint {
-                row: request.row,
-                column: request.column,
-            },
-        }
-    }
-}
-
 /// Selected layer and composed-screen cursor action.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct CompositorCursorPlan {
@@ -365,17 +333,11 @@ struct CompositorCursorPlan {
     emit: bool,
 }
 
-impl From<CompositorCursorPlan> for CCompositorCursorPlan {
-    fn from(plan: CompositorCursorPlan) -> Self {
-        Self {
-            layer_index: plan.layer_index,
-            row: plan.screen_position.row,
-            column: plan.screen_position.column,
-            raise_to: plan.raise_to.unwrap_or(plan.layer_index),
-            should_raise: plan.raise_to.is_some(),
-            emit: plan.emit,
-        }
-    }
+/// Action selected for one compositor cursor request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CompositorCursorAction {
+    Ignore,
+    Update(CompositorCursorPlan),
 }
 
 /// Requested position and size of one compositor grid.
@@ -1458,9 +1420,12 @@ impl<'grid> CompositorLayerStack<'grid> {
     }
 
     /// Selects a grid and plans its composed-screen cursor update.
-    fn plan_cursor(&self, request: CompositorCursorRequest) -> Option<CompositorCursorPlan> {
+    fn plan_cursor(&self, request: CompositorCursorRequest) -> Option<CompositorCursorAction> {
         let screen_size = self.default_layer()?.allocated_size();
-        let layer_index = self.layer_index_with_handle(request.grid_handle)?;
+        let Some(layer_index) = self.layer_index_with_handle(request.grid_handle) else {
+            return Some(CompositorCursorAction::Ignore);
+        };
+
         let layer = self.layer(layer_index)?;
         let screen_position = CompositorPoint {
             row: layer.origin_row.checked_add(request.local_position.row)?,
@@ -1481,12 +1446,12 @@ impl<'grid> CompositorLayerStack<'grid> {
         let emit =
             screen_position.column < screen_size.width && screen_position.row < screen_size.height;
 
-        Some(CompositorCursorPlan {
+        Some(CompositorCursorAction::Update(CompositorCursorPlan {
             layer_index,
             screen_position,
             raise_to,
             emit,
-        })
+        }))
     }
 
     /// Finds the topmost non-default layer containing one screen cell.
@@ -2640,45 +2605,107 @@ pub unsafe extern "C" fn ui_comp_place_new_grid(
     true
 }
 
-/// Plans selecting, positioning, and optionally raising a cursor grid.
+/// Applies one cursor update to the compositor layer stack.
 ///
-/// The grid handle and C layer array are converted into native Rust state at
-/// this boundary. Every grid is restored before this function returns.
+/// Any required layer movement is completed before recomposition callbacks and
+/// cursor output are emitted. Every grid is restored before a callback runs.
 ///
 /// # Safety
 ///
-/// `layer_grids` must point to `layer_count` readable, distinct, non-null grid
+/// `layer_grids` must point to `layer_count` writable, distinct, non-null grid
 /// pointers. Every grid must be exclusively accessible and its buffers must
 /// satisfy the ownership and layout requirements of `ScreenGrid`.
 ///
-/// `output` must point to writable, properly aligned storage for one
-/// `CCompositorCursorPlan` and must not overlap the layer array or any grid.
+/// `compose_area` must be a valid callback for the duration of this call.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ui_comp_plan_cursor(
-    layer_grids: *const *mut CScreenGrid,
+pub unsafe extern "C" fn ui_comp_grid_cursor_goto_in_layer_stack(
+    layer_grids: *mut *mut CScreenGrid,
     layer_count: usize,
-    request: CCompositorCursorRequest,
-    output: *mut CCompositorCursorPlan,
+    grid_handle: Integer,
+    row: Integer,
+    column: Integer,
+    compose_area: Option<CompositorAreaCallback>,
 ) -> bool {
-    if output.is_null() {
+    let Some(compose_area) = compose_area else {
         return false;
+    };
+    let (Ok(grid_handle), Ok(row), Ok(column)) = (
+        i32::try_from(grid_handle),
+        i32::try_from(row),
+        i32::try_from(column),
+    ) else {
+        return false;
+    };
+    let request = CompositorCursorRequest {
+        grid_handle,
+        local_position: CompositorPoint { row, column },
+    };
+
+    let Some((cursor_plan, recompose_areas)) = (|| {
+        // SAFETY: The caller satisfies the documented layer-array and grid
+        // ownership requirements.
+        let mut layer_guards =
+            unsafe { CompositorLayerGuards::try_take(layer_grids, layer_count) }?;
+        let action = {
+            let layers = layer_guards.layer_stack()?;
+            layers.plan_cursor(request)?
+        };
+        let CompositorCursorAction::Update(plan) = action else {
+            return Some((None, Vec::new()));
+        };
+
+        let recompose_areas = if let Some(target_index) = plan.raise_to {
+            let raise_plan = {
+                let layers = layer_guards.layer_stack()?;
+                layers.plan_layer_raise(plan.layer_index, target_index)?
+            };
+            layer_guards.apply_layer_move(raise_plan.movement)?;
+
+            // SAFETY: The caller guarantees that the pointer array is writable
+            // for `layer_count` elements during this synchronous call.
+            let cgrids = unsafe { slice::from_raw_parts_mut(layer_grids, layer_count) };
+            if !layer_guards.write_cgrid_order(cgrids) {
+                return None;
+            }
+            raise_plan.recompose_areas
+        } else {
+            Vec::new()
+        };
+
+        Some((Some(plan), recompose_areas))
+    })() else {
+        return false;
+    };
+
+    for area in recompose_areas {
+        // SAFETY: The caller supplied a valid callback. The layer guards were
+        // dropped above, so all grid allocations are owned by C again.
+        unsafe {
+            compose_area(
+                Integer::from(area.rows.start),
+                Integer::from(area.rows.end),
+                Integer::from(area.columns.start),
+                Integer::from(area.columns.end),
+            );
+        }
     }
 
-    // SAFETY: The caller satisfies the documented layer-array and grid
-    // ownership requirements.
-    let Some(layer_guards) = (unsafe { CompositorLayerGuards::try_take(layer_grids, layer_count) })
-    else {
-        return false;
-    };
-    let Some(layers) = layer_guards.layer_stack() else {
-        return false;
-    };
-    let Some(plan) = layers.plan_cursor(request.into()) else {
-        return false;
+    let Some(plan) = cursor_plan else {
+        return true;
     };
 
-    // SAFETY: The caller provides valid, non-overlapping output storage.
-    unsafe { output.write(plan.into()) };
+    if plan.emit {
+        // SAFETY: The layer guards were dropped above, and the planned
+        // coordinates were validated by the safe compositor layer stack.
+        unsafe {
+            ui_composed_call_grid_cursor_goto(
+                1,
+                Integer::from(plan.screen_position.row),
+                Integer::from(plan.screen_position.column),
+            );
+        }
+    }
+
     true
 }
 
@@ -2785,70 +2812,6 @@ pub unsafe extern "C" fn ui_comp_remove_layer(
 
     // SAFETY: The caller provides valid, non-overlapping output storage.
     unsafe { was_removed.write(removed) };
-    true
-}
-
-/// Raises one compositor layer and recomposes every crossed layer intersection.
-///
-/// Grid ownership is restored before `compose_area` is invoked.
-///
-/// # Safety
-///
-/// `layer_grids` must point to `layer_count` writable, distinct, non-null grid
-/// pointers. Every grid must be exclusively accessible and its buffers must
-/// satisfy the ownership and layout requirements of `ScreenGrid`.
-///
-/// `grid` must identify one grid in `layer_grids`, and `compose_area` must be
-/// a valid callback for the duration of this call.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn ui_comp_raise_layer(
-    layer_grids: *mut *mut CScreenGrid,
-    layer_count: usize,
-    grid: *mut CScreenGrid,
-    target_index: usize,
-    compose_area: Option<CompositorAreaCallback>,
-) -> bool {
-    if grid.is_null() {
-        return false;
-    }
-    let Some(compose_area) = compose_area else {
-        return false;
-    };
-
-    let plan = (|| {
-        // SAFETY: The caller satisfies the documented layer-array and grid
-        // ownership requirements.
-        let mut layer_guards =
-            unsafe { CompositorLayerGuards::try_take(layer_grids, layer_count) }?;
-        let layer_index = layer_guards.index_of(grid)?;
-        let plan = {
-            let layers = layer_guards.layer_stack()?;
-            layers.plan_layer_raise(layer_index, target_index)?
-        };
-        layer_guards.apply_layer_move(plan.movement)?;
-
-        // SAFETY: The caller guarantees that the pointer array is writable for
-        // `layer_count` elements for the duration of this synchronous call.
-        let cgrids = unsafe { slice::from_raw_parts_mut(layer_grids, layer_count) };
-        layer_guards.write_cgrid_order(cgrids).then_some(plan)
-    })();
-    let Some(plan) = plan else {
-        return false;
-    };
-
-    for area in plan.recompose_areas {
-        // SAFETY: The caller supplied a valid callback. The layer guards were
-        // dropped above, so all grid allocations are owned by C again.
-        unsafe {
-            compose_area(
-                Integer::from(area.rows.start),
-                Integer::from(area.rows.end),
-                Integer::from(area.columns.start),
-                Integer::from(area.columns.end),
-            );
-        }
-    }
-
     true
 }
 
@@ -3771,22 +3734,105 @@ mod tests {
                 grid_handle: 7,
                 local_position: CompositorPoint { row: 1, column: 2 },
             }),
-            Some(CompositorCursorPlan {
+            Some(CompositorCursorAction::Update(CompositorCursorPlan {
                 layer_index: 1,
                 screen_position: CompositorPoint { row: 3, column: 5 },
                 raise_to: Some(2),
                 emit: true,
-            })
+            }))
         );
         assert_eq!(
-            layers
-                .plan_cursor(CompositorCursorRequest {
-                    grid_handle: 7,
-                    local_position: CompositorPoint { row: 10, column: 2 },
-                })
-                .map(|plan| plan.emit),
-            Some(false)
+            layers.plan_cursor(CompositorCursorRequest {
+                grid_handle: 7,
+                local_position: CompositorPoint { row: 10, column: 2 },
+            }),
+            Some(CompositorCursorAction::Update(CompositorCursorPlan {
+                layer_index: 1,
+                screen_position: CompositorPoint { row: 12, column: 5 },
+                raise_to: Some(2),
+                emit: false,
+            }))
         );
+        assert_eq!(
+            layers.plan_cursor(CompositorCursorRequest {
+                grid_handle: 99,
+                local_position: CompositorPoint { row: 0, column: 0 },
+            }),
+            Some(CompositorCursorAction::Ignore)
+        );
+    }
+
+    #[test]
+    fn ffi_cursor_update_raises_the_layer_and_restores_grid_ownership() {
+        let mut default_grid = grid_with_size(10, 12);
+        default_grid.set_compositor_size(10, 12);
+        let mut selected_grid = grid_with_size(2, 2);
+        selected_grid.handle = 7;
+        selected_grid.set_compositor_position(2, 3);
+        selected_grid.set_compositor_size(2, 2);
+        selected_grid.set_compositor_index(1);
+        let mut upper_grid = grid_with_size(2, 2);
+        upper_grid.set_compositor_position(2, 3);
+        upper_grid.set_compositor_size(2, 2);
+        upper_grid.set_compositor_index(2);
+
+        // SAFETY: Each conversion transfers its grid allocations to a distinct
+        // C representation.
+        let (mut default_cgrid, mut selected_cgrid, mut upper_cgrid) = unsafe {
+            (
+                default_grid.to_cgrid(),
+                selected_grid.to_cgrid(),
+                upper_grid.to_cgrid(),
+            )
+        };
+        let default_pointer = &mut default_cgrid as *mut CScreenGrid;
+        let selected_pointer = &mut selected_cgrid as *mut CScreenGrid;
+        let upper_pointer = &mut upper_cgrid as *mut CScreenGrid;
+        let mut cgrids = [default_pointer, selected_pointer, upper_pointer];
+
+        // An unregistered multigrid cursor is an expected no-op. The
+        // transaction still succeeds and restores all grid ownership.
+        // SAFETY: The array contains distinct, exclusively accessible grids
+        // and the callback remains valid throughout the synchronous call.
+        assert!(unsafe {
+            ui_comp_grid_cursor_goto_in_layer_stack(
+                cgrids.as_mut_ptr(),
+                cgrids.len(),
+                99,
+                0,
+                0,
+                Some(noop_compose_area),
+            )
+        });
+        assert_eq!(cgrids, [default_pointer, selected_pointer, upper_pointer]);
+
+        // The cursor lies outside the default grid, so the operation raises
+        // the selected layer without calling the process-global UI emitter.
+        // SAFETY: The array contains distinct, exclusively accessible grids
+        // and the callback remains valid throughout the synchronous call.
+        assert!(unsafe {
+            ui_comp_grid_cursor_goto_in_layer_stack(
+                cgrids.as_mut_ptr(),
+                cgrids.len(),
+                7,
+                10,
+                0,
+                Some(noop_compose_area),
+            )
+        });
+        assert_eq!(cgrids, [default_pointer, upper_pointer, selected_pointer]);
+
+        // SAFETY: The cursor operation restored every grid allocation.
+        let (default_grid, selected_grid, upper_grid) = unsafe {
+            (
+                ScreenGrid::take_from_cgrid(&mut default_cgrid),
+                ScreenGrid::take_from_cgrid(&mut selected_cgrid),
+                ScreenGrid::take_from_cgrid(&mut upper_cgrid),
+            )
+        };
+        assert_eq!(default_grid.compositor_index(), 0);
+        assert_eq!(selected_grid.compositor_index(), 2);
+        assert_eq!(upper_grid.compositor_index(), 1);
     }
 
     #[test]

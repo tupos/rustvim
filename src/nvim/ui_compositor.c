@@ -153,40 +153,12 @@ void ui_comp_remove_grid(ScreenGrid *grid)
   ui_comp_compose_grid(grid);
 }
 
-void ui_comp_raise_grid(ScreenGrid *grid, size_t new_index)
-{
-  bool raised = ui_comp_raise_layer(
-    layers.items, layers.size, grid, new_index, compose_area);
-  assert(raised);
-  (void)raised;
-}
-
 void ui_comp_grid_cursor_goto(Integer grid_handle, Integer r, Integer c)
 {
-  CompositorCursorRequest request = {
-    .grid_handle = (int)grid_handle,
-    .row = (int)r,
-    .column = (int)c,
-  };
-  CompositorCursorPlan plan;
-  if (!ui_comp_plan_cursor(layers.items, layers.size, request, &plan)) {
-    return;
-  }
-
-  ScreenGrid *cursor_grid = kv_A(layers, plan.layer_index);
-
-  // TODO(bfredl): maybe not the best time to do this, for efficiency we
-  // should configure all grids before entering win_update()
-  if (plan.should_raise) {
-    ui_comp_raise_grid(cursor_grid, plan.raise_to);
-  }
-
-  if (!plan.emit) {
-    // TODO(bfredl): this happens with 'writedelay', refactor?
-    // abort();
-    return;
-  }
-  ui_composed_call_grid_cursor_goto(1, plan.row, plan.column);
+  bool updated = ui_comp_grid_cursor_goto_in_layer_stack(
+    layers.items, layers.size, grid_handle, r, c, compose_area);
+  assert(updated);
+  (void)updated;
 }
 
 ScreenGrid *ui_comp_mouse_focus(int row, int col)
