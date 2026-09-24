@@ -161,8 +161,9 @@ extern bool ui_comp_compose_area(
 extern void ui_comp_hide_message_separator(void);
 
 extern bool ui_comp_update_message_position(
-  ScreenGrid *message_grid, ScreenGrid *default_grid, CompositorMessagePositionRequest request,
-  CompositorAreaCallback compose_area);
+  ScreenGrid *const *layer_grids, size_t layer_count,
+  ScreenGrid *message_grid, ScreenGrid *default_grid,
+  CompositorMessagePositionRequest request, CompositorAreaCallbacks callbacks);
 
 extern bool ui_comp_emit_clear_line(
   Integer row, Integer start_col, Integer end_col, sattr_T attribute);

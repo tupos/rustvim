@@ -332,8 +332,15 @@ void ui_comp_msg_set_pos(Integer grid, Integer row, Boolean scrolled, String sep
     .scrolled = scrolled,
     .has_separator_character = has_separator_character,
   };
-  bool updated =
-    ui_comp_update_message_position(&msg_grid, &default_grid, request, compose_area);
+  CompositorAreaCallbacks callbacks = {
+    .debug = compose_debug,
+    .line_settings = compositor_line_settings(),
+    .recomposed_debug_highlight = dbghl_recompose,
+  };
+  bool updated = ui_comp_update_message_position(
+    layers.items, layers.size,
+    &msg_grid, &default_grid,
+    request, callbacks);
   assert(updated);
   (void)updated;
 }

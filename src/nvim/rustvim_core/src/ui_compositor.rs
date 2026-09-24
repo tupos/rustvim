@@ -2254,10 +2254,15 @@ pub extern "C" fn ui_comp_hide_message_separator() {
 
 /// Updates message-grid state and executes its scrolling and recomposition.
 ///
-/// Both grids are restored before this function emits a scroll event or calls
-/// back into the C compositor.
+/// Both grids are restored before this function emits a scroll event, invokes
+/// the debug callback, or recomposes an area.
 ///
 /// # Safety
+///
+/// When recomposition is required, `layer_grids` must point to `layer_count`
+/// readable, distinct, non-null grid pointers. Every grid must be exclusively
+/// accessible and its buffers must satisfy the ownership and layout
+/// requirements of `ScreenGrid`.
 ///
 /// `message_grid` must point to a valid, exclusively accessible `CScreenGrid`
 /// whose buffers satisfy the ownership and layout requirements of
@@ -2266,14 +2271,16 @@ pub extern "C" fn ui_comp_hide_message_separator() {
 /// `default_grid` must point to a second valid, exclusively accessible
 /// `CScreenGrid` whose buffers satisfy the same requirements.
 ///
-/// `compose_area` must remain valid for this call. It may reenter the
+/// `callbacks.debug` must remain valid for this call. It may reenter the
 /// compositor because both grid guards are dropped before it is invoked.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ui_comp_update_message_position(
+    layer_grids: *const *mut CScreenGrid,
+    layer_count: usize,
     message_grid: *mut CScreenGrid,
     default_grid: *mut CScreenGrid,
     request: CCompositorMessagePositionRequest,
-    compose_area: CompositorAreaCallback,
+    callbacks: CCompositorAreaCallbacks,
 ) -> bool {
     if message_grid.is_null() || default_grid.is_null() || message_grid == default_grid {
         return false;
@@ -2315,15 +2322,34 @@ pub unsafe extern "C" fn ui_comp_update_message_position(
         }
     }
     if let Some(area) = plan.recompose {
-        // SAFETY: Both grid guards were dropped, and the caller guarantees
-        // that the callback remains valid for this call.
+        // SAFETY: Both grid guards were dropped, and the caller supplied a
+        // valid callback.
         unsafe {
-            compose_area(
+            (callbacks.debug)(
                 Integer::from(area.rows.start),
                 Integer::from(area.rows.end),
                 Integer::from(area.columns.start),
                 Integer::from(area.columns.end),
+                callbacks.recomposed_debug_highlight,
+                true,
             );
+        }
+        let Ok(settings) = CompositorLineSettings::try_from(callbacks.line_settings) else {
+            return false;
+        };
+
+        // SAFETY: The caller satisfies the helper's grid-array,
+        // grid-ownership, and message-grid requirements. The earlier guards
+        // and debug callback have completed.
+        if !unsafe {
+            compose_area_from_c_grids(
+                layer_grids,
+                layer_count,
+                message_grid,
+                CompositorAreaInput { area, settings },
+            )
+        } {
+            return false;
         }
     }
     true
