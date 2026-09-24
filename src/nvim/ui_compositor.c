@@ -100,6 +100,17 @@ void ui_comp_layers_adjust(size_t layer_idx, bool raise)
   (void)adjusted;
 }
 
+/// Reports whether `grid` is currently registered as a compositor layer.
+static bool ui_comp_has_grid(const ScreenGrid *grid)
+{
+  for (size_t i = 0; i < kv_size(layers); i++) {
+    if (kv_A(layers, i) == grid) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /// Places `grid` at (col,row) position with (width * height) size.
 /// Adds `grid` as the top layer if it is a new layer.
 ///
@@ -119,19 +130,12 @@ bool ui_comp_put_grid(ScreenGrid *grid, int row, int col, int height, int width,
     .should_draw = ui_comp_should_draw(),
   };
 
-  if (grid->comp_index != 0) {
+  if (ui_comp_has_grid(grid)) {
     bool placed = ui_comp_place_existing_grid(
       layers.items, layers.size, grid, request, compose_area, &moved);
     assert(placed);
     return placed && moved;
   } else {
-#ifndef NDEBUG
-    for (size_t i = 0; i < kv_size(layers); i++) {
-      if (kv_A(layers, i) == grid) {
-        abort();
-      }
-    }
-#endif
     kv_push(layers, grid);
     ScreenGrid *current_window_grid = curwin ? &curwin->w_grid_alloc : NULL;
     bool placed = ui_comp_place_new_grid(
