@@ -2347,26 +2347,31 @@ pub unsafe extern "C" fn ui_comp_clip_recompose_area(
     true
 }
 
-/// Returns the composed-screen area occupied by one grid.
+/// Recomposes the screen area occupied by one grid when drawing is enabled.
 ///
-/// The returned area contains only owned scalar values. Grid ownership is
-/// restored before this function returns.
+/// Grid ownership is restored before the C composition callback is invoked.
 ///
 /// # Safety
 ///
 /// `grid` must point to a valid, exclusively accessible `CScreenGrid` whose
 /// buffers satisfy the ownership and layout requirements of `ScreenGrid`.
 ///
-/// `output` must point to writable, properly aligned storage for one
-/// `CCompositorRecomposeArea` and must not overlap `grid`.
+/// When the compositor is drawing, `compose_area` must contain a valid callback
+/// for the duration of this call.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ui_comp_grid_recompose_area(
+pub unsafe extern "C" fn ui_comp_recompose_grid(
     grid: *mut CScreenGrid,
-    output: *mut CCompositorRecomposeArea,
+    compose_area: Option<CompositorAreaCallback>,
 ) -> bool {
-    if grid.is_null() || output.is_null() {
+    if grid.is_null() {
         return false;
     }
+    if !lock_compositor_draw_state().should_draw() {
+        return true;
+    }
+    let Some(compose_area) = compose_area else {
+        return false;
+    };
 
     let area = {
         // SAFETY: The caller transfers exclusive ownership of the grid buffers
@@ -2378,8 +2383,16 @@ pub unsafe extern "C" fn ui_comp_grid_recompose_area(
         return false;
     };
 
-    // SAFETY: The caller provides valid, non-overlapping output storage.
-    unsafe { output.write(area.into()) };
+    // SAFETY: The caller supplied a valid callback, and the grid guard was
+    // dropped above, so the grid is owned by C during the call.
+    unsafe {
+        compose_area(
+            Integer::from(area.rows.start),
+            Integer::from(area.rows.end),
+            Integer::from(area.columns.start),
+            Integer::from(area.columns.end),
+        );
+    }
     true
 }
 

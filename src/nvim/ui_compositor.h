@@ -136,8 +136,8 @@ extern bool ui_comp_clip_recompose_area(
   ScreenGrid *grid, CompositorRecomposeArea area,
   CompositorRecomposeArea *output);
 
-extern bool ui_comp_grid_recompose_area(
-  ScreenGrid *grid, CompositorRecomposeArea *output);
+extern bool ui_comp_recompose_grid(
+  ScreenGrid *grid, CompositorAreaCallback compose_area);
 
 extern bool ui_comp_place_new_grid(
   ScreenGrid **layer_grids, size_t layer_count,
