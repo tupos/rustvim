@@ -173,8 +173,6 @@ void ui_comp_grid_cursor_goto(Integer grid_handle, Integer r, Integer c)
     .grid_handle = (int)grid_handle,
     .row = (int)r,
     .column = (int)c,
-    .screen_rows = default_grid.rows,
-    .screen_columns = default_grid.cols,
   };
   CompositorCursorPlan plan;
   if (!ui_comp_plan_cursor(layers.items, layers.size, request, &plan)) {

@@ -28,8 +28,6 @@ typedef struct {
   int grid_handle;
   int row;
   int column;
-  int screen_rows;
-  int screen_columns;
 } CompositorCursorRequest;
 
 typedef struct {

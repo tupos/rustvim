@@ -67,8 +67,6 @@ pub struct CCompositorCursorRequest {
     grid_handle: libc::c_int,
     row: libc::c_int,
     column: libc::c_int,
-    screen_rows: libc::c_int,
-    screen_columns: libc::c_int,
 }
 
 /// C representation of one planned compositor cursor update.
@@ -319,7 +317,6 @@ struct CompositorSize {
 struct CompositorCursorRequest {
     grid_handle: i32,
     local_position: CompositorPoint,
-    screen_size: CompositorSize,
 }
 
 impl From<CCompositorCursorRequest> for CompositorCursorRequest {
@@ -329,10 +326,6 @@ impl From<CCompositorCursorRequest> for CompositorCursorRequest {
             local_position: CompositorPoint {
                 row: request.row,
                 column: request.column,
-            },
-            screen_size: CompositorSize {
-                height: request.screen_rows,
-                width: request.screen_columns,
             },
         }
     }
@@ -1096,6 +1089,14 @@ impl<'grid> CompositorLayer<'grid> {
         })
     }
 
+    /// Returns the allocated dimensions of this layer's grid.
+    fn allocated_size(self) -> CompositorSize {
+        CompositorSize {
+            height: self.grid.rows,
+            width: self.grid.cols,
+        }
+    }
+
     /// Returns the exclusive right edge of this layer.
     fn right_edge(self) -> Option<i32> {
         self.origin_column.checked_add(self.visible_width)
@@ -1389,6 +1390,7 @@ impl<'grid> CompositorLayerStack<'grid> {
 
     /// Selects a grid and plans its composed-screen cursor update.
     fn plan_cursor(&self, request: CompositorCursorRequest) -> Option<CompositorCursorPlan> {
+        let screen_size = self.default_layer()?.allocated_size();
         let layer_index = self.layer_index_with_handle(request.grid_handle)?;
         let layer = self.layer(layer_index)?;
         let screen_position = CompositorPoint {
@@ -1407,8 +1409,8 @@ impl<'grid> CompositorLayerStack<'grid> {
             }
             (layer_index < target_index).then_some(target_index)
         };
-        let emit = screen_position.column < request.screen_size.width
-            && screen_position.row < request.screen_size.height;
+        let emit =
+            screen_position.column < screen_size.width && screen_position.row < screen_size.height;
 
         Some(CompositorCursorPlan {
             layer_index,
@@ -3425,10 +3427,6 @@ mod tests {
             layers.plan_cursor(CompositorCursorRequest {
                 grid_handle: 7,
                 local_position: CompositorPoint { row: 1, column: 2 },
-                screen_size: CompositorSize {
-                    height: 10,
-                    width: 12,
-                },
             }),
             Some(CompositorCursorPlan {
                 layer_index: 1,
@@ -3442,10 +3440,6 @@ mod tests {
                 .plan_cursor(CompositorCursorRequest {
                     grid_handle: 7,
                     local_position: CompositorPoint { row: 10, column: 2 },
-                    screen_size: CompositorSize {
-                        height: 10,
-                        width: 12,
-                    },
                 })
                 .map(|plan| plan.emit),
             Some(false)
