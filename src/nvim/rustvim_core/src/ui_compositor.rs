@@ -34,10 +34,6 @@ type CompositorDebugCallback = unsafe extern "C" fn(
     delay: bool,
 );
 
-/// C callback used to recompose one translated raw line.
-type CompositorLineCallback =
-    unsafe extern "C" fn(row: Integer, start_column: Integer, end_column: Integer, flags: i32);
-
 /// C callback used to delay after visualizing one compositor operation.
 type CompositorDelayCallback = unsafe extern "C" fn(lines: Integer);
 
@@ -105,6 +101,15 @@ impl SegmentComposition {
     }
 }
 
+/// C representation of settings shared by compositor-line requests.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct CCompositorLineSettings {
+    message_separator_attribute: VimSAttrT,
+    screen_columns: libc::c_int,
+    abort_on_invalid: bool,
+}
+
 /// C representation of one complete compositor-line request.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -113,9 +118,7 @@ pub struct CCompositorLineRequest {
     start_col: Integer,
     end_col: Integer,
     flags: libc::c_int,
-    message_separator_attribute: VimSAttrT,
-    screen_columns: libc::c_int,
-    abort_on_invalid: bool,
+    settings: CCompositorLineSettings,
 }
 
 /// C representation of one message-grid position update.
@@ -148,7 +151,7 @@ pub struct CCompositorRawLineRequest {
 #[derive(Clone, Copy, Debug)]
 pub struct CCompositorRawLineCallbacks {
     debug: CompositorDebugCallback,
-    compose_line: CompositorLineCallback,
+    line_settings: CCompositorLineSettings,
     log_invalid_row: CompositorRawLineDiagnosticCallback,
     log_clipped_columns: CompositorRawLineDiagnosticCallback,
     normal_debug_highlight: libc::c_int,
@@ -174,7 +177,7 @@ pub struct CCompositorScrollRequest {
 #[derive(Clone, Copy, Debug)]
 pub struct CCompositorScrollCallbacks {
     debug: CompositorDebugCallback,
-    compose_line: CompositorLineCallback,
+    line_settings: CCompositorLineSettings,
     delay: CompositorDelayCallback,
     recomposed_debug_highlight: libc::c_int,
     delay_after_forward: bool,
@@ -1817,13 +1820,56 @@ struct MessageSeparator<'grid> {
     attribute: VimSAttrT,
 }
 
+/// Validated settings shared by compositor-line requests.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CompositorLineSettings {
+    message_separator_attribute: VimSAttrT,
+    screen_columns: usize,
+    abort_on_invalid: bool,
+}
+
+impl TryFrom<CCompositorLineSettings> for CompositorLineSettings {
+    type Error = ();
+
+    fn try_from(settings: CCompositorLineSettings) -> Result<Self, Self::Error> {
+        Ok(Self {
+            message_separator_attribute: settings.message_separator_attribute,
+            screen_columns: usize::try_from(settings.screen_columns).map_err(|_| ())?,
+            abort_on_invalid: settings.abort_on_invalid,
+        })
+    }
+}
+
+/// Validated inputs received from C for composing one complete line.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CompositorLineInput {
+    row: i32,
+    columns: Range<i32>,
+    flags: i32,
+    settings: CompositorLineSettings,
+}
+
+impl TryFrom<CCompositorLineRequest> for CompositorLineInput {
+    type Error = ();
+
+    fn try_from(request: CCompositorLineRequest) -> Result<Self, Self::Error> {
+        Ok(Self {
+            row: i32::try_from(request.row).map_err(|_| ())?,
+            columns: i32::try_from(request.start_col).map_err(|_| ())?
+                ..i32::try_from(request.end_col).map_err(|_| ())?,
+            flags: request.flags,
+            settings: request.settings.try_into()?,
+        })
+    }
+}
+
 /// Validated inputs for composing one complete line in Rust.
 #[derive(Clone, Copy)]
 struct CompositorLineRequest<'grid> {
     row: i32,
     start_column: i32,
     end_column: i32,
-    flags: libc::c_int,
+    flags: i32,
     message_separator: Option<MessageSeparator<'grid>>,
     screen_columns: usize,
     abort_on_invalid: bool,
@@ -2982,7 +3028,7 @@ pub unsafe extern "C" fn ui_comp_cursor_is_covered_by_higher_layer_in_stack(
     layers.is_cursor_covered_by_higher_layer(point, &current_grid, minimum_z_index_gap)
 }
 
-/// Composes and submits one complete line from an ordered C grid array.
+/// Composes and submits one validated line from temporarily C-owned grids.
 ///
 /// # Safety
 ///
@@ -2990,26 +3036,16 @@ pub unsafe extern "C" fn ui_comp_cursor_is_covered_by_higher_layer_in_stack(
 /// pointers. Every grid must be exclusively accessible and its buffers must
 /// satisfy the ownership and layout requirements of `ScreenGrid`.
 ///
-/// When the requested row is the message-separator row, `message_grid` must
+/// When `request.row` is the message-separator row, `message_grid` must
 /// either identify one grid in `layer_grids` or identify another exclusively
 /// accessible grid satisfying the same requirements.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn ui_comp_compose_line(
+unsafe fn compose_line_from_c_grids(
     layer_grids: *const *mut CScreenGrid,
     layer_count: usize,
     message_grid: *mut CScreenGrid,
-    request: CCompositorLineRequest,
+    request: CompositorLineInput,
 ) -> bool {
-    let (Ok(row), Ok(start_column), Ok(end_column), Ok(screen_columns)) = (
-        i32::try_from(request.row),
-        i32::try_from(request.start_col),
-        i32::try_from(request.end_col),
-        usize::try_from(request.screen_columns),
-    ) else {
-        return false;
-    };
-
-    let separator_character = lock_message_compositor_state().separator_character_at(row);
+    let separator_character = lock_message_compositor_state().separator_character_at(request.row);
     let separator_active = separator_character.is_some();
     if separator_active && message_grid.is_null() {
         return false;
@@ -3043,7 +3079,7 @@ pub unsafe extern "C" fn ui_comp_compose_line(
                     std::ptr::eq(message_grid, layer_guards.grid(0)?),
                 )?,
                 character: separator_character?,
-                attribute: request.message_separator_attribute,
+                attribute: request.settings.message_separator_attribute,
             })
         } else {
             None
@@ -3051,13 +3087,13 @@ pub unsafe extern "C" fn ui_comp_compose_line(
 
         compositor.try_compose_line(
             CompositorLineRequest {
-                row,
-                start_column,
-                end_column,
+                row: request.row,
+                start_column: request.columns.start,
+                end_column: request.columns.end,
                 flags: request.flags,
                 message_separator,
-                screen_columns,
-                abort_on_invalid: request.abort_on_invalid,
+                screen_columns: request.settings.screen_columns,
+                abort_on_invalid: request.settings.abort_on_invalid,
             },
             &layers,
         )
@@ -3075,7 +3111,7 @@ pub unsafe extern "C" fn ui_comp_compose_line(
     unsafe {
         ui_composed_call_raw_line(
             1,
-            row as Integer,
+            Integer::from(request.row),
             submission.start_col as Integer,
             submission.end_col as Integer,
             submission.end_col as Integer,
@@ -3086,6 +3122,33 @@ pub unsafe extern "C" fn ui_comp_compose_line(
         );
     }
     true
+}
+
+/// Composes and submits one complete line from an ordered C grid array.
+///
+/// # Safety
+///
+/// `layer_grids` must point to `layer_count` readable, distinct, non-null grid
+/// pointers. Every grid must be exclusively accessible and its buffers must
+/// satisfy the ownership and layout requirements of `ScreenGrid`.
+///
+/// When the requested row is the message-separator row, `message_grid` must
+/// either identify one grid in `layer_grids` or identify another exclusively
+/// accessible grid satisfying the same requirements.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ui_comp_compose_line(
+    layer_grids: *const *mut CScreenGrid,
+    layer_count: usize,
+    message_grid: *mut CScreenGrid,
+    request: CCompositorLineRequest,
+) -> bool {
+    let Ok(request) = CompositorLineInput::try_from(request) else {
+        return false;
+    };
+
+    // SAFETY: The caller satisfies the helper's grid-array, grid-ownership,
+    // and message-grid requirements.
+    unsafe { compose_line_from_c_grids(layer_grids, layer_count, message_grid, request) }
 }
 
 #[unsafe(no_mangle)]
@@ -3220,8 +3283,8 @@ pub unsafe extern "C" fn ui_comp_process_raw_line(
         }
         CompositorRawLineAction::DiscardColumns => true,
         CompositorRawLineAction::Recompose => {
-            // SAFETY: Grid ownership was restored before invoking either
-            // callback, and the caller guarantees both functions are valid.
+            // SAFETY: Grid ownership was restored before invoking the debug
+            // callback, which the caller guarantees remains valid.
             unsafe {
                 (callbacks.debug)(
                     row,
@@ -3231,9 +3294,26 @@ pub unsafe extern "C" fn ui_comp_process_raw_line(
                     callbacks.composed_debug_highlight,
                     true,
                 );
-                (callbacks.compose_line)(row, start_column, clear_column, plan.flags);
             }
-            true
+            let Ok(settings) = CompositorLineSettings::try_from(callbacks.line_settings) else {
+                return false;
+            };
+            // SAFETY: The caller satisfies the documented layer-array and grid
+            // ownership requirements. The previous guards were dropped before
+            // this helper takes ownership again.
+            unsafe {
+                compose_line_from_c_grids(
+                    layer_grids,
+                    layer_count,
+                    message_grid,
+                    CompositorLineInput {
+                        row: plan.row,
+                        columns: plan.columns.start..plan.clear_column,
+                        flags: plan.flags,
+                        settings,
+                    },
+                )
+            }
         }
         CompositorRawLineAction::Forward => {
             let Some(payload_len) = plan
@@ -3396,8 +3476,8 @@ pub unsafe extern "C" fn ui_comp_process_scroll(
             let left = Integer::from(region.columns.start);
             let right = Integer::from(region.columns.end);
 
-            // SAFETY: Grid ownership was restored before invoking the
-            // callbacks, which the caller guarantees remain valid.
+            // SAFETY: Grid ownership was restored before invoking the debug
+            // callback, which the caller guarantees remains valid.
             unsafe {
                 (callbacks.debug)(
                     top,
@@ -3407,8 +3487,28 @@ pub unsafe extern "C" fn ui_comp_process_scroll(
                     callbacks.recomposed_debug_highlight,
                     true,
                 );
-                for row in rows {
-                    (callbacks.compose_line)(Integer::from(row), left, right, 0);
+            }
+            let Ok(settings) = CompositorLineSettings::try_from(callbacks.line_settings) else {
+                return false;
+            };
+            for row in rows {
+                // SAFETY: The caller satisfies the documented layer-array and
+                // grid ownership requirements. The planning guards were
+                // dropped before this helper takes ownership again.
+                if !unsafe {
+                    compose_line_from_c_grids(
+                        layer_grids,
+                        layer_count,
+                        message_grid,
+                        CompositorLineInput {
+                            row,
+                            columns: region.columns.clone(),
+                            flags: 0,
+                            settings,
+                        },
+                    )
+                } {
+                    return false;
                 }
             }
         }
@@ -3486,6 +3586,45 @@ mod tests {
             },
             scrolled,
         }
+    }
+
+    #[test]
+    fn line_input_converts_and_validates_ffi_settings() {
+        let request = CCompositorLineRequest {
+            row: 3,
+            start_col: 2,
+            end_col: 7,
+            flags: LINE_FLAG_INVALID,
+            settings: CCompositorLineSettings {
+                message_separator_attribute: 9,
+                screen_columns: 10,
+                abort_on_invalid: true,
+            },
+        };
+
+        assert_eq!(
+            CompositorLineInput::try_from(request),
+            Ok(CompositorLineInput {
+                row: 3,
+                columns: 2..7,
+                flags: LINE_FLAG_INVALID,
+                settings: CompositorLineSettings {
+                    message_separator_attribute: 9,
+                    screen_columns: 10,
+                    abort_on_invalid: true,
+                },
+            })
+        );
+        assert!(
+            CompositorLineInput::try_from(CCompositorLineRequest {
+                settings: CCompositorLineSettings {
+                    screen_columns: -1,
+                    ..request.settings
+                },
+                ..request
+            })
+            .is_err()
+        );
     }
 
     #[test]

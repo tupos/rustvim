@@ -182,6 +182,15 @@ bool ui_comp_cursor_is_covered_by_higher_layer(ScreenGrid *current_grid, int row
     layers.items, layers.size, current_grid, row, col, minimum_z_index_gap);
 }
 
+static CompositorLineSettings compositor_line_settings(void)
+{
+  return (CompositorLineSettings) {
+    .message_separator_attribute = (sattr_T)HL_ATTR(HLF_MSGSEP),
+    .screen_columns = Columns,
+    .abort_on_invalid = (rdb_flags & kOptRdbFlagInvalid) != 0,
+  };
+}
+
 /// Baseline implementation. This is always correct, but we can sometimes
 /// do something more efficient (where efficiency means smaller deltas to
 /// the downstream UI.)
@@ -192,9 +201,7 @@ static void compose_line(Integer row, Integer startcol, Integer endcol, LineFlag
     .start_col = startcol,
     .end_col = endcol,
     .flags = flags,
-    .message_separator_attribute = (sattr_T)HL_ATTR(HLF_MSGSEP),
-    .screen_columns = Columns,
-    .abort_on_invalid = (rdb_flags & kOptRdbFlagInvalid) != 0,
+    .settings = compositor_line_settings(),
   };
   bool composed = ui_comp_compose_line(
     layers.items, layers.size, &msg_grid, request);
@@ -307,7 +314,7 @@ void ui_comp_raw_line(Integer grid, Integer row, Integer startcol, Integer endco
   };
   CompositorRawLineCallbacks callbacks = {
     .debug = compose_debug,
-    .compose_line = compose_line,
+    .line_settings = compositor_line_settings(),
     .log_invalid_row = log_invalid_raw_line_row,
     .log_clipped_columns = log_clipped_raw_line_columns,
     .normal_debug_highlight = dbghl_normal,
@@ -353,7 +360,7 @@ void ui_comp_grid_scroll(Integer grid, Integer top, Integer bot, Integer left, I
   };
   CompositorScrollCallbacks callbacks = {
     .debug = compose_debug,
-    .compose_line = compose_line,
+    .line_settings = compositor_line_settings(),
     .delay = debug_delay,
     .recomposed_debug_highlight = dbghl_recompose,
     .delay_after_forward = (rdb_flags & kOptRdbFlagCompositor) != 0,

@@ -25,13 +25,17 @@ typedef struct {
 } CompositorRecomposeArea;
 
 typedef struct {
+  sattr_T message_separator_attribute;
+  int screen_columns;
+  bool abort_on_invalid;
+} CompositorLineSettings;
+
+typedef struct {
   Integer row;
   Integer start_col;
   Integer end_col;
   LineFlags flags;
-  sattr_T message_separator_attribute;
-  int screen_columns;
-  bool abort_on_invalid;
+  CompositorLineSettings settings;
 } CompositorLineRequest;
 
 typedef struct {
@@ -46,9 +50,6 @@ typedef struct {
 typedef void (*CompositorDebugCallback)(
   Integer start_row, Integer end_row, Integer start_column, Integer end_column,
   int highlight, bool delay);
-
-typedef void (*CompositorLineCallback)(
-  Integer row, Integer start_column, Integer end_column, LineFlags flags);
 
 typedef void (*CompositorDelayCallback)(Integer lines);
 
@@ -67,7 +68,7 @@ typedef struct {
 
 typedef struct {
   CompositorDebugCallback debug;
-  CompositorLineCallback compose_line;
+  CompositorLineSettings line_settings;
   CompositorRawLineDiagnosticCallback log_invalid_row;
   CompositorRawLineDiagnosticCallback log_clipped_columns;
   int normal_debug_highlight;
@@ -87,7 +88,7 @@ typedef struct {
 
 typedef struct {
   CompositorDebugCallback debug;
-  CompositorLineCallback compose_line;
+  CompositorLineSettings line_settings;
   CompositorDelayCallback delay;
   int recomposed_debug_highlight;
   bool delay_after_forward;
