@@ -333,12 +333,6 @@ void ui_comp_raw_line(Integer grid, Integer row, Integer startcol, Integer endco
                       Integer clearattr, LineFlags flags, const schar_T *chunk,
                       const sattr_T *attrs)
 {
-  if (!ui_comp_should_draw()) {
-    return;
-  }
-
-  assert(endcol <= clearcol);
-
   CompositorRawLineRequest request = {
     .grid_handle = (int)grid,
     .row = row,

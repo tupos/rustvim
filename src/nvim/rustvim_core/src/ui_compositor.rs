@@ -937,7 +937,7 @@ impl From<CompositorRawLinePlan> for CCompositorRawLinePlan {
 }
 
 impl CCompositorRawLinePlan {
-    /// Constructs a successful no-op for a grid outside the compositor.
+    /// Constructs a successful no-op.
     const fn discarded() -> Self {
         Self {
             row: 0,
@@ -3157,8 +3157,9 @@ pub unsafe extern "C" fn ui_comp_should_compose_scroll_row(
 /// pointers. Every grid must be exclusively accessible and its buffers must
 /// satisfy the ownership and layout requirements of `ScreenGrid`.
 ///
-/// A grid handle absent from `layer_grids` produces a successful discarded
-/// plan, preserving the behavior of the former C lookup. `message_grid` is
+/// A disabled compositor or a grid handle absent from `layer_grids` produces
+/// a successful discarded plan, preserving the behavior of the former C
+/// checks. `message_grid` is
 /// used only for pointer identity and may be null. `output` must point to
 /// writable, properly aligned storage for one
 /// `CCompositorRawLinePlan`.
@@ -3172,6 +3173,13 @@ pub unsafe extern "C" fn ui_comp_plan_raw_line(
 ) -> bool {
     if output.is_null() {
         return false;
+    }
+    if !lock_compositor_draw_state().should_draw() {
+        // SAFETY: The caller guarantees writable, aligned output storage.
+        unsafe {
+            output.write(CCompositorRawLinePlan::discarded());
+        }
+        return true;
     }
 
     let grid_handle = request.grid_handle;
