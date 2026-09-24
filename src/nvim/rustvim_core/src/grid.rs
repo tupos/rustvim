@@ -349,6 +349,11 @@ impl ScreenGrid {
         self.zindex
     }
 
+    /// Reports whether this grid is at least `minimum_gap` above another grid.
+    pub(crate) fn is_at_least_z_index_above(&self, lower_grid: &Self, minimum_gap: u32) -> bool {
+        i64::from(self.zindex) - i64::from(lower_grid.zindex) >= i64::from(minimum_gap)
+    }
+
     /// Returns the size currently requested by the compositor.
     pub(crate) fn compositor_size(&self) -> (i32, i32) {
         (self.comp_width, self.comp_height)
@@ -4955,6 +4960,21 @@ mod tests {
         assert!(cgrid.attrs.is_null());
         assert!(cgrid.vcols.is_null());
         assert!(cgrid.line_offset.is_null());
+    }
+
+    #[test]
+    fn compositor_z_index_gap_is_inclusive() {
+        let mut line_buffer = LineBuffer::new(1);
+        let mut lower_grid = ScreenGrid::new(1, 1, true, &mut line_buffer);
+        let mut upper_grid = ScreenGrid::new(1, 1, true, &mut line_buffer);
+        lower_grid.zindex = 50;
+        upper_grid.zindex = 99;
+
+        assert!(!upper_grid.is_at_least_z_index_above(&lower_grid, 50));
+
+        upper_grid.zindex = 100;
+        assert!(upper_grid.is_at_least_z_index_above(&lower_grid, 50));
+        assert!(!lower_grid.is_at_least_z_index_above(&upper_grid, 50));
     }
 
     #[test]

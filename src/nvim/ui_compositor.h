@@ -167,6 +167,10 @@ extern bool ui_comp_grid_accepts_mouse_at(
   ScreenGrid *grid, int origin_row, int origin_column,
   int row, int column);
 
+extern bool ui_comp_cursor_is_obscured_by_grid(
+  ScreenGrid *top_grid, ScreenGrid *current_grid,
+  ScreenGrid *default_grid, int minimum_z_index_gap);
+
 extern bool ui_comp_compose_line(
   ScreenGrid *const *layer_grids, size_t layer_count,
   ScreenGrid *message_grid, CompositorLineRequest request);

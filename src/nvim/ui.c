@@ -660,9 +660,9 @@ static bool ui_cursor_is_behind_floatwin(void)
              + (curwin->w_p_rl ? curwin->w_view_width - curwin->w_wcol - 1 : curwin->w_wcol);
 
   ScreenGrid *top_grid = ui_comp_get_grid_at_coord(crow, ccol);
-  return top_grid != &curwin->w_grid_alloc
-         && top_grid != &default_grid
-         && top_grid->zindex >= curwin->w_grid_alloc.zindex + 50;
+  return ui_comp_cursor_is_obscured_by_grid(
+    top_grid, &curwin->w_grid_alloc, &default_grid,
+    kZIndexFloatDefault);
 }
 
 /// Returns true if the given UI extension is enabled.

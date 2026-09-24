@@ -2756,6 +2756,43 @@ pub unsafe extern "C" fn ui_comp_grid_accepts_mouse_at(
     .is_some_and(|grid| grid.matches(CompositorPoint { row, column }, LayerHitTest::MouseEnabled))
 }
 
+/// Reports whether the selected top grid obscures the current grid's cursor.
+///
+/// The top grid must be distinct from both the current and default grids, and
+/// its z-index must exceed the current grid's by at least the requested gap.
+///
+/// # Safety
+///
+/// `top_grid`, `current_grid`, and `default_grid` must point to valid
+/// `CScreenGrid` values. When `top_grid` differs from the other grids,
+/// `top_grid` and `current_grid` must be exclusively accessible and their
+/// buffers must satisfy the ownership and layout requirements of `ScreenGrid`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ui_comp_cursor_is_obscured_by_grid(
+    top_grid: *mut CScreenGrid,
+    current_grid: *mut CScreenGrid,
+    default_grid: *mut CScreenGrid,
+    minimum_z_index_gap: libc::c_int,
+) -> bool {
+    if top_grid.is_null()
+        || current_grid.is_null()
+        || default_grid.is_null()
+        || top_grid == current_grid
+        || top_grid == default_grid
+    {
+        return false;
+    }
+    let Ok(minimum_z_index_gap) = u32::try_from(minimum_z_index_gap) else {
+        return false;
+    };
+
+    // SAFETY: The checks above establish that the two grids are non-null and
+    // distinct, and the caller guarantees their validity and exclusive access.
+    let top_grid = unsafe { ScreenGridGuard::take(top_grid) };
+    let current_grid = unsafe { ScreenGridGuard::take(current_grid) };
+    top_grid.is_at_least_z_index_above(&current_grid, minimum_z_index_gap)
+}
+
 /// Composes and submits one complete line from an ordered C grid array.
 ///
 /// # Safety
