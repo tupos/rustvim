@@ -43,20 +43,6 @@ typedef struct {
   bool has_separator_character;
 } CompositorMessagePositionRequest;
 
-typedef struct {
-  Integer scroll_top;
-  Integer scroll_bottom;
-  Integer scroll_left;
-  Integer scroll_right;
-  Integer scroll_rows;
-  Integer recompose_start_row;
-  Integer recompose_end_row;
-  Integer recompose_start_column;
-  Integer recompose_end_column;
-  bool scroll;
-  bool recompose;
-} CompositorMessagePositionPlan;
-
 typedef void (*CompositorDebugCallback)(
   Integer start_row, Integer end_row, Integer start_column, Integer end_column,
   int highlight, bool delay);
@@ -168,9 +154,9 @@ extern bool ui_comp_compose_line(
 
 extern void ui_comp_hide_message_separator(void);
 
-extern bool ui_comp_plan_message_position(
+extern bool ui_comp_update_message_position(
   ScreenGrid *message_grid, ScreenGrid *default_grid, CompositorMessagePositionRequest request,
-  CompositorMessagePositionPlan *output);
+  CompositorAreaCallback compose_area);
 
 extern bool ui_comp_emit_clear_line(
   Integer row, Integer start_col, Integer end_col, sattr_T attribute);

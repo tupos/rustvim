@@ -129,23 +129,6 @@ pub struct CCompositorMessagePositionRequest {
     has_separator_character: bool,
 }
 
-/// C representation of the effects of one message-grid position update.
-#[repr(C)]
-#[derive(Clone, Copy, Debug)]
-pub struct CCompositorMessagePositionPlan {
-    scroll_top: Integer,
-    scroll_bottom: Integer,
-    scroll_left: Integer,
-    scroll_right: Integer,
-    scroll_rows: Integer,
-    recompose_start_row: Integer,
-    recompose_end_row: Integer,
-    recompose_start_column: Integer,
-    recompose_end_column: Integer,
-    scroll: bool,
-    recompose: bool,
-}
-
 /// C representation of one complete raw-line request.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -543,48 +526,6 @@ struct MessageGridScroll {
 struct CompositorMessagePositionPlan {
     scroll: Option<MessageGridScroll>,
     recompose: Option<CompositorRecomposeArea>,
-}
-
-impl From<CompositorMessagePositionPlan> for CCompositorMessagePositionPlan {
-    fn from(plan: CompositorMessagePositionPlan) -> Self {
-        let scroll = plan.scroll.is_some();
-        let (scroll_top, scroll_bottom, scroll_left, scroll_right, scroll_rows) = match plan.scroll
-        {
-            Some(scroll) => (
-                Integer::from(scroll.region.rows.start),
-                Integer::from(scroll.region.rows.end),
-                Integer::from(scroll.region.columns.start),
-                Integer::from(scroll.region.columns.end),
-                Integer::from(scroll.row_delta),
-            ),
-            None => (0, 0, 0, 0, 0),
-        };
-        let recompose = plan.recompose.is_some();
-        let (recompose_start_row, recompose_end_row, recompose_start_column, recompose_end_column) =
-            match plan.recompose {
-                Some(area) => (
-                    Integer::from(area.rows.start),
-                    Integer::from(area.rows.end),
-                    Integer::from(area.columns.start),
-                    Integer::from(area.columns.end),
-                ),
-                None => (0, 0, 0, 0),
-            };
-
-        Self {
-            scroll_top,
-            scroll_bottom,
-            scroll_left,
-            scroll_right,
-            scroll_rows,
-            recompose_start_row,
-            recompose_end_row,
-            recompose_start_column,
-            recompose_end_column,
-            scroll,
-            recompose,
-        }
-    }
 }
 
 /// Tracks whether the compositor should currently emit composed output.
@@ -2234,10 +2175,10 @@ pub extern "C" fn ui_comp_hide_message_separator() {
     lock_message_compositor_state().hide_separator();
 }
 
-/// Updates message-grid state and plans its scrolling and recomposition.
+/// Updates message-grid state and executes its scrolling and recomposition.
 ///
-/// The returned plan contains only owned scalar data. The message grid is
-/// restored before C executes any planned compositor callbacks.
+/// Both grids are restored before this function emits a scroll event or calls
+/// back into the C compositor.
 ///
 /// # Safety
 ///
@@ -2248,20 +2189,16 @@ pub extern "C" fn ui_comp_hide_message_separator() {
 /// `default_grid` must point to a second valid, exclusively accessible
 /// `CScreenGrid` whose buffers satisfy the same requirements.
 ///
-/// `output` must point to writable, properly aligned storage for one
-/// `CCompositorMessagePositionPlan` and must not overlap either grid.
+/// `compose_area` must remain valid for this call. It may reenter the
+/// compositor because both grid guards are dropped before it is invoked.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ui_comp_plan_message_position(
+pub unsafe extern "C" fn ui_comp_update_message_position(
     message_grid: *mut CScreenGrid,
     default_grid: *mut CScreenGrid,
     request: CCompositorMessagePositionRequest,
-    output: *mut CCompositorMessagePositionPlan,
+    compose_area: CompositorAreaCallback,
 ) -> bool {
-    if message_grid.is_null()
-        || default_grid.is_null()
-        || message_grid == default_grid
-        || output.is_null()
-    {
+    if message_grid.is_null() || default_grid.is_null() || message_grid == default_grid {
         return false;
     }
     let Ok(request) = CompositorMessagePositionRequest::try_from(request) else {
@@ -2285,8 +2222,33 @@ pub unsafe extern "C" fn ui_comp_plan_message_position(
         return false;
     };
 
-    // SAFETY: The caller provides valid, non-overlapping output storage.
-    unsafe { output.write(plan.into()) };
+    if let Some(scroll) = plan.scroll {
+        // SAFETY: Both grid guards were dropped before this synchronous UI
+        // call, and the safe plan contains only validated scalar values.
+        unsafe {
+            ui_composed_call_grid_scroll(
+                1,
+                Integer::from(scroll.region.rows.start),
+                Integer::from(scroll.region.rows.end),
+                Integer::from(scroll.region.columns.start),
+                Integer::from(scroll.region.columns.end),
+                Integer::from(scroll.row_delta),
+                0,
+            );
+        }
+    }
+    if let Some(area) = plan.recompose {
+        // SAFETY: Both grid guards were dropped, and the caller guarantees
+        // that the callback remains valid for this call.
+        unsafe {
+            compose_area(
+                Integer::from(area.rows.start),
+                Integer::from(area.rows.end),
+                Integer::from(area.columns.start),
+                Integer::from(area.columns.end),
+            );
+        }
+    }
     true
 }
 

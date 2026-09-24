@@ -340,23 +340,10 @@ void ui_comp_msg_set_pos(Integer grid, Integer row, Boolean scrolled, String sep
     .scrolled = scrolled,
     .has_separator_character = has_separator_character,
   };
-  CompositorMessagePositionPlan plan;
-  bool planned = ui_comp_plan_message_position(&msg_grid, &default_grid, request, &plan);
-  assert(planned);
-  if (!planned) {
-    return;
-  }
-
-  if (plan.scroll) {
-    ui_composed_call_grid_scroll(
-      1, plan.scroll_top, plan.scroll_bottom,
-      plan.scroll_left, plan.scroll_right, plan.scroll_rows, 0);
-  }
-  if (plan.recompose) {
-    compose_area(
-      plan.recompose_start_row, plan.recompose_end_row,
-      plan.recompose_start_column, plan.recompose_end_column);
-  }
+  bool updated =
+    ui_comp_update_message_position(&msg_grid, &default_grid, request, compose_area);
+  assert(updated);
+  (void)updated;
 }
 
 void ui_comp_grid_scroll(Integer grid, Integer top, Integer bot, Integer left, Integer right,
