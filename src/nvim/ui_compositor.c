@@ -31,10 +31,6 @@
 
 kvec_t(ScreenGrid *) layers = KV_INITIAL_VALUE;
 
-#ifndef NDEBUG
-static int chk_width = 0, chk_height = 0;
-#endif
-
 static int dbghl_normal, dbghl_clear, dbghl_composed, dbghl_recompose;
 
 void ui_comp_init(void)
@@ -191,9 +187,6 @@ bool ui_comp_cursor_is_covered_by_higher_layer(ScreenGrid *current_grid, int row
 /// the downstream UI.)
 static void compose_line(Integer row, Integer startcol, Integer endcol, LineFlags flags)
 {
-  assert(endcol <= chk_width);
-  assert(row < chk_height);
-
   CompositorLineRequest request = {
     .row = row,
     .start_col = startcol,
@@ -373,14 +366,7 @@ void ui_comp_grid_scroll(Integer grid, Integer top, Integer bot, Integer left, I
 
 void ui_comp_grid_resize(Integer grid, Integer width, Integer height)
 {
-  if (grid == 1) {
-    ui_composed_call_grid_resize(1, width, height);
-#ifndef NDEBUG
-    chk_width = (int)width;
-    chk_height = (int)height;
-#endif
-    bool resized = ui_comp_resize_buffer(width);
-    assert(resized);
-    (void)resized;
-  }
+  bool processed = ui_comp_process_grid_resize(grid, width, height);
+  assert(processed);
+  (void)processed;
 }

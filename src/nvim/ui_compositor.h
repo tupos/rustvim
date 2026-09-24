@@ -100,7 +100,8 @@ extern void ui_comp_register_composed_ui(void);
 extern bool ui_comp_unregister_composed_ui(void);
 extern bool ui_comp_set_screen_valid(bool valid);
 
-extern bool ui_comp_resize_buffer(Integer width);
+extern bool ui_comp_process_grid_resize(
+  Integer grid, Integer width, Integer height);
 extern bool ui_comp_release_buffer(void);
 
 extern bool ui_comp_place_grid_in_layer_stack(

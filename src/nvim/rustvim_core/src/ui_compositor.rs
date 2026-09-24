@@ -47,6 +47,7 @@ type CompositorRawLineDiagnosticCallback =
 
 unsafe extern "C" {
     fn ui_composed_call_grid_cursor_goto(grid: Integer, row: Integer, column: Integer);
+    fn ui_composed_call_grid_resize(grid: Integer, width: Integer, height: Integer);
     fn ui_composed_call_grid_scroll(
         grid: Integer,
         top: Integer,
@@ -2156,8 +2157,28 @@ pub extern "C" fn ui_comp_set_screen_valid(valid: bool) -> bool {
     previous
 }
 
+/// Processes a grid-resize event for the composed screen.
+///
+/// Only the default grid determines the composed screen size. Other grid
+/// resize events remain successful no-ops, matching the compositor's existing
+/// behavior.
 #[unsafe(no_mangle)]
-pub extern "C" fn ui_comp_resize_buffer(width: Integer) -> bool {
+pub extern "C" fn ui_comp_process_grid_resize(
+    grid: Integer,
+    width: Integer,
+    height: Integer,
+) -> bool {
+    if grid != 1 {
+        return true;
+    }
+
+    // SAFETY: The composed UI callback accepts the unchanged validated C ABI
+    // scalars and is invoked before the compositor buffer is resized, matching
+    // the existing event order.
+    unsafe {
+        ui_composed_call_grid_resize(1, width, height);
+    }
+
     let Ok(width) = usize::try_from(width) else {
         return false;
     };
