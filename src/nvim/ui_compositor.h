@@ -162,6 +162,9 @@ extern size_t ui_comp_find_layer_at_coord(
   ScreenGrid *const *layer_grids, size_t layer_count,
   int row, int column, bool require_mouse_input);
 
+extern bool ui_comp_grid_contains_at(
+  ScreenGrid *grid, int row, int column);
+
 extern bool ui_comp_grid_accepts_mouse_at(
   ScreenGrid *grid, int origin_row, int origin_column,
   int row, int column);

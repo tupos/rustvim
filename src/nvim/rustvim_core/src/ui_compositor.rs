@@ -217,6 +217,12 @@ impl<'grid> PositionedGrid<'grid> {
         (grid.rows >= 0 && grid.cols >= 0).then_some(Self { grid, origin })
     }
 
+    /// Positions a grid at its stored compositor origin.
+    fn try_from_compositor_position(grid: &'grid ScreenGrid) -> Option<Self> {
+        let (row, column) = grid.compositor_position();
+        Self::try_new(grid, CompositorPoint { row, column })
+    }
+
     /// Reports whether the allocated grid contains one screen cell.
     fn contains(self, point: CompositorPoint) -> bool {
         point.row >= self.origin.row
@@ -2689,6 +2695,31 @@ pub unsafe extern "C" fn ui_comp_find_layer_at_coord(
         .unwrap_or(usize::MAX)
 }
 
+/// Reports whether one grid contains a composed-screen coordinate.
+///
+/// The grid is positioned using its stored compositor origin.
+///
+/// # Safety
+///
+/// `grid` must point to a valid, exclusively accessible `CScreenGrid` whose
+/// buffers satisfy the ownership and layout requirements of `ScreenGrid`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ui_comp_grid_contains_at(
+    grid: *mut CScreenGrid,
+    row: libc::c_int,
+    column: libc::c_int,
+) -> bool {
+    if grid.is_null() {
+        return false;
+    }
+
+    // SAFETY: The caller transfers exclusive ownership of the grid buffers
+    // into the guard for the duration of this operation.
+    let grid = unsafe { ScreenGridGuard::take(grid) };
+    PositionedGrid::try_from_compositor_position(&grid)
+        .is_some_and(|grid| grid.contains(CompositorPoint { row, column }))
+}
+
 /// Reports whether one window grid accepts mouse input at a screen coordinate.
 ///
 /// Unlike compositor layers, multigrid window fallbacks use the window's
@@ -3757,6 +3788,19 @@ mod tests {
             layers.topmost_layer_at(CompositorPoint { row: 1, column: 1 }, LayerHitTest::Any,),
             None
         );
+    }
+
+    #[test]
+    fn positioned_grid_uses_stored_compositor_position() {
+        let mut grid = grid_with_size(2, 3);
+        grid.set_compositor_position(4, 5);
+        let positioned = PositionedGrid::try_from_compositor_position(&grid).unwrap();
+
+        assert!(positioned.contains(CompositorPoint { row: 4, column: 5 }));
+        assert!(positioned.contains(CompositorPoint { row: 5, column: 7 }));
+        assert!(!positioned.contains(CompositorPoint { row: 3, column: 5 }));
+        assert!(!positioned.contains(CompositorPoint { row: 6, column: 5 }));
+        assert!(!positioned.contains(CompositorPoint { row: 5, column: 8 }));
     }
 
     #[test]
