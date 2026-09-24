@@ -29,14 +29,11 @@
 
 #include "ui_compositor.c.generated.h"
 
-static int composed_uis = 0;
 kvec_t(ScreenGrid *) layers = KV_INITIAL_VALUE;
 
 #ifndef NDEBUG
 static int chk_width = 0, chk_height = 0;
 #endif
-
-static bool valid_screen = true;
 
 static int dbghl_normal, dbghl_clear, dbghl_composed, dbghl_recompose;
 
@@ -65,24 +62,18 @@ void ui_comp_syn_init(void)
 
 void ui_comp_attach(RemoteUI *ui)
 {
-  composed_uis++;
+  ui_comp_register_composed_ui();
   ui->composed = true;
 }
 
 void ui_comp_detach(RemoteUI *ui)
 {
-  composed_uis--;
-  if (composed_uis == 0) {
+  if (ui_comp_unregister_composed_ui()) {
     bool released = ui_comp_release_buffer();
     assert(released);
     (void)released;
   }
   ui->composed = false;
-}
-
-bool ui_comp_should_draw(void)
-{
-  return composed_uis != 0 && valid_screen;
 }
 
 /// Raises or lowers the layer, syncing comp_index with zindex.
@@ -410,19 +401,6 @@ void ui_comp_raw_line(Integer grid, Integer row, Integer startcol, Integer endco
       1, plan.row, plan.start_col, plan.end_col, plan.clear_col,
       clearattr, plan.flags, chunk, attrs);
   }
-}
-
-/// The screen is invalid and will soon be cleared
-///
-/// Don't redraw floats until screen is cleared
-bool ui_comp_set_screen_valid(bool valid)
-{
-  bool old_val = valid_screen;
-  valid_screen = valid;
-  if (!valid) {
-    ui_comp_hide_message_separator();
-  }
-  return old_val;
 }
 
 void ui_comp_msg_set_pos(Integer grid, Integer row, Boolean scrolled, String sep_char,

@@ -587,6 +587,47 @@ impl From<CompositorMessagePositionPlan> for CCompositorMessagePositionPlan {
     }
 }
 
+/// Tracks whether the compositor should currently emit composed output.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CompositorDrawState {
+    attached_ui_count: usize,
+    screen_valid: bool,
+}
+
+impl CompositorDrawState {
+    /// Creates the initial state before any composed UI is attached.
+    const fn new() -> Self {
+        Self {
+            attached_ui_count: 0,
+            screen_valid: true,
+        }
+    }
+
+    /// Records one newly attached composed UI.
+    fn register_ui(&mut self) {
+        self.attached_ui_count = self
+            .attached_ui_count
+            .checked_add(1)
+            .expect("composed UI count overflow");
+    }
+
+    /// Removes one composed UI and reports whether none remain.
+    fn unregister_ui(&mut self) -> Option<bool> {
+        self.attached_ui_count = self.attached_ui_count.checked_sub(1)?;
+        Some(self.attached_ui_count == 0)
+    }
+
+    /// Reports whether composed output may currently be emitted.
+    fn should_draw(self) -> bool {
+        self.attached_ui_count != 0 && self.screen_valid
+    }
+
+    /// Updates screen validity and returns its previous value.
+    fn set_screen_valid(&mut self, valid: bool) -> bool {
+        std::mem::replace(&mut self.screen_valid, valid)
+    }
+}
+
 /// Message-grid placement and separator state owned by the compositor.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct MessageCompositorState {
@@ -2152,6 +2193,47 @@ fn lock_compositor_buffer() -> MutexGuard<'static, CompositorBuffer> {
         .expect("compositor buffer is already borrowed")
 }
 
+static COMPOSITOR_DRAW_STATE: Mutex<CompositorDrawState> = Mutex::new(CompositorDrawState::new());
+
+/// Acquires exclusive access to the process-global compositor draw state.
+fn lock_compositor_draw_state() -> MutexGuard<'static, CompositorDrawState> {
+    COMPOSITOR_DRAW_STATE
+        .try_lock()
+        .expect("compositor draw state is already borrowed")
+}
+
+/// Records one newly attached composed UI.
+#[unsafe(no_mangle)]
+pub extern "C" fn ui_comp_register_composed_ui() {
+    lock_compositor_draw_state().register_ui();
+}
+
+/// Removes one composed UI and reports whether none remain.
+#[unsafe(no_mangle)]
+pub extern "C" fn ui_comp_unregister_composed_ui() -> bool {
+    lock_compositor_draw_state()
+        .unregister_ui()
+        .expect("cannot unregister a composed UI when none are attached")
+}
+
+/// Reports whether the compositor should currently emit composed output.
+#[unsafe(no_mangle)]
+pub extern "C" fn ui_comp_should_draw() -> bool {
+    lock_compositor_draw_state().should_draw()
+}
+
+/// Updates screen validity and returns its previous value.
+///
+/// Invalidating the composed screen also hides the message separator.
+#[unsafe(no_mangle)]
+pub extern "C" fn ui_comp_set_screen_valid(valid: bool) -> bool {
+    let previous = lock_compositor_draw_state().set_screen_valid(valid);
+    if !valid {
+        lock_message_compositor_state().hide_separator();
+    }
+    previous
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn ui_comp_resize_buffer(width: Integer) -> bool {
     let Ok(width) = usize::try_from(width) else {
@@ -3235,6 +3317,27 @@ mod tests {
             scrolled,
             should_draw: true,
         }
+    }
+
+    #[test]
+    fn compositor_draw_state_requires_an_attached_ui_and_valid_screen() {
+        let mut state = CompositorDrawState::new();
+        assert!(!state.should_draw());
+
+        state.register_ui();
+        state.register_ui();
+        assert!(state.should_draw());
+
+        assert!(state.set_screen_valid(false));
+        assert!(!state.should_draw());
+        assert!(!state.set_screen_valid(true));
+        assert!(state.should_draw());
+
+        assert_eq!(state.unregister_ui(), Some(false));
+        assert!(state.should_draw());
+        assert_eq!(state.unregister_ui(), Some(true));
+        assert!(!state.should_draw());
+        assert_eq!(state.unregister_ui(), None);
     }
 
     #[test]
