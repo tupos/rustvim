@@ -54,7 +54,6 @@ typedef struct {
   schar_T separator_character;
   int screen_rows;
   int screen_columns;
-  int default_grid_columns;
   bool scrolled;
   bool has_separator_character;
   bool should_draw;
@@ -178,7 +177,7 @@ extern bool ui_comp_compose_line(
 extern void ui_comp_hide_message_separator(void);
 
 extern bool ui_comp_plan_message_position(
-  ScreenGrid *message_grid, CompositorMessagePositionRequest request,
+  ScreenGrid *message_grid, ScreenGrid *default_grid, CompositorMessagePositionRequest request,
   CompositorMessagePositionPlan *output);
 
 extern bool ui_comp_emit_clear_line(

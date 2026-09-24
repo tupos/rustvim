@@ -115,7 +115,6 @@ pub struct CCompositorMessagePositionRequest {
     separator_character: VimSCharT,
     screen_rows: libc::c_int,
     screen_columns: libc::c_int,
-    default_grid_columns: libc::c_int,
     scrolled: bool,
     has_separator_character: bool,
     should_draw: bool,
@@ -476,7 +475,6 @@ struct CompositorMessagePositionRequest {
     row: i32,
     separator_character: Option<VimSCharT>,
     screen_size: CompositorSize,
-    default_grid_columns: i32,
     scrolled: bool,
     should_draw: bool,
 }
@@ -486,8 +484,7 @@ impl TryFrom<CCompositorMessagePositionRequest> for CompositorMessagePositionReq
 
     fn try_from(request: CCompositorMessagePositionRequest) -> Result<Self, Self::Error> {
         let row = i32::try_from(request.row).map_err(|_| ())?;
-        if request.screen_rows < 0 || request.screen_columns < 0 || request.default_grid_columns < 0
-        {
+        if request.screen_rows < 0 || request.screen_columns < 0 {
             return Err(());
         }
 
@@ -500,7 +497,6 @@ impl TryFrom<CCompositorMessagePositionRequest> for CompositorMessagePositionReq
                 height: request.screen_rows,
                 width: request.screen_columns,
             },
-            default_grid_columns: request.default_grid_columns,
             scrolled: request.scrolled,
             should_draw: request.should_draw,
         })
@@ -587,8 +583,13 @@ impl MessageCompositorState {
     fn plan_redraw(
         &self,
         request: CompositorMessagePositionRequest,
-        message_grid_blends: bool,
+        message_grid: &ScreenGrid,
+        default_grid: &ScreenGrid,
     ) -> Option<CompositorMessagePositionPlan> {
+        if default_grid.cols < 0 {
+            return None;
+        }
+
         if !request.should_draw {
             return Some(CompositorMessagePositionPlan::default());
         }
@@ -598,7 +599,7 @@ impl MessageCompositorState {
                 scroll: None,
                 recompose: Some(CompositorRecomposeArea {
                     rows: self.current_row.saturating_sub(1).max(0)..request.row,
-                    columns: 0..request.default_grid_columns,
+                    columns: 0..default_grid.cols,
                 }),
             });
         }
@@ -611,7 +612,7 @@ impl MessageCompositorState {
         }
 
         let row_delta = self.current_row.checked_sub(request.row)?;
-        if message_grid_blends {
+        if message_grid.blends_with_background() {
             let separator_offset = if request.scrolled { 1 } else { 0 };
             return Some(CompositorMessagePositionPlan {
                 scroll: None,
@@ -651,6 +652,7 @@ impl MessageCompositorState {
     fn update_position(
         &mut self,
         message_grid: &mut ScreenGrid,
+        default_grid: &ScreenGrid,
         request: CompositorMessagePositionRequest,
     ) -> Option<CompositorMessagePositionPlan> {
         let separator_row = if request.scrolled && request.row > 0 {
@@ -658,7 +660,7 @@ impl MessageCompositorState {
         } else {
             None
         };
-        let plan = self.plan_redraw(request, message_grid.blends_with_background())?;
+        let plan = self.plan_redraw(request, message_grid, default_grid)?;
 
         message_grid.mark_compositor_index_for_update();
         let (_, column) = message_grid.compositor_position();
@@ -2152,15 +2154,23 @@ pub extern "C" fn ui_comp_hide_message_separator() {
 /// whose buffers satisfy the ownership and layout requirements of
 /// `ScreenGrid`.
 ///
+/// `default_grid` must point to a second valid, exclusively accessible
+/// `CScreenGrid` whose buffers satisfy the same requirements.
+///
 /// `output` must point to writable, properly aligned storage for one
-/// `CCompositorMessagePositionPlan` and must not overlap `message_grid`.
+/// `CCompositorMessagePositionPlan` and must not overlap either grid.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ui_comp_plan_message_position(
     message_grid: *mut CScreenGrid,
+    default_grid: *mut CScreenGrid,
     request: CCompositorMessagePositionRequest,
     output: *mut CCompositorMessagePositionPlan,
 ) -> bool {
-    if message_grid.is_null() || output.is_null() {
+    if message_grid.is_null()
+        || default_grid.is_null()
+        || message_grid == default_grid
+        || output.is_null()
+    {
         return false;
     }
     let Ok(request) = CompositorMessagePositionRequest::try_from(request) else {
@@ -2168,10 +2178,11 @@ pub unsafe extern "C" fn ui_comp_plan_message_position(
     };
 
     let plan = {
-        // SAFETY: The caller transfers exclusive ownership of the message-grid
-        // buffers into the guard for the duration of this operation.
+        // SAFETY: The caller transfers exclusive ownership of both grids'
+        // buffers into distinct guards for the duration of this operation.
         let mut message_grid = unsafe { ScreenGridGuard::take(message_grid) };
-        lock_message_compositor_state().update_position(&mut message_grid, request)
+        let default_grid = unsafe { ScreenGridGuard::take(default_grid) };
+        lock_message_compositor_state().update_position(&mut message_grid, &default_grid, request)
     };
     let Some(plan) = plan else {
         return false;
@@ -3153,7 +3164,6 @@ mod tests {
                 height: 10,
                 width: 20,
             },
-            default_grid_columns: 18,
             scrolled,
             should_draw: true,
         }
@@ -3163,15 +3173,20 @@ mod tests {
     fn moving_message_grid_down_recomposes_the_exposed_rows() {
         let mut state = MessageCompositorState::new();
         let mut message_grid = grid_with_size(10, 20);
+        let default_grid = grid_with_size(10, 18);
         let mut initial = message_position_request(5, false);
         initial.should_draw = false;
         assert_eq!(
-            state.update_position(&mut message_grid, initial),
+            state.update_position(&mut message_grid, &default_grid, initial),
             Some(CompositorMessagePositionPlan::default())
         );
 
         let plan = state
-            .update_position(&mut message_grid, message_position_request(7, false))
+            .update_position(
+                &mut message_grid,
+                &default_grid,
+                message_position_request(7, false),
+            )
             .unwrap();
 
         assert_eq!(
@@ -3191,12 +3206,19 @@ mod tests {
     fn moving_message_grid_up_scrolls_text_and_recomposes_a_new_separator() {
         let mut state = MessageCompositorState::new();
         let mut message_grid = grid_with_size(10, 20);
+        let default_grid = grid_with_size(10, 18);
         let mut initial = message_position_request(5, false);
         initial.should_draw = false;
-        state.update_position(&mut message_grid, initial).unwrap();
+        state
+            .update_position(&mut message_grid, &default_grid, initial)
+            .unwrap();
 
         let plan = state
-            .update_position(&mut message_grid, message_position_request(2, true))
+            .update_position(
+                &mut message_grid,
+                &default_grid,
+                message_position_request(2, true),
+            )
             .unwrap();
 
         assert_eq!(
@@ -3221,12 +3243,20 @@ mod tests {
     fn moving_a_blended_message_grid_up_recomposes_instead_of_scrolling() {
         let mut state = MessageCompositorState::new();
         let mut message_grid = grid_with_size(10, 20);
+        message_grid.set_blends_with_background(true);
+        let default_grid = grid_with_size(10, 18);
         let mut initial = message_position_request(5, false);
         initial.should_draw = false;
-        state.update_position(&mut message_grid, initial).unwrap();
+        state
+            .update_position(&mut message_grid, &default_grid, initial)
+            .unwrap();
 
         let plan = state
-            .plan_redraw(message_position_request(2, true), true)
+            .plan_redraw(
+                message_position_request(2, true),
+                &message_grid,
+                &default_grid,
+            )
             .unwrap();
 
         assert_eq!(

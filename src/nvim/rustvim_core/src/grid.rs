@@ -323,6 +323,11 @@ impl ScreenGrid {
         self.blending
     }
 
+    /// Controls whether this grid blends with the default-grid background.
+    pub(crate) fn set_blends_with_background(&mut self, blends: bool) {
+        self.blending = blends;
+    }
+
     /// Reports whether this grid accepts mouse input.
     pub(crate) fn accepts_mouse_input(&self) -> bool {
         self.mouse_enabled

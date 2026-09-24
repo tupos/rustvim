@@ -414,13 +414,12 @@ void ui_comp_msg_set_pos(Integer grid, Integer row, Boolean scrolled, String sep
       has_separator_character ? schar_from_buf(sep_char.data, sep_char.size) : 0,
     .screen_rows = Rows,
     .screen_columns = Columns,
-    .default_grid_columns = default_grid.cols,
     .scrolled = scrolled,
     .has_separator_character = has_separator_character,
     .should_draw = ui_comp_should_draw(),
   };
   CompositorMessagePositionPlan plan;
-  bool planned = ui_comp_plan_message_position(&msg_grid, request, &plan);
+  bool planned = ui_comp_plan_message_position(&msg_grid, &default_grid, request, &plan);
   assert(planned);
   if (!planned) {
     return;
