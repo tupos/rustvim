@@ -14,6 +14,7 @@ typedef struct {
   int height;
   int width;
   bool valid;
+  bool on_top;
 } CompositorGridPlacementRequest;
 
 typedef struct {
@@ -111,9 +112,10 @@ extern bool ui_comp_set_screen_valid(bool valid);
 extern bool ui_comp_resize_buffer(Integer width);
 extern bool ui_comp_release_buffer(void);
 
-extern bool ui_comp_place_existing_grid(
-  ScreenGrid *const *layer_grids, size_t layer_count,
-  ScreenGrid *grid, CompositorGridPlacementRequest request,
+extern bool ui_comp_place_grid_in_layer_stack(
+  ScreenGrid **layer_grids, size_t *layer_count,
+  ScreenGrid *grid, ScreenGrid *current_window_grid,
+  CompositorGridPlacementRequest request,
   CompositorAreaCallback compose_area, bool *moved);
 
 extern bool ui_comp_clip_recompose_area(
@@ -122,12 +124,6 @@ extern bool ui_comp_clip_recompose_area(
 
 extern bool ui_comp_recompose_grid(
   ScreenGrid *grid, CompositorAreaCallback compose_area);
-
-extern bool ui_comp_place_new_grid(
-  ScreenGrid **layer_grids, size_t layer_count,
-  ScreenGrid *grid, ScreenGrid *current_window_grid,
-  CompositorGridPlacementRequest request, bool on_top,
-  CompositorAreaCallback compose_area);
 
 extern bool ui_comp_grid_cursor_goto_in_layer_stack(
   ScreenGrid **layer_grids, size_t layer_count,

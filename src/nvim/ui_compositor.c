@@ -91,17 +91,6 @@ void ui_comp_layers_adjust(size_t layer_idx, bool raise)
   (void)adjusted;
 }
 
-/// Reports whether `grid` is currently registered as a compositor layer.
-static bool ui_comp_has_grid(const ScreenGrid *grid)
-{
-  for (size_t i = 0; i < kv_size(layers); i++) {
-    if (kv_A(layers, i) == grid) {
-      return true;
-    }
-  }
-  return false;
-}
-
 /// Places `grid` at (col,row) position with (width * height) size.
 /// Adds `grid` as the top layer if it is a new layer.
 ///
@@ -118,21 +107,21 @@ bool ui_comp_put_grid(ScreenGrid *grid, int row, int col, int height, int width,
     .height = height,
     .width = width,
     .valid = valid,
+    .on_top = on_top,
   };
 
-  if (ui_comp_has_grid(grid)) {
-    bool placed = ui_comp_place_existing_grid(
-      layers.items, layers.size, grid, request, compose_area, &moved);
-    assert(placed);
-    return placed && moved;
-  } else {
-    kv_push(layers, grid);
-    ScreenGrid *current_window_grid = curwin ? &curwin->w_grid_alloc : NULL;
-    bool placed = ui_comp_place_new_grid(
-      layers.items, layers.size, grid, current_window_grid, request, on_top, compose_area);
-    assert(placed);
-    return placed;
-  }
+  // Reserve and initialize one candidate slot without making it active.
+  // Rust decides whether the grid is already registered and publishes a
+  // larger layer count only when it inserts the candidate.
+  kv_ensure_space(layers, 1);
+  layers.items[layers.size] = grid;
+
+  ScreenGrid *current_window_grid = curwin ? &curwin->w_grid_alloc : NULL;
+  bool placed = ui_comp_place_grid_in_layer_stack(
+    layers.items, &layers.size, grid, current_window_grid,
+    request, compose_area, &moved);
+  assert(placed);
+  return placed && moved;
 }
 
 void ui_comp_remove_grid(ScreenGrid *grid)
