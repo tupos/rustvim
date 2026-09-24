@@ -191,24 +191,6 @@ static CompositorLineSettings compositor_line_settings(void)
   };
 }
 
-/// Baseline implementation. This is always correct, but we can sometimes
-/// do something more efficient (where efficiency means smaller deltas to
-/// the downstream UI.)
-static void compose_line(Integer row, Integer startcol, Integer endcol, LineFlags flags)
-{
-  CompositorLineRequest request = {
-    .row = row,
-    .start_col = startcol,
-    .end_col = endcol,
-    .flags = flags,
-    .settings = compositor_line_settings(),
-  };
-  bool composed = ui_comp_compose_line(
-    layers.items, layers.size, &msg_grid, request);
-  assert(composed);
-  (void)composed;
-}
-
 static bool clip_area_to_default_grid(CompositorRecomposeArea *area)
 {
   bool clipped = ui_comp_clip_recompose_area(&default_grid, *area, area);
@@ -262,19 +244,19 @@ static void compose_area(Integer startrow, Integer endrow, Integer startcol, Int
 {
   compose_debug(startrow, endrow, startcol, endcol, dbghl_recompose, true);
 
-  CompositorRecomposeArea area = {
-    .start_row = startrow,
-    .end_row = endrow,
-    .start_column = startcol,
-    .end_column = endcol,
+  CompositorAreaRequest request = {
+    .area = {
+      .start_row = startrow,
+      .end_row = endrow,
+      .start_column = startcol,
+      .end_column = endcol,
+    },
+    .settings = compositor_line_settings(),
   };
-  if (!clip_area_to_default_grid(&area)
-      || area.end_column <= area.start_column) {
-    return;
-  }
-  for (int row = (int)area.start_row; row < area.end_row; row++) {
-    compose_line(row, area.start_column, area.end_column, kLineFlagInvalid);
-  }
+  bool composed = ui_comp_compose_area(
+    layers.items, layers.size, &msg_grid, request);
+  assert(composed);
+  (void)composed;
 }
 
 /// compose the area under the grid.

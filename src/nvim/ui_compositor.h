@@ -31,12 +31,9 @@ typedef struct {
 } CompositorLineSettings;
 
 typedef struct {
-  Integer row;
-  Integer start_col;
-  Integer end_col;
-  LineFlags flags;
+  CompositorRecomposeArea area;
   CompositorLineSettings settings;
-} CompositorLineRequest;
+} CompositorAreaRequest;
 
 typedef struct {
   Integer row;
@@ -150,9 +147,9 @@ extern bool ui_comp_cursor_is_covered_by_higher_layer_in_stack(
   ScreenGrid *const *layer_grids, size_t layer_count,
   ScreenGrid *current_grid, int row, int column, int minimum_z_index_gap);
 
-extern bool ui_comp_compose_line(
+extern bool ui_comp_compose_area(
   ScreenGrid *const *layer_grids, size_t layer_count,
-  ScreenGrid *message_grid, CompositorLineRequest request);
+  ScreenGrid *message_grid, CompositorAreaRequest request);
 
 extern void ui_comp_hide_message_separator(void);
 

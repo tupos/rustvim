@@ -110,14 +110,11 @@ pub struct CCompositorLineSettings {
     abort_on_invalid: bool,
 }
 
-/// C representation of one complete compositor-line request.
+/// C representation of one compositor-area request.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
-pub struct CCompositorLineRequest {
-    row: Integer,
-    start_col: Integer,
-    end_col: Integer,
-    flags: libc::c_int,
+pub struct CCompositorAreaRequest {
+    area: CCompositorRecomposeArea,
     settings: CCompositorLineSettings,
 }
 
@@ -1840,27 +1837,31 @@ impl TryFrom<CCompositorLineSettings> for CompositorLineSettings {
     }
 }
 
-/// Validated inputs received from C for composing one complete line.
+/// Validated inputs received from C for composing one screen area.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CompositorAreaInput {
+    area: CompositorRecomposeArea,
+    settings: CompositorLineSettings,
+}
+
+impl TryFrom<CCompositorAreaRequest> for CompositorAreaInput {
+    type Error = ();
+
+    fn try_from(request: CCompositorAreaRequest) -> Result<Self, Self::Error> {
+        Ok(Self {
+            area: request.area.try_into()?,
+            settings: request.settings.try_into()?,
+        })
+    }
+}
+
+/// Validated inputs for composing one line from temporarily C-owned grids.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct CompositorLineInput {
     row: i32,
     columns: Range<i32>,
     flags: i32,
     settings: CompositorLineSettings,
-}
-
-impl TryFrom<CCompositorLineRequest> for CompositorLineInput {
-    type Error = ();
-
-    fn try_from(request: CCompositorLineRequest) -> Result<Self, Self::Error> {
-        Ok(Self {
-            row: i32::try_from(request.row).map_err(|_| ())?,
-            columns: i32::try_from(request.start_col).map_err(|_| ())?
-                ..i32::try_from(request.end_col).map_err(|_| ())?,
-            flags: request.flags,
-            settings: request.settings.try_into()?,
-        })
-    }
 }
 
 /// Validated inputs for composing one complete line in Rust.
@@ -3124,7 +3125,7 @@ unsafe fn compose_line_from_c_grids(
     true
 }
 
-/// Composes and submits one complete line from an ordered C grid array.
+/// Composes and submits a clipped screen area from an ordered C grid array.
 ///
 /// # Safety
 ///
@@ -3132,23 +3133,71 @@ unsafe fn compose_line_from_c_grids(
 /// pointers. Every grid must be exclusively accessible and its buffers must
 /// satisfy the ownership and layout requirements of `ScreenGrid`.
 ///
-/// When the requested row is the message-separator row, `message_grid` must
-/// either identify one grid in `layer_grids` or identify another exclusively
-/// accessible grid satisfying the same requirements.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn ui_comp_compose_line(
+/// When a requested row is the message-separator row, `message_grid` must
+/// either identify a grid in `layer_grids` or identify another exclusively
+/// accessible grid satisfying the same requirements. Grid ownership is
+/// restored before each synchronous UI call so compositor callbacks may
+/// reenter C safely.
+unsafe fn compose_area_from_c_grids(
     layer_grids: *const *mut CScreenGrid,
     layer_count: usize,
     message_grid: *mut CScreenGrid,
-    request: CCompositorLineRequest,
+    input: CompositorAreaInput,
 ) -> bool {
-    let Ok(request) = CompositorLineInput::try_from(request) else {
+    let CompositorAreaInput { area, settings } = input;
+    let Some(area) = (|| {
+        // SAFETY: The caller satisfies the documented layer-array and grid
+        // ownership requirements.
+        let layer_guards = unsafe { CompositorLayerGuards::try_take(layer_grids, layer_count) }?;
+        area.with_ends_clamped_to_grid(layer_guards.grid(0)?)
+    })() else {
+        return false;
+    };
+    if area.columns.end <= area.columns.start {
+        return true;
+    }
+
+    for row in area.rows {
+        // SAFETY: The caller satisfies the documented grid requirements. The
+        // temporary clipping guards and every preceding line's guards were
+        // dropped before this helper takes ownership.
+        if !unsafe {
+            compose_line_from_c_grids(
+                layer_grids,
+                layer_count,
+                message_grid,
+                CompositorLineInput {
+                    row,
+                    columns: area.columns.clone(),
+                    flags: LINE_FLAG_INVALID,
+                    settings,
+                },
+            )
+        } {
+            return false;
+        }
+    }
+    true
+}
+
+/// Composes and submits a complete screen area from an ordered C grid array.
+///
+/// # Safety
+///
+/// The pointers must satisfy `compose_area_from_c_grids` requirements.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ui_comp_compose_area(
+    layer_grids: *const *mut CScreenGrid,
+    layer_count: usize,
+    message_grid: *mut CScreenGrid,
+    request: CCompositorAreaRequest,
+) -> bool {
+    let Ok(input) = CompositorAreaInput::try_from(request) else {
         return false;
     };
 
-    // SAFETY: The caller satisfies the helper's grid-array, grid-ownership,
-    // and message-grid requirements.
-    unsafe { compose_line_from_c_grids(layer_grids, layer_count, message_grid, request) }
+    // SAFETY: The caller satisfies the helper's pointer requirements.
+    unsafe { compose_area_from_c_grids(layer_grids, layer_count, message_grid, input) }
 }
 
 #[unsafe(no_mangle)]
@@ -3589,12 +3638,14 @@ mod tests {
     }
 
     #[test]
-    fn line_input_converts_and_validates_ffi_settings() {
-        let request = CCompositorLineRequest {
-            row: 3,
-            start_col: 2,
-            end_col: 7,
-            flags: LINE_FLAG_INVALID,
+    fn area_input_converts_and_validates_ffi_settings() {
+        let request = CCompositorAreaRequest {
+            area: CCompositorRecomposeArea {
+                start_row: 3,
+                end_row: 5,
+                start_column: 2,
+                end_column: 7,
+            },
             settings: CCompositorLineSettings {
                 message_separator_attribute: 9,
                 screen_columns: 10,
@@ -3603,11 +3654,12 @@ mod tests {
         };
 
         assert_eq!(
-            CompositorLineInput::try_from(request),
-            Ok(CompositorLineInput {
-                row: 3,
-                columns: 2..7,
-                flags: LINE_FLAG_INVALID,
+            CompositorAreaInput::try_from(request),
+            Ok(CompositorAreaInput {
+                area: CompositorRecomposeArea {
+                    rows: 3..5,
+                    columns: 2..7,
+                },
                 settings: CompositorLineSettings {
                     message_separator_attribute: 9,
                     screen_columns: 10,
@@ -3616,7 +3668,7 @@ mod tests {
             })
         );
         assert!(
-            CompositorLineInput::try_from(CCompositorLineRequest {
+            CompositorAreaInput::try_from(CCompositorAreaRequest {
                 settings: CCompositorLineSettings {
                     screen_columns: -1,
                     ..request.settings
