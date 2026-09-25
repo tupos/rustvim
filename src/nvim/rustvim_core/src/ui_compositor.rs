@@ -1302,6 +1302,16 @@ impl CompositorLayerRegistry {
             .position(|candidate| *candidate == grid_id)
     }
 
+    /// Appends one previously unregistered grid identity.
+    fn try_append(&mut self, grid_id: GridId) -> Option<()> {
+        if self.index_of(grid_id).is_some() {
+            return None;
+        }
+
+        self.layer_ids.push(grid_id);
+        Some(())
+    }
+
     /// Applies one validated layer relocation.
     fn apply_layer_move(&mut self, movement: CompositorLayerMove) -> Option<()> {
         movement.apply_to(&mut self.layer_ids)
@@ -1742,7 +1752,7 @@ struct CompositorLayerGuards {
 }
 
 impl CompositorLayerGuards {
-    /// Takes grids whose identities and order match the persistent registry.
+    /// Binds C grids to identities ordered by the persistent registry.
     ///
     /// # Safety
     ///
@@ -1752,14 +1762,29 @@ impl CompositorLayerGuards {
     /// requirements of `ScreenGrid`.
     unsafe fn try_take(layer_grids: *const *mut CScreenGrid, layer_count: usize) -> Option<Self> {
         let registry = compositor_layer_registry()?;
-        if registry.len() != layer_count {
-            return None;
-        }
 
         // SAFETY: The caller satisfies the documented pointer and grid
         // ownership requirements.
-        let layers = unsafe { Self::try_take_bindings(layer_grids, layer_count) }?;
-        (layers.registry == registry).then_some(layers)
+        unsafe { Self::try_take_for_registry(layer_grids, layer_count, registry) }
+    }
+
+    /// Binds C grids to one supplied native registry.
+    ///
+    /// # Safety
+    ///
+    /// If `layer_count` is nonzero, `layer_grids` must point to that many
+    /// readable grid pointers. Every non-null grid must be valid, distinct,
+    /// exclusively accessible, and satisfy the ownership and layout
+    /// requirements of `ScreenGrid`.
+    unsafe fn try_take_for_registry(
+        layer_grids: *const *mut CScreenGrid,
+        layer_count: usize,
+        registry: CompositorLayerRegistry,
+    ) -> Option<Self> {
+        // SAFETY: The caller satisfies the documented pointer and grid
+        // ownership requirements.
+        let (_, bindings) = unsafe { Self::take_bindings(layer_grids, layer_count) }?;
+        Self::try_from_registry(registry, bindings)
     }
 
     /// Takes registered grids followed by one unregistered candidate.
@@ -1774,20 +1799,20 @@ impl CompositorLayerGuards {
         layer_grids: *const *mut CScreenGrid,
         active_layer_count: usize,
     ) -> Option<Self> {
-        let registry = compositor_layer_registry()?;
+        let mut registry = compositor_layer_registry()?;
         if registry.len() != active_layer_count {
             return None;
         }
-        let candidate_layer_count = active_layer_count.checked_add(1)?;
+        let layer_count = active_layer_count.checked_add(1)?;
 
         // SAFETY: The caller satisfies the documented pointer and grid
         // ownership requirements.
-        let layers = unsafe { Self::try_take_bindings(layer_grids, candidate_layer_count) }?;
-        let registered_prefix = layers.registry.prefix(active_layer_count)?;
-        (registered_prefix == registry).then_some(layers)
+        let (binding_ids, bindings) = unsafe { Self::take_bindings(layer_grids, layer_count) }?;
+        registry.try_append(*binding_ids.last()?)?;
+        Self::try_from_registry(registry, bindings)
     }
 
-    /// Validates C bindings and takes temporary ownership of every grid.
+    /// Creates guards when the binding order itself is under test.
     ///
     /// # Safety
     ///
@@ -1795,10 +1820,47 @@ impl CompositorLayerGuards {
     /// readable grid pointers. Every non-null grid must be valid, distinct,
     /// exclusively accessible, and satisfy the ownership and layout
     /// requirements of `ScreenGrid`.
-    unsafe fn try_take_bindings(
+    #[cfg(test)]
+    unsafe fn try_take_in_binding_order(
         layer_grids: *const *mut CScreenGrid,
         layer_count: usize,
     ) -> Option<Self> {
+        // SAFETY: The caller satisfies the documented pointer and grid
+        // ownership requirements.
+        let (layer_ids, bindings) = unsafe { Self::take_bindings(layer_grids, layer_count) }?;
+        let registry = CompositorLayerRegistry::try_new(layer_ids)?;
+        Self::try_from_registry(registry, bindings)
+    }
+
+    /// Pairs each C grid pointer with temporary ownership of its Rust grid.
+    fn try_from_registry(
+        registry: CompositorLayerRegistry,
+        bindings: HashMap<GridId, GuardedCompositorLayer>,
+    ) -> Option<Self> {
+        if registry.len() != bindings.len()
+            || registry
+                .layer_ids()
+                .iter()
+                .any(|grid_id| !bindings.contains_key(grid_id))
+        {
+            return None;
+        }
+
+        Some(Self { registry, bindings })
+    }
+
+    /// Validates C bindings and takes temporary ownership of their grids.
+    ///
+    /// # Safety
+    ///
+    /// If `layer_count` is nonzero, `layer_grids` must point to that many
+    /// readable grid pointers. Every non-null grid must be valid, distinct,
+    /// exclusively accessible, and satisfy the ownership and layout
+    /// requirements of `ScreenGrid`.
+    unsafe fn take_bindings(
+        layer_grids: *const *mut CScreenGrid,
+        layer_count: usize,
+    ) -> Option<(Vec<GridId>, HashMap<GridId, GuardedCompositorLayer>)> {
         if layer_grids.is_null() || layer_count == 0 {
             return None;
         }
@@ -1827,15 +1889,23 @@ impl CompositorLayerGuards {
                 GuardedCompositorLayer { cgrid, grid }
             })
             .collect::<Vec<_>>();
-        let registry = CompositorLayerRegistry::try_new(
-            guarded_layers.iter().map(|layer| layer.grid.id()).collect(),
-        )?;
+        let layer_ids = guarded_layers
+            .iter()
+            .map(|layer| layer.grid.id())
+            .collect::<Vec<_>>();
+        if layer_ids
+            .iter()
+            .enumerate()
+            .any(|(index, grid_id)| layer_ids[..index].contains(grid_id))
+        {
+            return None;
+        }
         let bindings = guarded_layers
             .into_iter()
             .map(|layer| (layer.grid.id(), layer))
             .collect();
 
-        Some(Self { registry, bindings })
+        Some((layer_ids, bindings))
     }
 
     /// Returns the stack index belonging to one C grid identity.
@@ -3902,9 +3972,10 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         // SAFETY: The caller satisfies the documented pointer and grid
         // ownership requirements.
-        let layer_guards =
-            unsafe { CompositorLayerGuards::try_take_bindings(cgrids.as_ptr(), cgrids.len()) }
-                .expect("test compositor layers must be valid");
+        let layer_guards = unsafe {
+            CompositorLayerGuards::try_take_in_binding_order(cgrids.as_ptr(), cgrids.len())
+        }
+        .expect("test compositor layers must be valid");
         let registry = layer_guards.registry.clone();
         drop(layer_guards);
 
@@ -4209,22 +4280,29 @@ mod tests {
     }
 
     #[test]
-    fn layer_guards_validate_identity_and_restore_all_grids() {
+    fn layer_guards_follow_registry_order_and_restore_all_grids() {
         let first = grid_with_row(&[schar_from_ascii('a')], &[1]);
         let second = grid_with_row(&[schar_from_ascii('b')], &[2]);
+        let registry = CompositorLayerRegistry::try_new(vec![first.id(), second.id()]).unwrap();
+
         // SAFETY: Each conversion transfers its grid allocations to a distinct
         // C representation.
         let (mut first_cgrid, mut second_cgrid) = unsafe { (first.to_cgrid(), second.to_cgrid()) };
         let first_pointer = &mut first_cgrid as *mut CScreenGrid;
         let second_pointer = &mut second_cgrid as *mut CScreenGrid;
-        let cgrids = [first_pointer, second_pointer];
+        let cgrids = [second_pointer, first_pointer];
 
         {
             // SAFETY: Both pointers identify distinct, exclusively accessible
             // C grids and the pointer array remains readable for this scope.
-            let guards =
-                unsafe { CompositorLayerGuards::try_take_bindings(cgrids.as_ptr(), cgrids.len()) }
-                    .unwrap();
+            let guards = unsafe {
+                CompositorLayerGuards::try_take_for_registry(
+                    cgrids.as_ptr(),
+                    cgrids.len(),
+                    registry,
+                )
+            }
+            .unwrap();
             assert_eq!(guards.index_of(first_pointer), Some(0));
             assert_eq!(guards.index_of(second_pointer), Some(1));
             assert_eq!(
@@ -4820,9 +4898,10 @@ mod tests {
         {
             // SAFETY: The pointers identify distinct, exclusively accessible
             // C grids and the pointer array remains readable for this scope.
-            let mut guards =
-                unsafe { CompositorLayerGuards::try_take_bindings(cgrids.as_ptr(), cgrids.len()) }
-                    .unwrap();
+            let mut guards = unsafe {
+                CompositorLayerGuards::try_take_in_binding_order(cgrids.as_ptr(), cgrids.len())
+            }
+            .unwrap();
             guards
                 .apply_layer_move(CompositorLayerMove {
                     source_index: 2,
@@ -4869,9 +4948,10 @@ mod tests {
         {
             // SAFETY: The pointers identify distinct, exclusively accessible
             // C grids and the pointer array remains readable for this scope.
-            let mut guards =
-                unsafe { CompositorLayerGuards::try_take_bindings(cgrids.as_ptr(), cgrids.len()) }
-                    .unwrap();
+            let mut guards = unsafe {
+                CompositorLayerGuards::try_take_in_binding_order(cgrids.as_ptr(), cgrids.len())
+            }
+            .unwrap();
             assert_eq!(guards.remove_layer(0), None);
             assert_eq!(guards.remove_layer(1), Some(()));
             assert!(guards.write_cgrid_order(&mut cgrids));
