@@ -300,8 +300,8 @@ void ui_comp_raw_line(Integer grid, Integer row, Integer startcol, Integer endco
     .clear_debug_highlight = dbghl_clear,
     .composed_debug_highlight = dbghl_composed,
   };
-  bool processed = ui_comp_process_raw_line(
-    layers.items, layers.size, &msg_grid, request, chunk, attrs, callbacks);
+  bool processed =
+    ui_comp_process_raw_line(&msg_grid, request, chunk, attrs, callbacks);
   assert(processed);
   (void)processed;
 }

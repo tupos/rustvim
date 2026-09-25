@@ -157,7 +157,6 @@ extern bool ui_comp_emit_clear_line(
   Integer row, Integer start_col, Integer end_col, sattr_T attribute);
 
 extern bool ui_comp_process_raw_line(
-  ScreenGrid *const *layer_grids, size_t layer_count,
   ScreenGrid *message_grid, CompositorRawLineRequest request,
   const schar_T *characters, const sattr_T *attributes,
   CompositorRawLineCallbacks callbacks);
