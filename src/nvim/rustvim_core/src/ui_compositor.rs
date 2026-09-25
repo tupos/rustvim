@@ -1,11 +1,16 @@
+mod ffi;
+mod output;
+
 use std::{
     collections::HashMap,
-    ffi::CString,
     ops::Range,
     ptr::NonNull,
     slice,
     sync::{Mutex, MutexGuard},
 };
+
+use ffi::NvimOutput;
+use output::{CompositorOutput, RawLineCommand, UiCommand};
 
 use crate::{
     defines::{CVimString, Integer, OptInt},
@@ -25,33 +30,8 @@ unsafe extern "C" {
     static mut p_wd: OptInt;
     static mut rdb_flags: libc::c_uint;
 
-    fn log_debug_message(message: *const libc::c_char);
-    fn os_sleep(ms: u64);
     fn syn_check_group(name: *const libc::c_char, length: libc::size_t) -> libc::c_int;
     fn syn_id2attr(highlight_id: libc::c_int) -> libc::c_int;
-    fn ui_call_flush();
-    fn ui_composed_call_grid_cursor_goto(grid: Integer, row: Integer, column: Integer);
-    fn ui_composed_call_grid_resize(grid: Integer, width: Integer, height: Integer);
-    fn ui_composed_call_grid_scroll(
-        grid: Integer,
-        top: Integer,
-        bottom: Integer,
-        left: Integer,
-        right: Integer,
-        rows: Integer,
-        columns: Integer,
-    );
-    fn ui_composed_call_raw_line(
-        grid: Integer,
-        row: Integer,
-        start_col: Integer,
-        end_col: Integer,
-        clear_col: Integer,
-        clear_attr: Integer,
-        flags: libc::c_int,
-        characters: *const VimSCharT,
-        attributes: *const VimSAttrT,
-    );
     fn ui_get_message_separator_attr() -> VimSAttrT;
 }
 
@@ -2105,7 +2085,13 @@ impl CompositorRuntime {
     }
 
     /// Visualizes one compositor operation when redraw debugging is enabled.
-    fn visualize(self, requested_area: &CompositorRecomposeArea, highlight_id: i32, delay: bool) {
+    fn visualize(
+        self,
+        requested_area: &CompositorRecomposeArea,
+        highlight_id: i32,
+        delay: bool,
+        output: &mut impl CompositorOutput,
+    ) {
         if !self.debug_enabled || requested_area.columns.start >= requested_area.columns.end {
             return;
         }
@@ -2117,29 +2103,26 @@ impl CompositorRuntime {
         // call occurs on Neovim's main thread without holding grid ownership.
         let attribute = unsafe { syn_id2attr(highlight_id) };
         if delay {
-            self.delay(area.rows.end - area.rows.start);
+            self.delay(area.rows.end - area.rows.start, output);
         }
         for row in area.rows.clone() {
             assert!(emit_compositor_debug_line(
                 row,
                 area.columns.clone(),
                 attribute,
+                output,
             ));
         }
         if delay {
-            self.delay(area.rows.end - area.rows.start);
+            self.delay(area.rows.end - area.rows.start, output);
         }
     }
 
     /// Flushes composed output and applies the configured per-operation delay.
-    fn delay(self, lines: i32) {
+    fn delay(self, lines: i32, output: &mut impl CompositorOutput) {
         let factor = lines.clamp(1, 5) as u64;
-        // SAFETY: Both functions accept scalar values and are called on
-        // Neovim's main thread without holding any grid guard.
-        unsafe {
-            ui_call_flush();
-            os_sleep(factor.wrapping_mul(self.write_delay_ms));
-        }
+        output.emit(UiCommand::Flush);
+        output.emit(UiCommand::Delay(factor.wrapping_mul(self.write_delay_ms)));
     }
 }
 
@@ -2175,7 +2158,11 @@ fn compositor_debug_highlight(name: &[u8]) -> i32 {
 }
 
 /// Emits one formatted raw-line diagnostic through Neovim's debug logger.
-fn log_raw_line_diagnostic(diagnostic: RawLineDiagnostic, grid_id: GridId) {
+fn log_raw_line_diagnostic(
+    diagnostic: RawLineDiagnostic,
+    grid_id: GridId,
+    output: &mut impl CompositorOutput,
+) {
     let message = match diagnostic {
         RawLineDiagnostic::InvalidRow(row) => {
             format!("compositor: invalid row {row} on grid {grid_id}")
@@ -2184,11 +2171,7 @@ fn log_raw_line_diagnostic(diagnostic: RawLineDiagnostic, grid_id: GridId) {
             format!("compositor: invalid last column {requested_clear_column} on grid {grid_id}")
         }
     };
-    let message = CString::new(message).expect("formatted compositor diagnostic contains no NUL");
-
-    // SAFETY: `CString` supplies a non-null, NUL-terminated string that
-    // remains alive for the synchronous logging call.
-    unsafe { log_debug_message(message.as_ptr()) };
+    output.emit(UiCommand::Log(message));
 }
 
 /// Validated inputs for composing one screen area.
@@ -2700,11 +2683,8 @@ pub extern "C" fn ui_comp_grid_resize(grid: Integer, width: Integer, height: Int
         return;
     }
 
-    // SAFETY: The dimensions were converted and validated above. The callback
-    // runs before buffer resize, preserving the established event order.
-    unsafe {
-        ui_composed_call_grid_resize(1, Integer::from(size.width), Integer::from(size.height));
-    }
+    let mut output = NvimOutput;
+    output.emit(UiCommand::GridResize(size));
 
     let width = usize::try_from(size.width).expect("validated width must fit usize");
     assert!(lock_compositor_buffer().resize(width));
@@ -2735,6 +2715,7 @@ unsafe fn update_message_position(
     default_grid: *mut CScreenGrid,
     request: CompositorMessagePositionRequest,
     runtime: CompositorRuntime,
+    output: &mut impl CompositorOutput,
 ) -> bool {
     if message_grid.is_null() || default_grid.is_null() || message_grid == default_grid {
         return false;
@@ -2758,24 +2739,16 @@ unsafe fn update_message_position(
     };
 
     if let Some(scroll) = plan.scroll {
-        // SAFETY: Both grid guards were dropped before this synchronous UI
-        // call, and the safe plan contains only validated scalar values.
-        unsafe {
-            ui_composed_call_grid_scroll(
-                1,
-                Integer::from(scroll.region.rows.start),
-                Integer::from(scroll.region.rows.end),
-                Integer::from(scroll.region.columns.start),
-                Integer::from(scroll.region.columns.end),
-                Integer::from(scroll.row_delta),
-                0,
-            );
-        }
+        output.emit(UiCommand::GridScroll {
+            region: scroll.region,
+            row_delta: scroll.row_delta,
+            column_delta: 0,
+        });
     }
     if let Some(area) = plan.recompose {
         // SAFETY: The caller satisfies the helper's message-grid requirements.
         // The earlier guards were dropped above.
-        if !unsafe { recompose_area_from_registered_grids(message_grid, area, runtime) } {
+        if !unsafe { recompose_area_from_registered_grids(message_grid, area, runtime, output) } {
             return false;
         }
     }
@@ -2807,6 +2780,7 @@ pub unsafe extern "C" fn ui_comp_msg_set_pos(
         runtime.screen_size,
         scrolled,
     );
+    let mut output = NvimOutput;
 
     // SAFETY: Neovim's global default and message grids are distinct and are
     // exclusively accessed on the main thread during this generated event.
@@ -2816,6 +2790,7 @@ pub unsafe extern "C" fn ui_comp_msg_set_pos(
             &raw mut c_default_grid,
             request,
             runtime,
+            &mut output,
         )
     };
     assert!(updated);
@@ -2859,10 +2834,13 @@ pub unsafe extern "C" fn ui_comp_compose_grid(grid: *mut CScreenGrid) {
     let runtime = compositor_runtime_snapshot().expect("compositor runtime must be valid");
     let area =
         recompose_area_for_registered_grid(grid_id).expect("grid to recompose must be registered");
+    let mut output = NvimOutput;
 
     // SAFETY: The grid guard was dropped above. The process-global message
     // grid is exclusively accessed on Neovim's main thread.
-    assert!(unsafe { recompose_area_from_registered_grids(&raw mut c_msg_grid, area, runtime) });
+    assert!(unsafe {
+        recompose_area_from_registered_grids(&raw mut c_msg_grid, area, runtime, &mut output)
+    });
 }
 
 /// Places a new or existing grid among the registered compositor layers.
@@ -3001,10 +2979,13 @@ pub unsafe extern "C" fn ui_comp_put_grid(
     };
     let current_window_layer =
         current_window_grid_id.and_then(|grid_id| layer_guards.registry.index_of(grid_id));
+    let mut output = NvimOutput;
     let recompose_area = |area| {
         // SAFETY: Every grid guard is dropped before this closure. The
         // process-global message grid is accessed on Neovim's main thread.
-        unsafe { recompose_area_from_registered_grids(&raw mut c_msg_grid, area, runtime) }
+        unsafe {
+            recompose_area_from_registered_grids(&raw mut c_msg_grid, area, runtime, &mut output)
+        }
     };
     place_grid_in_registered_layers(
         layer_guards,
@@ -3066,6 +3047,7 @@ fn apply_cursor_update_to_registered_grids(
 unsafe fn process_grid_cursor_goto(
     message_grid: *mut CScreenGrid,
     request: CompositorCursorRequest,
+    output: &mut impl CompositorOutput,
 ) -> bool {
     let Some(update) = apply_cursor_update_to_registered_grids(request) else {
         return false;
@@ -3084,21 +3066,13 @@ unsafe fn process_grid_cursor_goto(
     for area in recompose_areas {
         // SAFETY: The caller satisfies the helper's message-grid requirements.
         // The cursor-update guards were dropped.
-        if !unsafe { recompose_area_from_registered_grids(message_grid, area, runtime) } {
+        if !unsafe { recompose_area_from_registered_grids(message_grid, area, runtime, output) } {
             return false;
         }
     }
 
     if plan.emit {
-        // SAFETY: The layer guards were dropped above, and the planned
-        // coordinates were validated by the safe compositor layer stack.
-        unsafe {
-            ui_composed_call_grid_cursor_goto(
-                1,
-                Integer::from(plan.screen_position.row),
-                Integer::from(plan.screen_position.column),
-            );
-        }
+        output.emit(UiCommand::GridCursorGoto(plan.screen_position));
     }
 
     true
@@ -3118,10 +3092,11 @@ pub extern "C" fn ui_comp_grid_cursor_goto(grid_handle: Integer, row: Integer, c
         grid_id: GridId::new(grid_handle),
         local_position: CompositorPoint { row, column },
     };
+    let mut output = NvimOutput;
 
     // SAFETY: Neovim's message grid is exclusively accessed on the main
     // thread during this generated event.
-    let updated = unsafe { process_grid_cursor_goto(&raw mut c_msg_grid, request) };
+    let updated = unsafe { process_grid_cursor_goto(&raw mut c_msg_grid, request, &mut output) };
     assert!(updated);
 }
 
@@ -3236,10 +3211,11 @@ pub unsafe extern "C" fn ui_comp_remove_grid(grid: *mut CScreenGrid) {
 
     if let Some(area) = removal.recompose_area {
         let runtime = compositor_runtime_snapshot().expect("compositor runtime must be valid");
+        let mut output = NvimOutput;
         // SAFETY: The reduced registry has been published, and the caller
         // accesses the process-global message grid on Neovim's main thread.
         assert!(unsafe {
-            recompose_area_from_registered_grids(&raw mut c_msg_grid, area, runtime)
+            recompose_area_from_registered_grids(&raw mut c_msg_grid, area, runtime, &mut output)
         });
     }
 }
@@ -3399,6 +3375,7 @@ pub unsafe extern "C" fn ui_comp_cursor_is_covered_by_higher_layer(
 unsafe fn compose_line_from_registered_grids(
     message_grid: *mut CScreenGrid,
     request: CompositorLineInput,
+    output: &mut impl CompositorOutput,
 ) -> bool {
     let separator_character = lock_message_compositor_state().separator_character_at(request.row);
     let separator_active = separator_character.is_some();
@@ -3455,25 +3432,31 @@ unsafe fn compose_line_from_registered_grids(
     let Some(submission) = submission else {
         return false;
     };
-    let characters = unsafe { compositor.characters.as_ptr().add(submission.start_col) };
-    let attributes = unsafe { compositor.attributes.as_ptr().add(submission.start_col) };
-
-    // SAFETY: All grid guards have restored their C grids. Both pointers remain
-    // valid for the synchronous UI call while `compositor` remains borrowed
-    // and describe equally sized initialized ranges.
-    unsafe {
-        ui_composed_call_raw_line(
-            1,
-            Integer::from(request.row),
-            submission.start_col as Integer,
-            submission.end_col as Integer,
-            submission.end_col as Integer,
-            0,
-            submission.flags,
-            characters,
-            attributes,
-        );
-    }
+    let output_range = submission.start_col..submission.end_col;
+    let Some(characters) = compositor.characters.get(output_range.clone()) else {
+        return false;
+    };
+    let Some(attributes) = compositor.attributes.get(output_range) else {
+        return false;
+    };
+    let (Ok(start_column), Ok(end_column)) = (
+        i32::try_from(submission.start_col),
+        i32::try_from(submission.end_col),
+    ) else {
+        return false;
+    };
+    let Some(command) = RawLineCommand::try_new(
+        request.row,
+        start_column..end_column,
+        end_column,
+        0,
+        submission.flags,
+        characters,
+        attributes,
+    ) else {
+        return false;
+    };
+    output.emit(UiCommand::RawLine(command));
     true
 }
 
@@ -3489,6 +3472,7 @@ unsafe fn compose_line_from_registered_grids(
 unsafe fn compose_area_from_registered_grids(
     message_grid: *mut CScreenGrid,
     request: CompositorAreaRequest,
+    output: &mut impl CompositorOutput,
 ) -> bool {
     let CompositorAreaRequest { area, settings } = request;
     let Some(area) = clip_recompose_area_to_default_grid(area) else {
@@ -3511,6 +3495,7 @@ unsafe fn compose_area_from_registered_grids(
                     flags: LINE_FLAG_INVALID,
                     settings,
                 },
+                output,
             )
         } {
             return false;
@@ -3531,8 +3516,9 @@ unsafe fn recompose_area_from_registered_grids(
     message_grid: *mut CScreenGrid,
     area: CompositorRecomposeArea,
     runtime: CompositorRuntime,
+    output: &mut impl CompositorOutput,
 ) -> bool {
-    runtime.visualize(&area, runtime.debug_highlights.recomposed, true);
+    runtime.visualize(&area, runtime.debug_highlights.recomposed, true, output);
 
     // SAFETY: The caller satisfies the helper's message-grid requirements.
     // Debug visualization completed without retaining any grid guard.
@@ -3543,12 +3529,18 @@ unsafe fn recompose_area_from_registered_grids(
                 area,
                 settings: runtime.line_settings,
             },
+            output,
         )
     }
 }
 
 /// Emits one clear raw-line event used for compositor visualization.
-fn emit_compositor_debug_line(row: i32, columns: Range<i32>, attribute: VimSAttrT) -> bool {
+fn emit_compositor_debug_line(
+    row: i32,
+    columns: Range<i32>,
+    attribute: VimSAttrT,
+    output: &mut impl CompositorOutput,
+) -> bool {
     let (Ok(start_column), Ok(end_column)) =
         (usize::try_from(columns.start), usize::try_from(columns.end))
     else {
@@ -3560,25 +3552,24 @@ fn emit_compositor_debug_line(row: i32, columns: Range<i32>, attribute: VimSAttr
         return false;
     }
 
-    let characters = unsafe { compositor.characters.as_ptr().add(start_column) };
-    let attributes = unsafe { compositor.attributes.as_ptr().add(start_column) };
-
-    // SAFETY: The raw-line event contains no character payload because its
-    // start and end columns are equal. The pointers nevertheless remain valid
-    // for the synchronous UI call.
-    unsafe {
-        ui_composed_call_raw_line(
-            1,
-            Integer::from(row),
-            Integer::from(columns.start),
-            Integer::from(columns.start),
-            Integer::from(columns.end),
-            Integer::from(attribute),
-            0,
-            characters,
-            attributes,
-        );
-    }
+    let Some(characters) = compositor.characters.get(start_column..start_column) else {
+        return false;
+    };
+    let Some(attributes) = compositor.attributes.get(start_column..start_column) else {
+        return false;
+    };
+    let Some(command) = RawLineCommand::try_new(
+        row,
+        columns.start..columns.start,
+        columns.end,
+        attribute,
+        0,
+        characters,
+        attributes,
+    ) else {
+        return false;
+    };
+    output.emit(UiCommand::RawLine(command));
     true
 }
 
@@ -3600,6 +3591,7 @@ unsafe fn process_raw_line(
     clear_attribute: VimSAttrT,
     characters: *const VimSCharT,
     attributes: *const VimSAttrT,
+    output: &mut impl CompositorOutput,
 ) -> bool {
     if !lock_compositor_draw_state().should_draw() {
         return true;
@@ -3636,12 +3628,13 @@ unsafe fn process_raw_line(
         log_raw_line_diagnostic(
             RawLineDiagnostic::ClippedColumns(plan.requested_clear_column),
             grid_id,
+            output,
         );
     }
 
     match plan.action {
         CompositorRawLineAction::DiscardRow => {
-            log_raw_line_diagnostic(RawLineDiagnostic::InvalidRow(plan.row), grid_id);
+            log_raw_line_diagnostic(RawLineDiagnostic::InvalidRow(plan.row), grid_id, output);
             true
         }
         CompositorRawLineAction::DiscardColumns => true,
@@ -3653,6 +3646,7 @@ unsafe fn process_raw_line(
                 },
                 runtime.debug_highlights.composed,
                 true,
+                output,
             );
             // SAFETY: The caller satisfies the documented message-grid
             // requirements. The previous guards were dropped before this
@@ -3666,6 +3660,7 @@ unsafe fn process_raw_line(
                         flags: plan.flags,
                         settings: runtime.line_settings,
                     },
+                    output,
                 )
             }
         }
@@ -3702,6 +3697,7 @@ unsafe fn process_raw_line(
                 },
                 runtime.debug_highlights.normal,
                 plan.columns.end >= plan.clear_column,
+                output,
             );
             runtime.visualize(
                 &CompositorRecomposeArea {
@@ -3710,24 +3706,22 @@ unsafe fn process_raw_line(
                 },
                 runtime.debug_highlights.clear,
                 true,
+                output,
             );
             debug_assert!(attributes.iter().all(|attribute| *attribute >= 0));
 
-            // SAFETY: The validated slices have equal lengths and remain
-            // readable for the duration of the synchronous UI call.
-            unsafe {
-                ui_composed_call_raw_line(
-                    1,
-                    Integer::from(plan.row),
-                    Integer::from(plan.columns.start),
-                    Integer::from(plan.columns.end),
-                    Integer::from(plan.clear_column),
-                    Integer::from(clear_attribute),
-                    plan.flags,
-                    characters.as_ptr(),
-                    attributes.as_ptr(),
-                );
-            }
+            let Some(command) = RawLineCommand::try_new(
+                plan.row,
+                plan.columns,
+                plan.clear_column,
+                clear_attribute,
+                plan.flags,
+                characters,
+                attributes,
+            ) else {
+                return false;
+            };
+            output.emit(UiCommand::RawLine(command));
             true
         }
     }
@@ -3763,6 +3757,7 @@ pub unsafe extern "C" fn ui_comp_raw_line(
     };
     let request = CompositorRawLineRequest::try_new(row, start_col, end_col, clear_col, flags)
         .expect("raw-line columns must be ordered");
+    let mut output = NvimOutput;
 
     // SAFETY: The generated caller supplies the documented cell arrays, and
     // Neovim's message grid is exclusively accessed on the main thread.
@@ -3774,6 +3769,7 @@ pub unsafe extern "C" fn ui_comp_raw_line(
             clear_attr,
             characters,
             attributes,
+            &mut output,
         )
     };
     assert!(processed);
@@ -3790,6 +3786,7 @@ unsafe fn process_scroll(
     message_grid: *mut CScreenGrid,
     grid_id: GridId,
     request: CompositorScrollRequest,
+    output: &mut impl CompositorOutput,
 ) -> bool {
     if !lock_compositor_draw_state().should_draw() {
         return true;
@@ -3830,21 +3827,13 @@ unsafe fn process_scroll(
             row_delta,
             column_delta,
         } => {
-            // SAFETY: Grid ownership was restored before the synchronous UI
-            // call, and the validated operation contains only scalar values.
-            unsafe {
-                ui_composed_call_grid_scroll(
-                    1,
-                    Integer::from(region.rows.start),
-                    Integer::from(region.rows.end),
-                    Integer::from(region.columns.start),
-                    Integer::from(region.columns.end),
-                    Integer::from(row_delta),
-                    Integer::from(column_delta),
-                );
-            }
+            output.emit(UiCommand::GridScroll {
+                region,
+                row_delta,
+                column_delta,
+            });
             if runtime.debug_enabled {
-                runtime.delay(2);
+                runtime.delay(2, output);
             }
         }
         CompositorScrollOperation::Recompose { region, rows } => {
@@ -3855,6 +3844,7 @@ unsafe fn process_scroll(
                 },
                 runtime.debug_highlights.recomposed,
                 true,
+                output,
             );
             for row in rows {
                 // SAFETY: The caller satisfies the documented message-grid
@@ -3869,6 +3859,7 @@ unsafe fn process_scroll(
                             flags: 0,
                             settings: runtime.line_settings,
                         },
+                        output,
                     )
                 } {
                     return false;
@@ -3903,10 +3894,12 @@ pub extern "C" fn ui_comp_grid_scroll(
     };
     let request = CompositorScrollRequest::try_new(top, bottom, left, right, rows, columns)
         .expect("grid-scroll region must be ordered");
+    let mut output = NvimOutput;
 
     // SAFETY: Neovim's message grid is exclusively accessed on the main
     // thread during this generated event.
-    let processed = unsafe { process_scroll(&raw mut c_msg_grid, GridId::new(grid), request) };
+    let processed =
+        unsafe { process_scroll(&raw mut c_msg_grid, GridId::new(grid), request, &mut output) };
     assert!(processed);
 }
 
