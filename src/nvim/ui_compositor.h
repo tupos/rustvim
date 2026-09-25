@@ -49,5 +49,3 @@ extern bool ui_comp_cursor_is_covered_by_higher_layer(
   int minimum_z_index_gap);
 
 extern void ui_comp_hide_message_separator(void);
-
-#include "ui_compositor.h.generated.h"
