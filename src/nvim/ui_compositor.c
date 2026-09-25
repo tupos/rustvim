@@ -149,10 +149,10 @@ void ui_comp_grid_cursor_goto(Integer grid_handle, Integer r, Integer c)
 
 ScreenGrid *ui_comp_mouse_focus(int row, int col)
 {
-  size_t layer_index = ui_comp_find_layer_at_coord(
+  ScreenGrid *layer_grid = ui_comp_find_grid_at_coord(
     layers.items, layers.size, row, col, true);
-  if (layer_index < kv_size(layers)) {
-    return kv_A(layers, layer_index);
+  if (layer_grid != NULL) {
+    return layer_grid;
   }
 
   if (ui_has(kUIMultigrid)) {
@@ -170,10 +170,10 @@ ScreenGrid *ui_comp_mouse_focus(int row, int col)
 /// Compute which grid is on top at supplied screen coordinates
 ScreenGrid *ui_comp_get_grid_at_coord(int row, int col)
 {
-  size_t layer_index = ui_comp_find_layer_at_coord(
+  ScreenGrid *layer_grid = ui_comp_find_grid_at_coord(
     layers.items, layers.size, row, col, false);
-  if (layer_index < kv_size(layers)) {
-    return kv_A(layers, layer_index);
+  if (layer_grid != NULL) {
+    return layer_grid;
   }
 
   FOR_ALL_WINDOWS_IN_TAB(wp, curtab) {

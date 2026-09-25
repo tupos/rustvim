@@ -1478,14 +1478,14 @@ impl<'grid> CompositorLayerStack<'grid> {
         }))
     }
 
-    /// Finds the topmost non-default layer containing one screen cell.
-    fn topmost_layer_at(&self, point: CompositorPoint, hit_test: LayerHitTest) -> Option<usize> {
+    /// Finds the topmost non-default grid containing one screen cell.
+    fn topmost_grid_at(&self, point: CompositorPoint, hit_test: LayerHitTest) -> Option<GridId> {
         self.layers.get(1..)?.iter().rev().find_map(|layer| {
             let layer = *layer;
             layer
                 .positioned_grid()?
                 .matches(point, hit_test)
-                .then_some(layer.layer_index)
+                .then_some(layer.grid.id())
         })
     }
 
@@ -1496,8 +1496,9 @@ impl<'grid> CompositorLayerStack<'grid> {
         current_grid: &ScreenGrid,
         minimum_z_index_gap: u32,
     ) -> bool {
-        self.topmost_layer_at(point, LayerHitTest::Any)
-            .and_then(|layer_index| self.layer(layer_index))
+        self.topmost_grid_at(point, LayerHitTest::Any)
+            .and_then(|grid_id| self.layer_index_with_id(grid_id))
+            .and_then(|index| self.layer(index))
             .is_some_and(|top_layer| {
                 !std::ptr::eq(top_layer.grid, current_grid)
                     && top_layer
@@ -3204,11 +3205,10 @@ pub unsafe extern "C" fn ui_comp_remove_grid_from_layer_stack(
     true
 }
 
-/// Finds the topmost non-default compositor layer at one screen coordinate.
+/// Finds the topmost non-default compositor grid at one screen coordinate.
 ///
-/// Returns `usize::MAX` when no matching layer exists or the layer array is
-/// invalid. Every temporarily owned grid is restored before this function
-/// returns.
+/// Returns null when no matching grid exists or the binding array is invalid.
+/// Every temporarily owned grid is restored before this function returns.
 ///
 /// # Safety
 ///
@@ -3216,13 +3216,13 @@ pub unsafe extern "C" fn ui_comp_remove_grid_from_layer_stack(
 /// pointers. Every grid must be exclusively accessible and its buffers must
 /// satisfy the ownership and layout requirements of `ScreenGrid`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ui_comp_find_layer_at_coord(
+pub unsafe extern "C" fn ui_comp_find_grid_at_coord(
     layer_grids: *const *mut CScreenGrid,
     layer_count: usize,
     row: libc::c_int,
     column: libc::c_int,
     require_mouse_input: bool,
-) -> usize {
+) -> *mut CScreenGrid {
     let hit_test = if require_mouse_input {
         LayerHitTest::MouseEnabled
     } else {
@@ -3233,15 +3233,24 @@ pub unsafe extern "C" fn ui_comp_find_layer_at_coord(
     // ownership requirements.
     let Some(layer_guards) = (unsafe { CompositorLayerGuards::try_take(layer_grids, layer_count) })
     else {
-        return usize::MAX;
+        return std::ptr::null_mut();
     };
-    let Some(layers) = layer_guards.layer_stack() else {
-        return usize::MAX;
+    let grid_id = {
+        let Some(layers) = layer_guards.layer_stack() else {
+            return std::ptr::null_mut();
+        };
+        layers.topmost_grid_at(CompositorPoint { row, column }, hit_test)
+    };
+    let Some(cgrid) = grid_id.and_then(|grid_id| {
+        layer_guards
+            .bindings
+            .get(&grid_id)
+            .map(|binding| binding.cgrid.as_ptr())
+    }) else {
+        return std::ptr::null_mut();
     };
 
-    layers
-        .topmost_layer_at(CompositorPoint { row, column }, hit_test)
-        .unwrap_or(usize::MAX)
+    cgrid
 }
 
 /// Reports whether one grid contains a composed-screen coordinate.
@@ -5066,8 +5075,8 @@ mod tests {
         };
 
         assert_eq!(
-            layers.topmost_layer_at(CompositorPoint { row: 2, column: 2 }, LayerHitTest::Any,),
-            Some(2)
+            layers.topmost_grid_at(CompositorPoint { row: 2, column: 2 }, LayerHitTest::Any,),
+            Some(upper_grid.id())
         );
     }
 
@@ -5078,9 +5087,10 @@ mod tests {
             layers: vec![compositor_layer(&default_grid, 0, 3, 0, false)],
         };
 
-        assert_eq!(
-            layers.topmost_layer_at(CompositorPoint { row: 1, column: 1 }, LayerHitTest::Any,),
-            None
+        assert!(
+            layers
+                .topmost_grid_at(CompositorPoint { row: 1, column: 1 }, LayerHitTest::Any,)
+                .is_none()
         );
     }
 
@@ -5138,10 +5148,13 @@ mod tests {
         };
         let point = CompositorPoint { row: 0, column: 1 };
 
-        assert_eq!(layers.topmost_layer_at(point, LayerHitTest::Any), Some(2));
         assert_eq!(
-            layers.topmost_layer_at(point, LayerHitTest::MouseEnabled),
-            Some(1)
+            layers.topmost_grid_at(point, LayerHitTest::Any),
+            Some(upper_grid.id())
+        );
+        assert_eq!(
+            layers.topmost_grid_at(point, LayerHitTest::MouseEnabled),
+            Some(lower_grid.id())
         );
     }
 
@@ -5158,9 +5171,10 @@ mod tests {
             ],
         };
 
-        assert_eq!(
-            layers.topmost_layer_at(CompositorPoint { row: 0, column: 0 }, LayerHitTest::Any,),
-            None
+        assert!(
+            layers
+                .topmost_grid_at(CompositorPoint { row: 0, column: 0 }, LayerHitTest::Any,)
+                .is_none()
         );
     }
 

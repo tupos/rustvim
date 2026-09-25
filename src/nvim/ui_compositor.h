@@ -133,7 +133,7 @@ extern bool ui_comp_remove_grid_from_layer_stack(
   ScreenGrid *message_grid, ScreenGrid *grid,
   CompositorAreaCallbacks callbacks);
 
-extern size_t ui_comp_find_layer_at_coord(
+extern ScreenGrid *ui_comp_find_grid_at_coord(
   ScreenGrid *const *layer_grids, size_t layer_count,
   int row, int column, bool require_mouse_input);
 
