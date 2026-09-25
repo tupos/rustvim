@@ -3825,25 +3825,19 @@ pub unsafe extern "C" fn ui_comp_process_raw_line(
     }
 }
 
-/// Processes one complete grid scroll against an ordered C grid array.
+/// Processes one complete grid scroll against registered compositor grids.
 ///
 /// # Safety
-///
-/// `layer_grids` must point to `layer_count` readable, distinct, non-null grid
-/// pointers. Every grid must be exclusively accessible and its buffers must
-/// satisfy the ownership and layout requirements of `ScreenGrid`.
 ///
 /// Every function pointer in `callbacks` must remain valid for this call.
 /// Callback implementations may reenter the compositor because all grid
 /// guards are dropped before any callback is invoked.
 ///
-/// A disabled compositor or a grid handle absent from `layer_grids` produces
-/// a successful no-op. `message_grid` is used only for pointer identity and
-/// may be null.
+/// A disabled compositor or a grid handle absent from the registered layers
+/// produces a successful no-op. `message_grid` is used only for pointer
+/// identity and may be null.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ui_comp_process_scroll(
-    layer_grids: *const *mut CScreenGrid,
-    layer_count: usize,
     message_grid: *mut CScreenGrid,
     request: CCompositorScrollRequest,
     callbacks: CCompositorScrollCallbacks,
@@ -3862,11 +3856,7 @@ pub unsafe extern "C" fn ui_comp_process_scroll(
 
     let message_was_scrolled = lock_message_compositor_state().was_scrolled;
     let operation = {
-        // SAFETY: The caller satisfies the documented layer-array and grid
-        // ownership requirements.
-        let Some(layer_guards) =
-            (unsafe { CompositorLayerGuards::try_take(layer_grids, layer_count) })
-        else {
+        let Some(layer_guards) = CompositorLayerGuards::try_take_registered() else {
             return false;
         };
         let message_layer_index = layer_guards.index_of(message_grid);

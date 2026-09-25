@@ -345,8 +345,7 @@ void ui_comp_grid_scroll(Integer grid, Integer top, Integer bot, Integer left, I
     .recomposed_debug_highlight = dbghl_recompose,
     .delay_after_forward = (rdb_flags & kOptRdbFlagCompositor) != 0,
   };
-  bool processed = ui_comp_process_scroll(
-    layers.items, layers.size, &msg_grid, request, callbacks);
+  bool processed = ui_comp_process_scroll(&msg_grid, request, callbacks);
   assert(processed);
   (void)processed;
 }

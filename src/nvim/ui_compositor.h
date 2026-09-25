@@ -162,7 +162,6 @@ extern bool ui_comp_process_raw_line(
   CompositorRawLineCallbacks callbacks);
 
 extern bool ui_comp_process_scroll(
-  ScreenGrid *const *layer_grids, size_t layer_count,
   ScreenGrid *message_grid, CompositorScrollRequest request,
   CompositorScrollCallbacks callbacks);
 
