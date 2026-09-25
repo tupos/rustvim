@@ -52,6 +52,12 @@ impl GridId {
     }
 }
 
+impl std::fmt::Display for GridId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}", self.0)
+    }
+}
+
 /// Per-row redraw extent used while grid output is throttled.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct DirtyColumns {
@@ -177,8 +183,8 @@ unsafe extern "C" {
     static mut p_arshape: libc::c_int;
     static mut p_tbidi: libc::c_int;
 
-    static mut default_grid: CScreenGrid;
-    static mut msg_grid: CScreenGrid;
+    pub(crate) static mut default_grid: CScreenGrid;
+    pub(crate) static mut msg_grid: CScreenGrid;
     static mut msg_grid_adj: CScreenGrid;
     static mut pum_grid: CScreenGrid;
 

@@ -107,14 +107,6 @@ void ui_comp_remove_grid(ScreenGrid *grid)
   (void)valid;
 }
 
-void ui_comp_grid_cursor_goto(Integer grid_handle, Integer r, Integer c)
-{
-  bool updated = ui_comp_process_grid_cursor_goto(
-    &msg_grid, grid_handle, r, c);
-  assert(updated);
-  (void)updated;
-}
-
 ScreenGrid *ui_comp_mouse_focus(int row, int col)
 {
   ScreenGrid *layer_grid = ui_comp_find_grid_at_coord(row, col, true);
@@ -167,63 +159,4 @@ void ui_comp_compose_grid(ScreenGrid *grid)
   bool recomposed = ui_comp_recompose_grid(&msg_grid, grid->handle);
   assert(recomposed);
   (void)recomposed;
-}
-
-void ui_comp_raw_line(Integer grid, Integer row, Integer startcol, Integer endcol, Integer clearcol,
-                      Integer clearattr, LineFlags flags, const schar_T *chunk,
-                      const sattr_T *attrs)
-{
-  CompositorRawLineRequest request = {
-    .grid_handle = grid,
-    .row = row,
-    .start_col = startcol,
-    .end_col = endcol,
-    .clear_col = clearcol,
-    .clear_attr = clearattr,
-    .flags = flags,
-  };
-  bool processed = ui_comp_process_raw_line(&msg_grid, request, chunk, attrs);
-  assert(processed);
-  (void)processed;
-}
-
-void ui_comp_msg_set_pos(Integer grid, Integer row, Boolean scrolled, String sep_char,
-                         Integer zindex, Integer compindex)
-{
-  bool has_separator_character = sep_char.data != NULL;
-  CompositorMessagePositionRequest request = {
-    .row = row,
-    .separator_character =
-      has_separator_character ? schar_from_buf(sep_char.data, sep_char.size) : 0,
-    .scrolled = scrolled,
-    .has_separator_character = has_separator_character,
-  };
-  bool updated = ui_comp_update_message_position(
-    &msg_grid, &default_grid, request);
-  assert(updated);
-  (void)updated;
-}
-
-void ui_comp_grid_scroll(Integer grid, Integer top, Integer bot, Integer left, Integer right,
-                         Integer rows, Integer cols)
-{
-  CompositorScrollRequest request = {
-    .grid_handle = grid,
-    .top = top,
-    .bottom = bot,
-    .left = left,
-    .right = right,
-    .row_delta = rows,
-    .column_delta = cols,
-  };
-  bool processed = ui_comp_process_scroll(&msg_grid, request);
-  assert(processed);
-  (void)processed;
-}
-
-void ui_comp_grid_resize(Integer grid, Integer width, Integer height)
-{
-  bool processed = ui_comp_process_grid_resize(grid, width, height);
-  assert(processed);
-  (void)processed;
 }

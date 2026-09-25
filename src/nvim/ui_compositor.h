@@ -17,33 +17,6 @@ typedef struct {
   bool on_top;
 } CompositorGridPlacementRequest;
 
-typedef struct {
-  Integer row;
-  schar_T separator_character;
-  bool scrolled;
-  bool has_separator_character;
-} CompositorMessagePositionRequest;
-
-typedef struct {
-  Integer grid_handle;
-  Integer row;
-  Integer start_col;
-  Integer end_col;
-  Integer clear_col;
-  Integer clear_attr;
-  LineFlags flags;
-} CompositorRawLineRequest;
-
-typedef struct {
-  Integer grid_handle;
-  Integer top;
-  Integer bottom;
-  Integer left;
-  Integer right;
-  Integer row_delta;
-  Integer column_delta;
-} CompositorScrollRequest;
-
 extern bool ui_comp_initialize_layer_registry(ScreenGrid *default_grid);
 extern bool ui_comp_clear_layer_registry(void);
 extern void ui_comp_initialize_debug_highlights(void);
@@ -52,8 +25,18 @@ extern void ui_comp_register_composed_ui(void);
 extern bool ui_comp_unregister_composed_ui(void);
 extern bool ui_comp_set_screen_valid(bool valid);
 
-extern bool ui_comp_process_grid_resize(
-  Integer grid, Integer width, Integer height);
+extern void ui_comp_grid_resize(Integer grid, Integer width, Integer height);
+extern void ui_comp_grid_cursor_goto(Integer grid, Integer row, Integer column);
+extern void ui_comp_grid_scroll(
+  Integer grid, Integer top, Integer bottom, Integer left, Integer right,
+  Integer rows, Integer columns);
+extern void ui_comp_raw_line(
+  Integer grid, Integer row, Integer start_col, Integer end_col,
+  Integer clear_col, Integer clear_attr, LineFlags flags,
+  const schar_T *characters, const sattr_T *attributes);
+extern void ui_comp_msg_set_pos(
+  Integer grid, Integer row, Boolean scrolled, String separator_character,
+  Integer z_index, Integer compositor_index);
 extern bool ui_comp_release_buffer(void);
 
 extern bool ui_comp_process_grid_placement(
@@ -63,10 +46,6 @@ extern bool ui_comp_process_grid_placement(
 
 extern bool ui_comp_recompose_grid(
   ScreenGrid *message_grid, Integer grid_handle);
-
-extern bool ui_comp_process_grid_cursor_goto(
-  ScreenGrid *message_grid, Integer grid_handle,
-  Integer row, Integer column);
 
 extern bool ui_comp_adjust_grid_layer_order(
   Integer grid_handle, bool raise);
@@ -93,16 +72,5 @@ extern bool ui_comp_cursor_is_covered_by_higher_layer_in_stack(
   int row, int column, int minimum_z_index_gap);
 
 extern void ui_comp_hide_message_separator(void);
-
-extern bool ui_comp_update_message_position(
-  ScreenGrid *message_grid, ScreenGrid *default_grid,
-  CompositorMessagePositionRequest request);
-
-extern bool ui_comp_process_raw_line(
-  ScreenGrid *message_grid, CompositorRawLineRequest request,
-  const schar_T *characters, const sattr_T *attributes);
-
-extern bool ui_comp_process_scroll(
-  ScreenGrid *message_grid, CompositorScrollRequest request);
 
 #include "ui_compositor.h.generated.h"

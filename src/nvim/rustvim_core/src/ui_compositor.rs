@@ -8,12 +8,13 @@ use std::{
 };
 
 use crate::{
-    defines::{Integer, OptInt},
+    defines::{CVimString, Integer, OptInt},
     generated::enums::RdbFlags,
     globals,
     grid::{
         CScreenGrid, GridId, GridRow, GridRowSegment, Highlight, ScreenGrid, ScreenGridGuard,
-        VimSAttrT, VimSCharT, schar_from_ascii, schar_from_char,
+        VimSAttrT, VimSCharT, default_grid as c_default_grid, msg_grid as c_msg_grid,
+        schar_from_ascii, schar_from_buf, schar_from_char,
     },
 };
 
@@ -77,42 +78,6 @@ impl SegmentComposition {
     pub(crate) fn is_followed_by_continuation(self) -> bool {
         self.followed_by_continuation
     }
-}
-
-/// C representation of one message-grid position update.
-#[repr(C)]
-#[derive(Clone, Copy, Debug)]
-pub struct CCompositorMessagePositionRequest {
-    row: Integer,
-    separator_character: VimSCharT,
-    scrolled: bool,
-    has_separator_character: bool,
-}
-
-/// C representation of one complete raw-line request.
-#[repr(C)]
-#[derive(Clone, Copy, Debug)]
-pub struct CCompositorRawLineRequest {
-    grid_handle: Integer,
-    row: Integer,
-    start_col: Integer,
-    end_col: Integer,
-    clear_col: Integer,
-    clear_attr: Integer,
-    flags: libc::c_int,
-}
-
-/// C representation of one complete grid-scroll request.
-#[repr(C)]
-#[derive(Clone, Copy, Debug)]
-pub struct CCompositorScrollRequest {
-    grid_handle: Integer,
-    top: Integer,
-    bottom: Integer,
-    left: Integer,
-    right: Integer,
-    row_delta: Integer,
-    column_delta: Integer,
 }
 
 /// One cell in composed-screen coordinates.
@@ -254,6 +219,13 @@ struct CompositorSize {
     width: i32,
 }
 
+impl CompositorSize {
+    /// Constructs nonnegative compositor dimensions.
+    fn try_new(height: i32, width: i32) -> Option<Self> {
+        (height >= 0 && width >= 0).then_some(Self { height, width })
+    }
+}
+
 /// Validated native inputs for positioning the composed cursor.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct CompositorCursorRequest {
@@ -305,9 +277,9 @@ struct CompositorGridPlacementRequest {
 impl CompositorGridPlacement {
     /// Constructs a placement with nonnegative dimensions.
     fn try_new(row: i32, column: i32, height: i32, width: i32) -> Option<Self> {
-        (height >= 0 && width >= 0).then_some(Self {
+        Some(Self {
             origin: CompositorPoint { row, column },
-            size: CompositorSize { height, width },
+            size: CompositorSize::try_new(height, width)?,
         })
     }
 
@@ -440,21 +412,19 @@ struct CompositorMessagePositionRequest {
 }
 
 impl CompositorMessagePositionRequest {
-    /// Converts one C request using dimensions captured by the Rust boundary.
-    fn try_from_ffi(
-        request: CCompositorMessagePositionRequest,
+    /// Constructs a message-position request from validated native values.
+    fn new(
+        row: i32,
+        separator_character: Option<VimSCharT>,
         screen_size: CompositorSize,
-    ) -> Result<Self, ()> {
-        let row = i32::try_from(request.row).map_err(|_| ())?;
-
-        Ok(Self {
+        scrolled: bool,
+    ) -> Self {
+        Self {
             row,
-            separator_character: request
-                .has_separator_character
-                .then_some(request.separator_character),
+            separator_character,
             screen_size,
-            scrolled: request.scrolled,
-        })
+            scrolled,
+        }
     }
 }
 
@@ -653,23 +623,18 @@ struct CompositorScrollRequest {
     column_delta: i32,
 }
 
-impl TryFrom<CCompositorScrollRequest> for CompositorScrollRequest {
-    type Error = ();
-
-    fn try_from(request: CCompositorScrollRequest) -> Result<Self, Self::Error> {
-        let (Ok(top), Ok(bottom), Ok(left), Ok(right), Ok(row_delta), Ok(column_delta)) = (
-            i32::try_from(request.top),
-            i32::try_from(request.bottom),
-            i32::try_from(request.left),
-            i32::try_from(request.right),
-            i32::try_from(request.row_delta),
-            i32::try_from(request.column_delta),
-        ) else {
-            return Err(());
-        };
-
-        Ok(Self {
-            region: CompositorRegion::try_new(top..bottom, left..right).ok_or(())?,
+impl CompositorScrollRequest {
+    /// Constructs a scroll request with an ordered grid-local region.
+    fn try_new(
+        top: i32,
+        bottom: i32,
+        left: i32,
+        right: i32,
+        row_delta: i32,
+        column_delta: i32,
+    ) -> Option<Self> {
+        Some(Self {
+            region: CompositorRegion::try_new(top..bottom, left..right)?,
             row_delta,
             column_delta,
         })
@@ -758,27 +723,21 @@ struct CompositorRawLineRequest {
     flags: i32,
 }
 
-impl TryFrom<CCompositorRawLineRequest> for CompositorRawLineRequest {
-    type Error = ();
-
-    fn try_from(request: CCompositorRawLineRequest) -> Result<Self, Self::Error> {
-        let (Ok(row), Ok(start_column), Ok(end_column), Ok(clear_column)) = (
-            i32::try_from(request.row),
-            i32::try_from(request.start_col),
-            i32::try_from(request.end_col),
-            i32::try_from(request.clear_col),
-        ) else {
-            return Err(());
-        };
-
-        (start_column <= end_column && end_column <= clear_column)
-            .then_some(Self {
-                row,
-                columns: start_column..end_column,
-                clear_column,
-                flags: request.flags,
-            })
-            .ok_or(())
+impl CompositorRawLineRequest {
+    /// Constructs a raw-line request with ordered grid-local columns.
+    fn try_new(
+        row: i32,
+        start_column: i32,
+        end_column: i32,
+        clear_column: i32,
+        flags: i32,
+    ) -> Option<Self> {
+        (start_column <= end_column && end_column <= clear_column).then_some(Self {
+            row,
+            columns: start_column..end_column,
+            clear_column,
+            flags,
+        })
     }
 }
 
@@ -2144,11 +2103,8 @@ impl CompositorRuntime {
         debug_highlights: CompositorDebugHighlights,
     ) -> Option<Self> {
         let screen_columns_usize = usize::try_from(screen_columns).ok()?;
-        (screen_rows >= 0).then_some(Self {
-            screen_size: CompositorSize {
-                height: screen_rows,
-                width: screen_columns,
-            },
+        Some(Self {
+            screen_size: CompositorSize::try_new(screen_rows, screen_columns)?,
             line_settings: CompositorLineSettings {
                 message_separator_attribute,
                 screen_columns: screen_columns_usize,
@@ -2231,14 +2187,14 @@ fn compositor_debug_highlight(name: &[u8]) -> i32 {
 }
 
 /// Emits one formatted raw-line diagnostic through Neovim's debug logger.
-fn log_raw_line_diagnostic(diagnostic: RawLineDiagnostic, grid_handle: i32) {
+fn log_raw_line_diagnostic(diagnostic: RawLineDiagnostic, grid_id: GridId) {
     let message = match diagnostic {
         RawLineDiagnostic::InvalidRow(row) => {
-            format!("compositor: invalid row {row} on grid {grid_handle}")
+            format!("compositor: invalid row {row} on grid {grid_id}")
         }
-        RawLineDiagnostic::ClippedColumns(requested_clear_column) => format!(
-            "compositor: invalid last column {requested_clear_column} on grid {grid_handle}"
-        ),
+        RawLineDiagnostic::ClippedColumns(requested_clear_column) => {
+            format!("compositor: invalid last column {requested_clear_column} on grid {grid_id}")
+        }
     };
     let message = CString::new(message).expect("formatted compositor diagnostic contains no NUL");
 
@@ -2717,32 +2673,31 @@ pub extern "C" fn ui_comp_set_screen_valid(valid: bool) -> bool {
     previous
 }
 
-/// Processes a grid-resize event for the composed screen.
-///
-/// Only the default grid determines the composed screen size. Other grid
-/// resize events remain successful no-ops, matching the compositor's existing
-/// behavior.
+/// Handles one generated grid-resize event.
 #[unsafe(no_mangle)]
-pub extern "C" fn ui_comp_process_grid_resize(
-    grid: Integer,
-    width: Integer,
-    height: Integer,
-) -> bool {
-    if grid != 1 {
-        return true;
-    }
-
-    // SAFETY: The composed UI callback accepts the unchanged validated C ABI
-    // scalars and is invoked before the compositor buffer is resized, matching
-    // the existing event order.
-    unsafe {
-        ui_composed_call_grid_resize(1, width, height);
-    }
-
-    let Ok(width) = usize::try_from(width) else {
-        return false;
+pub extern "C" fn ui_comp_grid_resize(grid: Integer, width: Integer, height: Integer) {
+    let (Ok(grid), Ok(width), Ok(height)) = (
+        i32::try_from(grid),
+        i32::try_from(width),
+        i32::try_from(height),
+    ) else {
+        panic!("grid-resize arguments must fit native compositor coordinates");
     };
-    lock_compositor_buffer().resize(width)
+    let grid_id = GridId::new(grid);
+    let size =
+        CompositorSize::try_new(height, width).expect("grid-resize dimensions must be nonnegative");
+    if grid_id != GridId::new(1) {
+        return;
+    }
+
+    // SAFETY: The dimensions were converted and validated above. The callback
+    // runs before buffer resize, preserving the established event order.
+    unsafe {
+        ui_composed_call_grid_resize(1, Integer::from(size.width), Integer::from(size.height));
+    }
+
+    let width = usize::try_from(size.width).expect("validated width must fit usize");
+    assert!(lock_compositor_buffer().resize(width));
 }
 
 #[unsafe(no_mangle)]
@@ -2770,22 +2725,15 @@ pub extern "C" fn ui_comp_hide_message_separator() {
 ///
 /// `default_grid` must point to a second valid, exclusively accessible
 /// `CScreenGrid` whose buffers satisfy the same requirements.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn ui_comp_update_message_position(
+unsafe fn update_message_position(
     message_grid: *mut CScreenGrid,
     default_grid: *mut CScreenGrid,
-    request: CCompositorMessagePositionRequest,
+    request: CompositorMessagePositionRequest,
+    runtime: CompositorRuntime,
 ) -> bool {
     if message_grid.is_null() || default_grid.is_null() || message_grid == default_grid {
         return false;
     }
-    let Some(runtime) = compositor_runtime_snapshot() else {
-        return false;
-    };
-    let Ok(request) = CompositorMessagePositionRequest::try_from_ffi(request, runtime.screen_size)
-    else {
-        return false;
-    };
     let should_draw = lock_compositor_draw_state().should_draw();
 
     let plan = {
@@ -2827,6 +2775,45 @@ pub unsafe extern "C" fn ui_comp_update_message_position(
         }
     }
     true
+}
+
+/// Handles one generated message-grid position event.
+///
+/// # Safety
+///
+/// A non-null `separator_character.data` must point to `separator_character.size`
+/// readable bytes for the duration of this call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ui_comp_msg_set_pos(
+    _grid: Integer,
+    row: Integer,
+    scrolled: bool,
+    separator_character: CVimString,
+    _z_index: Integer,
+    _compositor_index: Integer,
+) {
+    let row = i32::try_from(row).expect("message-grid row must fit native coordinates");
+    let runtime = compositor_runtime_snapshot().expect("compositor runtime must be valid");
+    let separator_character = (!separator_character.data.is_null())
+        .then(|| schar_from_buf(separator_character.data, separator_character.size));
+    let request = CompositorMessagePositionRequest::new(
+        row,
+        separator_character,
+        runtime.screen_size,
+        scrolled,
+    );
+
+    // SAFETY: Neovim's global default and message grids are distinct and are
+    // exclusively accessed on the main thread during this generated event.
+    let updated = unsafe {
+        update_message_position(
+            &raw mut c_msg_grid,
+            &raw mut c_default_grid,
+            request,
+            runtime,
+        )
+    };
+    assert!(updated);
 }
 
 /// Clamps a recomposition area's exclusive ends to the default grid.
@@ -3089,25 +3076,10 @@ fn apply_cursor_update_to_registered_grids(
 ///
 /// `message_grid` must satisfy the message-grid requirements of
 /// `recompose_area_from_registered_grids`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn ui_comp_process_grid_cursor_goto(
+unsafe fn process_grid_cursor_goto(
     message_grid: *mut CScreenGrid,
-    grid_handle: Integer,
-    row: Integer,
-    column: Integer,
+    request: CompositorCursorRequest,
 ) -> bool {
-    let (Ok(grid_handle), Ok(row), Ok(column)) = (
-        i32::try_from(grid_handle),
-        i32::try_from(row),
-        i32::try_from(column),
-    ) else {
-        return false;
-    };
-    let request = CompositorCursorRequest {
-        grid_id: GridId::new(grid_handle),
-        local_position: CompositorPoint { row, column },
-    };
-
     let Some(update) = apply_cursor_update_to_registered_grids(request) else {
         return false;
     };
@@ -3143,6 +3115,27 @@ pub unsafe extern "C" fn ui_comp_process_grid_cursor_goto(
     }
 
     true
+}
+
+/// Handles one generated grid-cursor event.
+#[unsafe(no_mangle)]
+pub extern "C" fn ui_comp_grid_cursor_goto(grid_handle: Integer, row: Integer, column: Integer) {
+    let (Ok(grid_handle), Ok(row), Ok(column)) = (
+        i32::try_from(grid_handle),
+        i32::try_from(row),
+        i32::try_from(column),
+    ) else {
+        panic!("grid-cursor arguments must fit native compositor coordinates");
+    };
+    let request = CompositorCursorRequest {
+        grid_id: GridId::new(grid_handle),
+        local_position: CompositorPoint { row, column },
+    };
+
+    // SAFETY: Neovim's message grid is exclusively accessed on the main
+    // thread during this generated event.
+    let updated = unsafe { process_grid_cursor_goto(&raw mut c_msg_grid, request) };
+    assert!(updated);
 }
 
 /// Adjusts a registered grid's layer position after its z-index changes.
@@ -3610,10 +3603,11 @@ fn emit_compositor_debug_line(row: i32, columns: Range<i32>, attribute: VimSAttr
 /// A disabled compositor or a grid handle absent from the registered layers
 /// produces a successful no-op. `message_grid` is used only for pointer
 /// identity and may be null.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn ui_comp_process_raw_line(
+unsafe fn process_raw_line(
     message_grid: *mut CScreenGrid,
-    request: CCompositorRawLineRequest,
+    grid_id: GridId,
+    request: CompositorRawLineRequest,
+    clear_attribute: VimSAttrT,
     characters: *const VimSCharT,
     attributes: *const VimSAttrT,
 ) -> bool {
@@ -3621,17 +3615,6 @@ pub unsafe extern "C" fn ui_comp_process_raw_line(
         return true;
     }
     let Some(runtime) = compositor_runtime_snapshot() else {
-        return false;
-    };
-
-    let (Ok(grid_handle), Ok(clear_attribute)) = (
-        i32::try_from(request.grid_handle),
-        i32::try_from(request.clear_attr),
-    ) else {
-        return false;
-    };
-    let grid_id = GridId::new(grid_handle);
-    let Ok(raw_line) = CompositorRawLineRequest::try_from(request) else {
         return false;
     };
 
@@ -3652,7 +3635,7 @@ pub unsafe extern "C" fn ui_comp_process_raw_line(
             current_layer_index,
             message_layer_index,
             message_was_scrolled,
-            raw_line,
+            request,
         ) else {
             return false;
         };
@@ -3662,13 +3645,13 @@ pub unsafe extern "C" fn ui_comp_process_raw_line(
     if plan.clear_column != plan.requested_clear_column {
         log_raw_line_diagnostic(
             RawLineDiagnostic::ClippedColumns(plan.requested_clear_column),
-            grid_handle,
+            grid_id,
         );
     }
 
     match plan.action {
         CompositorRawLineAction::DiscardRow => {
-            log_raw_line_diagnostic(RawLineDiagnostic::InvalidRow(plan.row), grid_handle);
+            log_raw_line_diagnostic(RawLineDiagnostic::InvalidRow(plan.row), grid_id);
             true
         }
         CompositorRawLineAction::DiscardColumns => true,
@@ -3760,6 +3743,52 @@ pub unsafe extern "C" fn ui_comp_process_raw_line(
     }
 }
 
+/// Handles one generated raw-line event.
+///
+/// # Safety
+///
+/// When `end_col - start_col` is nonzero, `characters` and `attributes` must
+/// point to readable arrays containing at least that many initialized cells.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ui_comp_raw_line(
+    grid: Integer,
+    row: Integer,
+    start_col: Integer,
+    end_col: Integer,
+    clear_col: Integer,
+    clear_attr: Integer,
+    flags: libc::c_int,
+    characters: *const VimSCharT,
+    attributes: *const VimSAttrT,
+) {
+    let (Ok(grid), Ok(row), Ok(start_col), Ok(end_col), Ok(clear_col), Ok(clear_attr)) = (
+        i32::try_from(grid),
+        i32::try_from(row),
+        i32::try_from(start_col),
+        i32::try_from(end_col),
+        i32::try_from(clear_col),
+        i32::try_from(clear_attr),
+    ) else {
+        panic!("raw-line arguments must fit native compositor coordinates");
+    };
+    let request = CompositorRawLineRequest::try_new(row, start_col, end_col, clear_col, flags)
+        .expect("raw-line columns must be ordered");
+
+    // SAFETY: The generated caller supplies the documented cell arrays, and
+    // Neovim's message grid is exclusively accessed on the main thread.
+    let processed = unsafe {
+        process_raw_line(
+            &raw mut c_msg_grid,
+            GridId::new(grid),
+            request,
+            clear_attr,
+            characters,
+            attributes,
+        )
+    };
+    assert!(processed);
+}
+
 /// Processes one complete grid scroll against registered compositor grids.
 ///
 /// # Safety
@@ -3767,23 +3796,15 @@ pub unsafe extern "C" fn ui_comp_process_raw_line(
 /// A disabled compositor or a grid handle absent from the registered layers
 /// produces a successful no-op. `message_grid` is used only for pointer
 /// identity and may be null.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn ui_comp_process_scroll(
+unsafe fn process_scroll(
     message_grid: *mut CScreenGrid,
-    request: CCompositorScrollRequest,
+    grid_id: GridId,
+    request: CompositorScrollRequest,
 ) -> bool {
     if !lock_compositor_draw_state().should_draw() {
         return true;
     }
     let Some(runtime) = compositor_runtime_snapshot() else {
-        return false;
-    };
-
-    let Ok(grid_handle) = i32::try_from(request.grid_handle) else {
-        return false;
-    };
-    let grid_id = GridId::new(grid_handle);
-    let Ok(request) = CompositorScrollRequest::try_from(request) else {
         return false;
     };
 
@@ -3866,6 +3887,37 @@ pub unsafe extern "C" fn ui_comp_process_scroll(
         }
     }
     true
+}
+
+/// Handles one generated grid-scroll event.
+#[unsafe(no_mangle)]
+pub extern "C" fn ui_comp_grid_scroll(
+    grid: Integer,
+    top: Integer,
+    bottom: Integer,
+    left: Integer,
+    right: Integer,
+    rows: Integer,
+    columns: Integer,
+) {
+    let (Ok(grid), Ok(top), Ok(bottom), Ok(left), Ok(right), Ok(rows), Ok(columns)) = (
+        i32::try_from(grid),
+        i32::try_from(top),
+        i32::try_from(bottom),
+        i32::try_from(left),
+        i32::try_from(right),
+        i32::try_from(rows),
+        i32::try_from(columns),
+    ) else {
+        panic!("grid-scroll arguments must fit native compositor coordinates");
+    };
+    let request = CompositorScrollRequest::try_new(top, bottom, left, right, rows, columns)
+        .expect("grid-scroll region must be ordered");
+
+    // SAFETY: Neovim's message grid is exclusively accessed on the main
+    // thread during this generated event.
+    let processed = unsafe { process_scroll(&raw mut c_msg_grid, GridId::new(grid), request) };
+    assert!(processed);
 }
 
 /// Reports whether a screen character participates in negative-space blending.
@@ -5551,6 +5603,12 @@ mod tests {
     }
 
     #[test]
+    fn rejects_unordered_raw_line_columns() {
+        assert!(CompositorRawLineRequest::try_new(0, 2, 1, 3, 0).is_none());
+        assert!(CompositorRawLineRequest::try_new(0, 1, 3, 2, 0).is_none());
+    }
+
+    #[test]
     fn plans_clipped_raw_line_recomposition() {
         let default_grid = grid_with_size(5, 8);
         let overlay_grid = grid_with_size(1, 1);
@@ -5657,6 +5715,12 @@ mod tests {
                 column_delta: -1,
             }
         );
+    }
+
+    #[test]
+    fn rejects_unordered_scroll_regions() {
+        assert!(CompositorScrollRequest::try_new(2, 1, 0, 1, 0, 0).is_none());
+        assert!(CompositorScrollRequest::try_new(0, 1, 2, 1, 0, 0).is_none());
     }
 
     #[test]
