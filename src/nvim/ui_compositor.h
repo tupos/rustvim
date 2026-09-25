@@ -18,41 +18,11 @@ typedef struct {
 } CompositorGridPlacementRequest;
 
 typedef struct {
-  Integer start_row;
-  Integer end_row;
-  Integer start_column;
-  Integer end_column;
-} CompositorRecomposeArea;
-
-typedef struct {
-  sattr_T message_separator_attribute;
-  int screen_columns;
-  bool abort_on_invalid;
-} CompositorLineSettings;
-
-typedef struct {
   Integer row;
   schar_T separator_character;
-  int screen_rows;
-  int screen_columns;
   bool scrolled;
   bool has_separator_character;
 } CompositorMessagePositionRequest;
-
-typedef void (*CompositorDebugCallback)(
-  Integer start_row, Integer end_row, Integer start_column, Integer end_column,
-  int highlight, bool delay);
-
-typedef struct {
-  CompositorDebugCallback debug;
-  CompositorLineSettings line_settings;
-  int recomposed_debug_highlight;
-} CompositorAreaCallbacks;
-
-typedef void (*CompositorDelayCallback)(Integer lines);
-
-typedef void (*CompositorRawLineDiagnosticCallback)(
-  Integer value, Integer grid_handle);
 
 typedef struct {
   Integer grid_handle;
@@ -65,16 +35,6 @@ typedef struct {
 } CompositorRawLineRequest;
 
 typedef struct {
-  CompositorDebugCallback debug;
-  CompositorLineSettings line_settings;
-  CompositorRawLineDiagnosticCallback log_invalid_row;
-  CompositorRawLineDiagnosticCallback log_clipped_columns;
-  int normal_debug_highlight;
-  int clear_debug_highlight;
-  int composed_debug_highlight;
-} CompositorRawLineCallbacks;
-
-typedef struct {
   Integer grid_handle;
   Integer top;
   Integer bottom;
@@ -84,16 +44,9 @@ typedef struct {
   Integer column_delta;
 } CompositorScrollRequest;
 
-typedef struct {
-  CompositorDebugCallback debug;
-  CompositorLineSettings line_settings;
-  CompositorDelayCallback delay;
-  int recomposed_debug_highlight;
-  bool delay_after_forward;
-} CompositorScrollCallbacks;
-
 extern bool ui_comp_initialize_layer_registry(ScreenGrid *default_grid);
 extern bool ui_comp_clear_layer_registry(void);
+extern void ui_comp_initialize_debug_highlights(void);
 
 extern void ui_comp_register_composed_ui(void);
 extern bool ui_comp_unregister_composed_ui(void);
@@ -106,27 +59,20 @@ extern bool ui_comp_release_buffer(void);
 extern bool ui_comp_process_grid_placement(
   ScreenGrid *grid, Integer current_window_grid_handle,
   CompositorGridPlacementRequest request,
-  ScreenGrid *message_grid, CompositorAreaCallbacks callbacks,
-  bool *moved);
-
-extern bool ui_comp_clip_recompose_area(
-  Integer grid_handle, CompositorRecomposeArea area,
-  CompositorRecomposeArea *output);
+  ScreenGrid *message_grid, bool *moved);
 
 extern bool ui_comp_recompose_grid(
-  ScreenGrid *message_grid, Integer grid_handle, CompositorAreaCallbacks callbacks);
+  ScreenGrid *message_grid, Integer grid_handle);
 
 extern bool ui_comp_process_grid_cursor_goto(
   ScreenGrid *message_grid, Integer grid_handle,
-  Integer row, Integer column,
-  CompositorAreaCallbacks callbacks);
+  Integer row, Integer column);
 
 extern bool ui_comp_adjust_grid_layer_order(
   Integer grid_handle, bool raise);
 
 extern bool ui_comp_process_grid_removal(
-  ScreenGrid *message_grid, Integer grid_handle,
-  CompositorAreaCallbacks callbacks);
+  ScreenGrid *message_grid, Integer grid_handle);
 
 extern ScreenGrid *ui_comp_find_grid_at_coord(
   int row, int column, bool require_mouse_input);
@@ -150,18 +96,13 @@ extern void ui_comp_hide_message_separator(void);
 
 extern bool ui_comp_update_message_position(
   ScreenGrid *message_grid, ScreenGrid *default_grid,
-  CompositorMessagePositionRequest request, CompositorAreaCallbacks callbacks);
-
-extern bool ui_comp_emit_clear_line(
-  Integer row, Integer start_col, Integer end_col, sattr_T attribute);
+  CompositorMessagePositionRequest request);
 
 extern bool ui_comp_process_raw_line(
   ScreenGrid *message_grid, CompositorRawLineRequest request,
-  const schar_T *characters, const sattr_T *attributes,
-  CompositorRawLineCallbacks callbacks);
+  const schar_T *characters, const sattr_T *attributes);
 
 extern bool ui_comp_process_scroll(
-  ScreenGrid *message_grid, CompositorScrollRequest request,
-  CompositorScrollCallbacks callbacks);
+  ScreenGrid *message_grid, CompositorScrollRequest request);
 
 #include "ui_compositor.h.generated.h"

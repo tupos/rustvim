@@ -4,31 +4,18 @@
 // Layer-based compositing: https://en.wikipedia.org/wiki/Digital_compositing
 
 #include <assert.h>
-#include <inttypes.h>
-#include <limits.h>
 #include <stdbool.h>
-#include <stdlib.h>
-#include <uv.h>
 
 #include "nvim/api/private/defs.h"
 #include "nvim/buffer_defs.h"
 #include "nvim/globals.h"
 #include "nvim/grid.h"
-#include "nvim/highlight.h"
-#include "nvim/highlight_defs.h"
-#include "nvim/highlight_group.h"
-#include "nvim/log.h"
-#include "nvim/macros_defs.h"
 #include "nvim/message.h"
-#include "nvim/option_vars.h"
-#include "nvim/os/time.h"
 #include "nvim/types_defs.h"
 #include "nvim/ui.h"
 #include "nvim/ui_compositor.h"
 
 #include "ui_compositor.c.generated.h"
-
-static int dbghl_normal, dbghl_clear, dbghl_composed, dbghl_recompose;
 
 void ui_comp_init(void)
 {
@@ -52,10 +39,7 @@ void ui_comp_free_all_mem(void)
 
 void ui_comp_syn_init(void)
 {
-  dbghl_normal = syn_check_group(S_LEN("RedrawDebugNormal"));
-  dbghl_clear = syn_check_group(S_LEN("RedrawDebugClear"));
-  dbghl_composed = syn_check_group(S_LEN("RedrawDebugComposed"));
-  dbghl_recompose = syn_check_group(S_LEN("RedrawDebugRecompose"));
+  ui_comp_initialize_debug_highlights();
 }
 
 void ui_comp_attach(RemoteUI *ui)
@@ -110,8 +94,7 @@ bool ui_comp_put_grid(ScreenGrid *grid, int row, int col, int height, int width,
   Integer current_window_grid_handle = curwin ? curwin->w_grid_alloc.handle : 0;
   bool placed = ui_comp_process_grid_placement(
     grid, current_window_grid_handle,
-    request, &msg_grid, compositor_area_callbacks(),
-    &moved);
+    request, &msg_grid, &moved);
   assert(placed);
   return placed && moved;
 }
@@ -119,9 +102,7 @@ bool ui_comp_put_grid(ScreenGrid *grid, int row, int col, int height, int width,
 void ui_comp_remove_grid(ScreenGrid *grid)
 {
   assert(grid != &default_grid);
-  bool valid = ui_comp_process_grid_removal(
-    &msg_grid, grid->handle,
-    compositor_area_callbacks());
+  bool valid = ui_comp_process_grid_removal(&msg_grid, grid->handle);
   assert(valid);
   (void)valid;
 }
@@ -129,7 +110,7 @@ void ui_comp_remove_grid(ScreenGrid *grid)
 void ui_comp_grid_cursor_goto(Integer grid_handle, Integer r, Integer c)
 {
   bool updated = ui_comp_process_grid_cursor_goto(
-    &msg_grid, grid_handle, r, c, compositor_area_callbacks());
+    &msg_grid, grid_handle, r, c);
   assert(updated);
   (void)updated;
 }
@@ -177,94 +158,15 @@ bool ui_comp_cursor_is_covered_by_higher_layer(ScreenGrid *current_grid, int row
     current_grid->handle, current_grid->zindex, row, col, minimum_z_index_gap);
 }
 
-static CompositorLineSettings compositor_line_settings(void)
-{
-  return (CompositorLineSettings) {
-    .message_separator_attribute = (sattr_T)HL_ATTR(HLF_MSGSEP),
-    .screen_columns = Columns,
-    .abort_on_invalid = (rdb_flags & kOptRdbFlagInvalid) != 0,
-  };
-}
-
-static CompositorAreaCallbacks compositor_area_callbacks(void)
-{
-  return (CompositorAreaCallbacks) {
-    .debug = compose_debug,
-    .line_settings = compositor_line_settings(),
-    .recomposed_debug_highlight = dbghl_recompose,
-  };
-}
-
-static bool clip_area_to_default_grid(CompositorRecomposeArea *area)
-{
-  bool clipped = ui_comp_clip_recompose_area(default_grid.handle, *area, area);
-  assert(clipped);
-  return clipped;
-}
-
-static void compose_debug(Integer startrow, Integer endrow, Integer startcol, Integer endcol,
-                          int syn_id, bool delay)
-{
-  if (!(rdb_flags & kOptRdbFlagCompositor) || startcol >= endcol) {
-    return;
-  }
-
-  CompositorRecomposeArea area = {
-    .start_row = startrow,
-    .end_row = endrow,
-    .start_column = startcol,
-    .end_column = endcol,
-  };
-  if (!clip_area_to_default_grid(&area)) {
-    return;
-  }
-  int attr = syn_id2attr(syn_id);
-
-  if (delay) {
-    debug_delay(area.end_row - area.start_row);
-  }
-
-  for (int row = (int)area.start_row; row < area.end_row; row++) {
-    bool emitted =
-      ui_comp_emit_clear_line(row, area.start_column, area.end_column, attr);
-    assert(emitted);
-    (void)emitted;
-  }
-
-  if (delay) {
-    debug_delay(area.end_row - area.start_row);
-  }
-}
-
-static void debug_delay(Integer lines)
-{
-  ui_call_flush();
-  uint64_t wd = (uint64_t)llabs(p_wd);
-  uint64_t factor = (uint64_t)MAX(MIN(lines, 5), 1);
-  os_sleep(factor * wd);
-}
-
 /// compose the area under the grid.
 ///
 /// This is needed when some option affecting composition is changed,
 /// such as 'pumblend' for popupmenu grid.
 void ui_comp_compose_grid(ScreenGrid *grid)
 {
-  bool recomposed = ui_comp_recompose_grid(
-    &msg_grid, grid->handle, compositor_area_callbacks());
+  bool recomposed = ui_comp_recompose_grid(&msg_grid, grid->handle);
   assert(recomposed);
   (void)recomposed;
-}
-
-static void log_invalid_raw_line_row(Integer row, Integer grid)
-{
-  DLOG("compositor: invalid row %" PRId64 " on grid %" PRId64, row, grid);
-}
-
-static void log_clipped_raw_line_columns(Integer requested_clear_col, Integer grid)
-{
-  DLOG("compositor: invalid last column %" PRId64 " on grid %" PRId64,
-       requested_clear_col, grid);
 }
 
 void ui_comp_raw_line(Integer grid, Integer row, Integer startcol, Integer endcol, Integer clearcol,
@@ -272,7 +174,7 @@ void ui_comp_raw_line(Integer grid, Integer row, Integer startcol, Integer endco
                       const sattr_T *attrs)
 {
   CompositorRawLineRequest request = {
-    .grid_handle = (int)grid,
+    .grid_handle = grid,
     .row = row,
     .start_col = startcol,
     .end_col = endcol,
@@ -280,17 +182,7 @@ void ui_comp_raw_line(Integer grid, Integer row, Integer startcol, Integer endco
     .clear_attr = clearattr,
     .flags = flags,
   };
-  CompositorRawLineCallbacks callbacks = {
-    .debug = compose_debug,
-    .line_settings = compositor_line_settings(),
-    .log_invalid_row = log_invalid_raw_line_row,
-    .log_clipped_columns = log_clipped_raw_line_columns,
-    .normal_debug_highlight = dbghl_normal,
-    .clear_debug_highlight = dbghl_clear,
-    .composed_debug_highlight = dbghl_composed,
-  };
-  bool processed =
-    ui_comp_process_raw_line(&msg_grid, request, chunk, attrs, callbacks);
+  bool processed = ui_comp_process_raw_line(&msg_grid, request, chunk, attrs);
   assert(processed);
   (void)processed;
 }
@@ -303,14 +195,11 @@ void ui_comp_msg_set_pos(Integer grid, Integer row, Boolean scrolled, String sep
     .row = row,
     .separator_character =
       has_separator_character ? schar_from_buf(sep_char.data, sep_char.size) : 0,
-    .screen_rows = Rows,
-    .screen_columns = Columns,
     .scrolled = scrolled,
     .has_separator_character = has_separator_character,
   };
   bool updated = ui_comp_update_message_position(
-    &msg_grid, &default_grid,
-    request, compositor_area_callbacks());
+    &msg_grid, &default_grid, request);
   assert(updated);
   (void)updated;
 }
@@ -327,14 +216,7 @@ void ui_comp_grid_scroll(Integer grid, Integer top, Integer bot, Integer left, I
     .row_delta = rows,
     .column_delta = cols,
   };
-  CompositorScrollCallbacks callbacks = {
-    .debug = compose_debug,
-    .line_settings = compositor_line_settings(),
-    .delay = debug_delay,
-    .recomposed_debug_highlight = dbghl_recompose,
-    .delay_after_forward = (rdb_flags & kOptRdbFlagCompositor) != 0,
-  };
-  bool processed = ui_comp_process_scroll(&msg_grid, request, callbacks);
+  bool processed = ui_comp_process_scroll(&msg_grid, request);
   assert(processed);
   (void)processed;
 }

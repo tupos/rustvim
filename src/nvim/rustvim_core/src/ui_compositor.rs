@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    ffi::CString,
     ops::Range,
     ptr::NonNull,
     slice,
@@ -7,7 +8,9 @@ use std::{
 };
 
 use crate::{
-    defines::Integer,
+    defines::{Integer, OptInt},
+    generated::enums::RdbFlags,
+    globals,
     grid::{
         CScreenGrid, GridId, GridRow, GridRowSegment, Highlight, ScreenGrid, ScreenGridGuard,
         VimSAttrT, VimSCharT, schar_from_ascii, schar_from_char,
@@ -17,24 +20,15 @@ use crate::{
 const LINE_FLAG_WRAP: libc::c_int = 1;
 const LINE_FLAG_INVALID: libc::c_int = 2;
 
-/// C callback used to visualize one compositor operation.
-type CompositorDebugCallback = unsafe extern "C" fn(
-    start_row: Integer,
-    end_row: Integer,
-    start_column: Integer,
-    end_column: Integer,
-    highlight: libc::c_int,
-    delay: bool,
-);
-
-/// C callback used to delay after visualizing one compositor operation.
-type CompositorDelayCallback = unsafe extern "C" fn(lines: Integer);
-
-/// C callback used to report one rejected or clipped raw-line coordinate.
-type CompositorRawLineDiagnosticCallback =
-    unsafe extern "C" fn(value: Integer, grid_handle: Integer);
-
 unsafe extern "C" {
+    static mut p_wd: OptInt;
+    static mut rdb_flags: libc::c_uint;
+
+    fn log_debug_message(message: *const libc::c_char);
+    fn os_sleep(ms: u64);
+    fn syn_check_group(name: *const libc::c_char, length: libc::size_t) -> libc::c_int;
+    fn syn_id2attr(highlight_id: libc::c_int) -> libc::c_int;
+    fn ui_call_flush();
     fn ui_composed_call_grid_cursor_goto(grid: Integer, row: Integer, column: Integer);
     fn ui_composed_call_grid_resize(grid: Integer, width: Integer, height: Integer);
     fn ui_composed_call_grid_scroll(
@@ -57,6 +51,7 @@ unsafe extern "C" {
         characters: *const VimSCharT,
         attributes: *const VimSAttrT,
     );
+    fn ui_get_message_separator_attr() -> VimSAttrT;
 }
 
 /// C representation of one compositor-grid placement request.
@@ -69,16 +64,6 @@ pub struct CCompositorGridPlacementRequest {
     width: libc::c_int,
     valid: bool,
     on_top: bool,
-}
-
-/// C representation of one half-open compositor recomposition area.
-#[repr(C)]
-#[derive(Clone, Copy, Debug)]
-pub struct CCompositorRecomposeArea {
-    start_row: Integer,
-    end_row: Integer,
-    start_column: Integer,
-    end_column: Integer,
 }
 
 /// Result of composing one foreground segment over its background.
@@ -94,32 +79,12 @@ impl SegmentComposition {
     }
 }
 
-/// C representation of settings shared by compositor-line requests.
-#[repr(C)]
-#[derive(Clone, Copy, Debug)]
-pub struct CCompositorLineSettings {
-    message_separator_attribute: VimSAttrT,
-    screen_columns: libc::c_int,
-    abort_on_invalid: bool,
-}
-
-/// C callbacks and settings required to recompose one screen area.
-#[repr(C)]
-#[derive(Clone, Copy, Debug)]
-pub struct CCompositorAreaCallbacks {
-    debug: CompositorDebugCallback,
-    line_settings: CCompositorLineSettings,
-    recomposed_debug_highlight: libc::c_int,
-}
-
 /// C representation of one message-grid position update.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct CCompositorMessagePositionRequest {
     row: Integer,
     separator_character: VimSCharT,
-    screen_rows: libc::c_int,
-    screen_columns: libc::c_int,
     scrolled: bool,
     has_separator_character: bool,
 }
@@ -137,19 +102,6 @@ pub struct CCompositorRawLineRequest {
     flags: libc::c_int,
 }
 
-/// C callbacks and debug inputs required to execute one raw-line request.
-#[repr(C)]
-#[derive(Clone, Copy, Debug)]
-pub struct CCompositorRawLineCallbacks {
-    debug: CompositorDebugCallback,
-    line_settings: CCompositorLineSettings,
-    log_invalid_row: CompositorRawLineDiagnosticCallback,
-    log_clipped_columns: CompositorRawLineDiagnosticCallback,
-    normal_debug_highlight: libc::c_int,
-    clear_debug_highlight: libc::c_int,
-    composed_debug_highlight: libc::c_int,
-}
-
 /// C representation of one complete grid-scroll request.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -161,17 +113,6 @@ pub struct CCompositorScrollRequest {
     right: Integer,
     row_delta: Integer,
     column_delta: Integer,
-}
-
-/// C callbacks and debug inputs required to execute one grid scroll.
-#[repr(C)]
-#[derive(Clone, Copy, Debug)]
-pub struct CCompositorScrollCallbacks {
-    debug: CompositorDebugCallback,
-    line_settings: CCompositorLineSettings,
-    delay: CompositorDelayCallback,
-    recomposed_debug_highlight: libc::c_int,
-    delay_after_forward: bool,
 }
 
 /// One cell in composed-screen coordinates.
@@ -303,30 +244,6 @@ impl CompositorRecomposeArea {
             rows: self.rows.start..self.rows.end.min(grid.rows),
             columns: self.columns.start..self.columns.end.min(grid.cols),
         })
-    }
-}
-
-impl TryFrom<CCompositorRecomposeArea> for CompositorRecomposeArea {
-    type Error = ();
-
-    fn try_from(area: CCompositorRecomposeArea) -> Result<Self, Self::Error> {
-        Ok(Self {
-            rows: i32::try_from(area.start_row).map_err(|_| ())?
-                ..i32::try_from(area.end_row).map_err(|_| ())?,
-            columns: i32::try_from(area.start_column).map_err(|_| ())?
-                ..i32::try_from(area.end_column).map_err(|_| ())?,
-        })
-    }
-}
-
-impl From<CompositorRecomposeArea> for CCompositorRecomposeArea {
-    fn from(area: CompositorRecomposeArea) -> Self {
-        Self {
-            start_row: Integer::from(area.rows.start),
-            end_row: Integer::from(area.rows.end),
-            start_column: Integer::from(area.columns.start),
-            end_column: Integer::from(area.columns.end),
-        }
     }
 }
 
@@ -522,24 +439,20 @@ struct CompositorMessagePositionRequest {
     scrolled: bool,
 }
 
-impl TryFrom<CCompositorMessagePositionRequest> for CompositorMessagePositionRequest {
-    type Error = ();
-
-    fn try_from(request: CCompositorMessagePositionRequest) -> Result<Self, Self::Error> {
+impl CompositorMessagePositionRequest {
+    /// Converts one C request using dimensions captured by the Rust boundary.
+    fn try_from_ffi(
+        request: CCompositorMessagePositionRequest,
+        screen_size: CompositorSize,
+    ) -> Result<Self, ()> {
         let row = i32::try_from(request.row).map_err(|_| ())?;
-        if request.screen_rows < 0 || request.screen_columns < 0 {
-            return Err(());
-        }
 
         Ok(Self {
             row,
             separator_character: request
                 .has_separator_character
                 .then_some(request.separator_character),
-            screen_size: CompositorSize {
-                height: request.screen_rows,
-                width: request.screen_columns,
-            },
+            screen_size,
             scrolled: request.scrolled,
         })
     }
@@ -876,6 +789,12 @@ enum CompositorRawLineAction {
     DiscardColumns,
     Recompose,
     Forward,
+}
+
+/// Diagnostic emitted after validating or clipping a raw-line request.
+enum RawLineDiagnostic {
+    InvalidRow(i32),
+    ClippedColumns(i32),
 }
 
 /// Translated and clipped state for one complete raw-line operation.
@@ -2176,6 +2095,26 @@ struct MessageSeparator<'grid> {
     attribute: VimSAttrT,
 }
 
+/// Highlight groups used to visualize compositor operations.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CompositorDebugHighlights {
+    normal: i32,
+    clear: i32,
+    composed: i32,
+    recomposed: i32,
+}
+
+impl CompositorDebugHighlights {
+    const fn empty() -> Self {
+        Self {
+            normal: 0,
+            clear: 0,
+            composed: 0,
+            recomposed: 0,
+        }
+    }
+}
+
 /// Validated settings shared by compositor-line requests.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct CompositorLineSettings {
@@ -2184,16 +2123,128 @@ struct CompositorLineSettings {
     abort_on_invalid: bool,
 }
 
-impl TryFrom<CCompositorLineSettings> for CompositorLineSettings {
-    type Error = ();
+/// Owned runtime values used while processing one compositor event.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CompositorRuntime {
+    screen_size: CompositorSize,
+    line_settings: CompositorLineSettings,
+    debug_highlights: CompositorDebugHighlights,
+    debug_enabled: bool,
+    write_delay_ms: u64,
+}
 
-    fn try_from(settings: CCompositorLineSettings) -> Result<Self, Self::Error> {
-        Ok(Self {
-            message_separator_attribute: settings.message_separator_attribute,
-            screen_columns: usize::try_from(settings.screen_columns).map_err(|_| ())?,
-            abort_on_invalid: settings.abort_on_invalid,
+impl CompositorRuntime {
+    /// Validates dynamic values before they enter safe compositor logic.
+    fn try_new(
+        screen_rows: i32,
+        screen_columns: i32,
+        message_separator_attribute: VimSAttrT,
+        redraw_debug_flags: u32,
+        write_delay: i64,
+        debug_highlights: CompositorDebugHighlights,
+    ) -> Option<Self> {
+        let screen_columns_usize = usize::try_from(screen_columns).ok()?;
+        (screen_rows >= 0).then_some(Self {
+            screen_size: CompositorSize {
+                height: screen_rows,
+                width: screen_columns,
+            },
+            line_settings: CompositorLineSettings {
+                message_separator_attribute,
+                screen_columns: screen_columns_usize,
+                abort_on_invalid: redraw_debug_flags & RdbFlags::Invalid as u32 != 0,
+            },
+            debug_highlights,
+            debug_enabled: redraw_debug_flags & RdbFlags::Compositor as u32 != 0,
+            write_delay_ms: write_delay.unsigned_abs(),
         })
     }
+
+    /// Visualizes one compositor operation when redraw debugging is enabled.
+    fn visualize(self, requested_area: &CompositorRecomposeArea, highlight_id: i32, delay: bool) {
+        if !self.debug_enabled || requested_area.columns.start >= requested_area.columns.end {
+            return;
+        }
+        let Some(area) = clip_recompose_area_to_default_grid(requested_area.clone()) else {
+            return;
+        };
+
+        // SAFETY: The highlight ID was returned by `syn_check_group`, and this
+        // call occurs on Neovim's main thread without holding grid ownership.
+        let attribute = unsafe { syn_id2attr(highlight_id) };
+        if delay {
+            self.delay(area.rows.end - area.rows.start);
+        }
+        for row in area.rows.clone() {
+            assert!(emit_compositor_debug_line(
+                row,
+                area.columns.clone(),
+                attribute,
+            ));
+        }
+        if delay {
+            self.delay(area.rows.end - area.rows.start);
+        }
+    }
+
+    /// Flushes composed output and applies the configured per-operation delay.
+    fn delay(self, lines: i32) {
+        let factor = lines.clamp(1, 5) as u64;
+        // SAFETY: Both functions accept scalar values and are called on
+        // Neovim's main thread without holding any grid guard.
+        unsafe {
+            ui_call_flush();
+            os_sleep(factor.wrapping_mul(self.write_delay_ms));
+        }
+    }
+}
+
+/// Captures dynamic C-owned settings as validated native Rust values.
+fn compositor_runtime_snapshot() -> Option<CompositorRuntime> {
+    // SAFETY: Compositor events run on Neovim's main thread. The accessor
+    // returns the current dynamic MsgSeparator attribute by value.
+    let (screen_rows, screen_columns, message_separator_attribute, flags, write_delay) = unsafe {
+        (
+            globals::Rows,
+            globals::Columns,
+            ui_get_message_separator_attr(),
+            rdb_flags,
+            p_wd,
+        )
+    };
+
+    CompositorRuntime::try_new(
+        screen_rows,
+        screen_columns,
+        message_separator_attribute,
+        flags,
+        write_delay,
+        *lock_compositor_debug_highlights(),
+    )
+}
+
+/// Resolves one redraw-debug highlight group through Neovim's syntax API.
+fn compositor_debug_highlight(name: &[u8]) -> i32 {
+    // SAFETY: The byte slice supplies a readable pointer for exactly `len`
+    // bytes, and `syn_check_group` does not require a trailing NUL.
+    unsafe { syn_check_group(name.as_ptr().cast(), name.len()) }
+}
+
+/// Emits one formatted raw-line diagnostic through Neovim's debug logger.
+fn log_raw_line_diagnostic(diagnostic: RawLineDiagnostic, grid_handle: i32) {
+    let message = match diagnostic {
+        RawLineDiagnostic::InvalidRow(row) => {
+            format!("compositor: invalid row {row} on grid {grid_handle}")
+        }
+        RawLineDiagnostic::ClippedColumns(requested_clear_column) => format!(
+            "compositor: invalid last column {requested_clear_column} on grid {grid_handle}"
+        ),
+    };
+    let message = CString::new(message).expect("formatted compositor diagnostic contains no NUL");
+
+    // SAFETY: `CString` supplies a non-null, NUL-terminated string that
+    // remains alive for the synchronous logging call.
+    unsafe { log_debug_message(message.as_ptr()) };
 }
 
 /// Validated inputs for composing one screen area.
@@ -2609,6 +2660,28 @@ fn lock_compositor_buffer() -> MutexGuard<'static, CompositorBuffer> {
         .expect("compositor buffer is already borrowed")
 }
 
+static COMPOSITOR_DEBUG_HIGHLIGHTS: Mutex<CompositorDebugHighlights> =
+    Mutex::new(CompositorDebugHighlights::empty());
+
+/// Acquires exclusive access to compositor debug-highlight identities.
+fn lock_compositor_debug_highlights() -> MutexGuard<'static, CompositorDebugHighlights> {
+    COMPOSITOR_DEBUG_HIGHLIGHTS
+        .try_lock()
+        .expect("compositor debug highlights are already borrowed")
+}
+
+/// Initializes the compositor debug-highlight identities in Rust-owned state.
+#[unsafe(no_mangle)]
+pub extern "C" fn ui_comp_initialize_debug_highlights() {
+    let highlights = CompositorDebugHighlights {
+        normal: compositor_debug_highlight(b"RedrawDebugNormal"),
+        clear: compositor_debug_highlight(b"RedrawDebugClear"),
+        composed: compositor_debug_highlight(b"RedrawDebugComposed"),
+        recomposed: compositor_debug_highlight(b"RedrawDebugRecompose"),
+    };
+    *lock_compositor_debug_highlights() = highlights;
+}
+
 static COMPOSITOR_DRAW_STATE: Mutex<CompositorDrawState> = Mutex::new(CompositorDrawState::new());
 
 /// Acquires exclusive access to the process-global compositor draw state.
@@ -2686,7 +2759,7 @@ pub extern "C" fn ui_comp_hide_message_separator() {
 /// Updates message-grid state and executes its scrolling and recomposition.
 ///
 /// Both explicit grids and all registered compositor layers are restored
-/// before this function emits a scroll event, invokes the debug callback, or
+/// before this function emits a scroll event, visualizes an operation, or
 /// recomposes an area.
 ///
 /// # Safety
@@ -2697,20 +2770,20 @@ pub extern "C" fn ui_comp_hide_message_separator() {
 ///
 /// `default_grid` must point to a second valid, exclusively accessible
 /// `CScreenGrid` whose buffers satisfy the same requirements.
-///
-/// `callbacks.debug` must remain valid for this call. It may reenter the
-/// compositor because both grid guards are dropped before it is invoked.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ui_comp_update_message_position(
     message_grid: *mut CScreenGrid,
     default_grid: *mut CScreenGrid,
     request: CCompositorMessagePositionRequest,
-    callbacks: CCompositorAreaCallbacks,
 ) -> bool {
     if message_grid.is_null() || default_grid.is_null() || message_grid == default_grid {
         return false;
     }
-    let Ok(request) = CompositorMessagePositionRequest::try_from(request) else {
+    let Some(runtime) = compositor_runtime_snapshot() else {
+        return false;
+    };
+    let Ok(request) = CompositorMessagePositionRequest::try_from_ffi(request, runtime.screen_size)
+    else {
         return false;
     };
     let should_draw = lock_compositor_draw_state().should_draw();
@@ -2747,62 +2820,30 @@ pub unsafe extern "C" fn ui_comp_update_message_position(
         }
     }
     if let Some(area) = plan.recompose {
-        // SAFETY: The caller satisfies the helper's message-grid and callback
-        // requirements. The earlier guards were dropped above.
-        if !unsafe { recompose_area_from_registered_grids(message_grid, area, callbacks) } {
+        // SAFETY: The caller satisfies the helper's message-grid requirements.
+        // The earlier guards were dropped above.
+        if !unsafe { recompose_area_from_registered_grids(message_grid, area, runtime) } {
             return false;
         }
     }
     true
 }
 
-/// Clamps a recomposition area's exclusive ends to a registered grid.
+/// Clamps a recomposition area's exclusive ends to the default grid.
 ///
-/// The returned area contains only owned scalar data. Grid ownership is
-/// restored before this function returns.
-fn clip_recompose_area_to_registered_grid(
-    grid_id: GridId,
+/// The returned area contains only owned Rust values. Grid ownership is
+/// restored before returning.
+fn clip_recompose_area_to_default_grid(
     area: CompositorRecomposeArea,
 ) -> Option<CompositorRecomposeArea> {
     let layer_guards = CompositorLayerGuards::try_take_registered()?;
-    area.with_ends_clamped_to_grid(layer_guards.grid_by_id(grid_id)?)
+    area.with_ends_clamped_to_grid(layer_guards.grid(0)?)
 }
 
 /// Returns the screen area occupied by one registered grid.
 fn recompose_area_for_registered_grid(grid_id: GridId) -> Option<CompositorRecomposeArea> {
     let layer_guards = CompositorLayerGuards::try_take_registered()?;
     CompositorRecomposeArea::try_from_grid(layer_guards.grid_by_id(grid_id)?)
-}
-
-/// Clamps a recomposition area to the grid identified by one C handle.
-///
-/// # Safety
-///
-/// `output` must point to writable, properly aligned storage for one
-/// `CCompositorRecomposeArea`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn ui_comp_clip_recompose_area(
-    grid_handle: Integer,
-    area: CCompositorRecomposeArea,
-    output: *mut CCompositorRecomposeArea,
-) -> bool {
-    if output.is_null() {
-        return false;
-    }
-    let Ok(grid_handle) = i32::try_from(grid_handle) else {
-        return false;
-    };
-    let Ok(area) = CompositorRecomposeArea::try_from(area) else {
-        return false;
-    };
-
-    let Some(area) = clip_recompose_area_to_registered_grid(GridId::new(grid_handle), area) else {
-        return false;
-    };
-
-    // SAFETY: The caller provides valid, non-overlapping output storage.
-    unsafe { output.write(area.into()) };
-    true
 }
 
 /// Recomposes the screen area occupied by one grid when drawing is enabled.
@@ -2812,14 +2853,11 @@ pub unsafe extern "C" fn ui_comp_clip_recompose_area(
 /// # Safety
 ///
 /// `message_grid` must satisfy the message-grid requirements of
-/// `compose_area_from_registered_grids`. `callbacks.debug` must remain valid
-/// for this call and may reenter the compositor because all grid guards are
-/// dropped before it is invoked.
+/// `compose_area_from_registered_grids`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ui_comp_recompose_grid(
     message_grid: *mut CScreenGrid,
     grid_handle: Integer,
-    callbacks: CCompositorAreaCallbacks,
 ) -> bool {
     let Ok(grid_handle) = i32::try_from(grid_handle) else {
         return false;
@@ -2827,14 +2865,17 @@ pub unsafe extern "C" fn ui_comp_recompose_grid(
     if !lock_compositor_draw_state().should_draw() {
         return true;
     }
+    let Some(runtime) = compositor_runtime_snapshot() else {
+        return false;
+    };
 
     let Some(area) = recompose_area_for_registered_grid(GridId::new(grid_handle)) else {
         return false;
     };
 
-    // SAFETY: The caller satisfies the helper's message-grid and callback
-    // requirements. The registered grid guard was dropped above.
-    unsafe { recompose_area_from_registered_grids(message_grid, area, callbacks) }
+    // SAFETY: The caller satisfies the helper's message-grid requirements.
+    // The registered grid guard was dropped above.
+    unsafe { recompose_area_from_registered_grids(message_grid, area, runtime) }
 }
 
 /// Places a new or existing grid among the registered compositor layers.
@@ -2943,9 +2984,8 @@ fn place_grid_in_registered_layers(
 /// `current_window_grid_handle` may be zero or identify a registered grid.
 ///
 /// `message_grid` must satisfy `recompose_area_from_registered_grids`
-/// requirements. `callbacks.debug` must remain valid for this call and may
-/// reenter the compositor because every grid guard is dropped before it is
-/// invoked.
+/// requirements. Every grid guard is dropped before visualization or
+/// recomposition.
 ///
 /// `moved` must point to writable, properly aligned storage for one `bool` and
 /// must not overlap any grid.
@@ -2955,13 +2995,15 @@ pub unsafe extern "C" fn ui_comp_process_grid_placement(
     current_window_grid_handle: Integer,
     request: CCompositorGridPlacementRequest,
     message_grid: *mut CScreenGrid,
-    callbacks: CCompositorAreaCallbacks,
     moved: *mut bool,
 ) -> bool {
     let (Some(grid), Some(moved)) = (NonNull::new(grid), NonNull::new(moved)) else {
         return false;
     };
     let Ok(request) = CompositorGridPlacementRequest::try_from(request) else {
+        return false;
+    };
+    let Some(runtime) = compositor_runtime_snapshot() else {
         return false;
     };
     let current_window_grid_id = match i32::try_from(current_window_grid_handle) {
@@ -2980,9 +3022,9 @@ pub unsafe extern "C" fn ui_comp_process_grid_placement(
     let current_window_layer =
         current_window_grid_id.and_then(|grid_id| layer_guards.registry.index_of(grid_id));
     let recompose_area = |area| {
-        // SAFETY: Every grid guard is dropped before this closure, and the
-        // outer caller satisfies the recomposition requirements.
-        unsafe { recompose_area_from_registered_grids(message_grid, area, callbacks) }
+        // SAFETY: Every grid guard is dropped before this closure, and the outer
+        // caller satisfies the recomposition requirements.
+        unsafe { recompose_area_from_registered_grids(message_grid, area, runtime) }
     };
     let result = place_grid_in_registered_layers(
         layer_guards,
@@ -3040,20 +3082,19 @@ fn apply_cursor_update_to_registered_grids(
 /// Applies one cursor update to the compositor layer stack.
 ///
 /// Any required layer movement is completed before recomposition and cursor
-/// output are emitted. Every grid is restored before debug or UI callbacks.
+/// output are emitted. Every grid is restored before visualization or UI
+/// callbacks.
 ///
 /// # Safety
 ///
 /// `message_grid` must satisfy the message-grid requirements of
-/// `recompose_area_from_registered_grids`. `callbacks.debug` must remain valid
-/// for this call.
+/// `recompose_area_from_registered_grids`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ui_comp_process_grid_cursor_goto(
     message_grid: *mut CScreenGrid,
     grid_handle: Integer,
     row: Integer,
     column: Integer,
-    callbacks: CCompositorAreaCallbacks,
 ) -> bool {
     let (Ok(grid_handle), Ok(row), Ok(column)) = (
         i32::try_from(grid_handle),
@@ -3078,10 +3119,13 @@ pub unsafe extern "C" fn ui_comp_process_grid_cursor_goto(
         return true;
     };
 
+    let Some(runtime) = compositor_runtime_snapshot() else {
+        return false;
+    };
     for area in recompose_areas {
-        // SAFETY: The caller satisfies the helper's message-grid and callback
-        // requirements. The cursor-update guards were dropped.
-        if !unsafe { recompose_area_from_registered_grids(message_grid, area, callbacks) } {
+        // SAFETY: The caller satisfies the helper's message-grid requirements.
+        // The cursor-update guards were dropped.
+        if !unsafe { recompose_area_from_registered_grids(message_grid, area, runtime) } {
             return false;
         }
     }
@@ -3183,13 +3227,11 @@ fn remove_registered_layer(
 /// # Safety
 ///
 /// `message_grid` must satisfy `recompose_area_from_registered_grids`
-/// requirements when recomposition is needed. `callbacks.debug` must remain
-/// valid for this call.
+/// requirements when recomposition is needed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ui_comp_process_grid_removal(
     message_grid: *mut CScreenGrid,
     grid_handle: Integer,
-    callbacks: CCompositorAreaCallbacks,
 ) -> bool {
     let Ok(grid_handle) = i32::try_from(grid_handle) else {
         return false;
@@ -3208,9 +3250,12 @@ pub unsafe extern "C" fn ui_comp_process_grid_removal(
     };
 
     if let Some(area) = removal.recompose_area {
-        // SAFETY: The reduced registry has been published and the caller
-        // satisfies the helper's remaining requirements.
-        if !unsafe { recompose_area_from_registered_grids(message_grid, area, callbacks) } {
+        let Some(runtime) = compositor_runtime_snapshot() else {
+            return false;
+        };
+        // SAFETY: The reduced registry has been published, and the caller
+        // satisfies the helper's message-grid requirements.
+        if !unsafe { recompose_area_from_registered_grids(message_grid, area, runtime) } {
             return false;
         }
     }
@@ -3463,10 +3508,7 @@ unsafe fn compose_area_from_registered_grids(
     request: CompositorAreaRequest,
 ) -> bool {
     let CompositorAreaRequest { area, settings } = request;
-    let Some(area) = (|| {
-        let layer_guards = CompositorLayerGuards::try_take_registered()?;
-        area.with_ends_clamped_to_grid(layer_guards.grid(0)?)
-    })() else {
+    let Some(area) = clip_recompose_area_to_default_grid(area) else {
         return false;
     };
     if area.columns.end <= area.columns.start {
@@ -3494,7 +3536,7 @@ unsafe fn compose_area_from_registered_grids(
     true
 }
 
-/// Visualizes, composes, and submits one screen area from registered grids.
+/// Visualizes and composes one screen area from registered grids.
 ///
 /// # Safety
 ///
@@ -3502,55 +3544,41 @@ unsafe fn compose_area_from_registered_grids(
 /// either identify one registered grid or identify another exclusively
 /// accessible grid satisfying the `ScreenGrid` ownership and layout
 /// requirements.
-///
-/// `callbacks.debug` must remain valid for this call. It may reenter the
-/// compositor because no grid guard is held while it runs.
 unsafe fn recompose_area_from_registered_grids(
     message_grid: *mut CScreenGrid,
     area: CompositorRecomposeArea,
-    callbacks: CCompositorAreaCallbacks,
+    runtime: CompositorRuntime,
 ) -> bool {
-    // SAFETY: The caller supplied a valid callback, and no grid guard is held.
-    unsafe {
-        (callbacks.debug)(
-            Integer::from(area.rows.start),
-            Integer::from(area.rows.end),
-            Integer::from(area.columns.start),
-            Integer::from(area.columns.end),
-            callbacks.recomposed_debug_highlight,
-            true,
-        );
-    }
-    let Ok(settings) = CompositorLineSettings::try_from(callbacks.line_settings) else {
-        return false;
-    };
+    runtime.visualize(&area, runtime.debug_highlights.recomposed, true);
 
     // SAFETY: The caller satisfies the helper's message-grid requirements.
-    // The debug callback has completed.
+    // Debug visualization completed without retaining any grid guard.
     unsafe {
-        compose_area_from_registered_grids(message_grid, CompositorAreaRequest { area, settings })
+        compose_area_from_registered_grids(
+            message_grid,
+            CompositorAreaRequest {
+                area,
+                settings: runtime.line_settings,
+            },
+        )
     }
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn ui_comp_emit_clear_line(
-    row: Integer,
-    start_col: Integer,
-    end_col: Integer,
-    attribute: VimSAttrT,
-) -> bool {
-    let (Ok(start_col), Ok(end_col)) = (usize::try_from(start_col), usize::try_from(end_col))
+/// Emits one clear raw-line event used for compositor visualization.
+fn emit_compositor_debug_line(row: i32, columns: Range<i32>, attribute: VimSAttrT) -> bool {
+    let (Ok(start_column), Ok(end_column)) =
+        (usize::try_from(columns.start), usize::try_from(columns.end))
     else {
         return false;
     };
 
     let compositor = lock_compositor_buffer();
-    if start_col > end_col || end_col > compositor.characters.len() {
+    if start_column > end_column || end_column > compositor.characters.len() {
         return false;
     }
 
-    let characters = unsafe { compositor.characters.as_ptr().add(start_col) };
-    let attributes = unsafe { compositor.attributes.as_ptr().add(start_col) };
+    let characters = unsafe { compositor.characters.as_ptr().add(start_column) };
+    let attributes = unsafe { compositor.attributes.as_ptr().add(start_column) };
 
     // SAFETY: The raw-line event contains no character payload because its
     // start and end columns are equal. The pointers nevertheless remain valid
@@ -3558,11 +3586,11 @@ pub extern "C" fn ui_comp_emit_clear_line(
     unsafe {
         ui_composed_call_raw_line(
             1,
-            row,
-            start_col as Integer,
-            start_col as Integer,
-            end_col as Integer,
-            attribute as Integer,
+            Integer::from(row),
+            Integer::from(columns.start),
+            Integer::from(columns.start),
+            Integer::from(columns.end),
+            Integer::from(attribute),
             0,
             characters,
             attributes,
@@ -3579,10 +3607,6 @@ pub extern "C" fn ui_comp_emit_clear_line(
 /// `attributes` must point to readable arrays containing at least that many
 /// initialized elements.
 ///
-/// Every function pointer in `callbacks` must remain valid for this call.
-/// Callback implementations may reenter the compositor because all grid
-/// guards are dropped before any callback is invoked.
-///
 /// A disabled compositor or a grid handle absent from the registered layers
 /// produces a successful no-op. `message_grid` is used only for pointer
 /// identity and may be null.
@@ -3592,13 +3616,18 @@ pub unsafe extern "C" fn ui_comp_process_raw_line(
     request: CCompositorRawLineRequest,
     characters: *const VimSCharT,
     attributes: *const VimSAttrT,
-    callbacks: CCompositorRawLineCallbacks,
 ) -> bool {
     if !lock_compositor_draw_state().should_draw() {
         return true;
     }
+    let Some(runtime) = compositor_runtime_snapshot() else {
+        return false;
+    };
 
-    let Ok(grid_handle) = i32::try_from(request.grid_handle) else {
+    let (Ok(grid_handle), Ok(clear_attribute)) = (
+        i32::try_from(request.grid_handle),
+        i32::try_from(request.clear_attr),
+    ) else {
         return false;
     };
     let grid_id = GridId::new(grid_handle);
@@ -3630,46 +3659,28 @@ pub unsafe extern "C" fn ui_comp_process_raw_line(
         plan
     };
 
-    let row = Integer::from(plan.row);
-    let start_column = Integer::from(plan.columns.start);
-    let end_column = Integer::from(plan.columns.end);
-    let clear_column = Integer::from(plan.clear_column);
-
     if plan.clear_column != plan.requested_clear_column {
-        // SAFETY: The caller guarantees that every callback remains valid.
-        unsafe {
-            (callbacks.log_clipped_columns)(
-                Integer::from(plan.requested_clear_column),
-                request.grid_handle,
-            );
-        }
+        log_raw_line_diagnostic(
+            RawLineDiagnostic::ClippedColumns(plan.requested_clear_column),
+            grid_handle,
+        );
     }
 
     match plan.action {
         CompositorRawLineAction::DiscardRow => {
-            // SAFETY: The caller guarantees that every callback remains valid.
-            unsafe {
-                (callbacks.log_invalid_row)(row, request.grid_handle);
-            }
+            log_raw_line_diagnostic(RawLineDiagnostic::InvalidRow(plan.row), grid_handle);
             true
         }
         CompositorRawLineAction::DiscardColumns => true,
         CompositorRawLineAction::Recompose => {
-            // SAFETY: Grid ownership was restored before invoking the debug
-            // callback, which the caller guarantees remains valid.
-            unsafe {
-                (callbacks.debug)(
-                    row,
-                    row + 1,
-                    start_column,
-                    clear_column,
-                    callbacks.composed_debug_highlight,
-                    true,
-                );
-            }
-            let Ok(settings) = CompositorLineSettings::try_from(callbacks.line_settings) else {
-                return false;
-            };
+            runtime.visualize(
+                &CompositorRecomposeArea {
+                    rows: plan.row..plan.row + 1,
+                    columns: plan.columns.start..plan.clear_column,
+                },
+                runtime.debug_highlights.composed,
+                true,
+            );
             // SAFETY: The caller satisfies the documented message-grid
             // requirements. The previous guards were dropped before this
             // helper takes ownership again.
@@ -3680,7 +3691,7 @@ pub unsafe extern "C" fn ui_comp_process_raw_line(
                         row: plan.row,
                         columns: plan.columns.start..plan.clear_column,
                         flags: plan.flags,
-                        settings,
+                        settings: runtime.line_settings,
                     },
                 )
             }
@@ -3711,26 +3722,22 @@ pub unsafe extern "C" fn ui_comp_process_raw_line(
                 }
             };
 
-            // SAFETY: Grid ownership was restored before invoking the debug
-            // callback, which the caller guarantees remains valid.
-            unsafe {
-                (callbacks.debug)(
-                    row,
-                    row + 1,
-                    start_column,
-                    end_column,
-                    callbacks.normal_debug_highlight,
-                    end_column >= clear_column,
-                );
-                (callbacks.debug)(
-                    row,
-                    row + 1,
-                    end_column,
-                    clear_column,
-                    callbacks.clear_debug_highlight,
-                    true,
-                );
-            }
+            runtime.visualize(
+                &CompositorRecomposeArea {
+                    rows: plan.row..plan.row + 1,
+                    columns: plan.columns.clone(),
+                },
+                runtime.debug_highlights.normal,
+                plan.columns.end >= plan.clear_column,
+            );
+            runtime.visualize(
+                &CompositorRecomposeArea {
+                    rows: plan.row..plan.row + 1,
+                    columns: plan.columns.end..plan.clear_column,
+                },
+                runtime.debug_highlights.clear,
+                true,
+            );
             debug_assert!(attributes.iter().all(|attribute| *attribute >= 0));
 
             // SAFETY: The validated slices have equal lengths and remain
@@ -3738,11 +3745,11 @@ pub unsafe extern "C" fn ui_comp_process_raw_line(
             unsafe {
                 ui_composed_call_raw_line(
                     1,
-                    row,
-                    start_column,
-                    end_column,
-                    clear_column,
-                    request.clear_attr,
+                    Integer::from(plan.row),
+                    Integer::from(plan.columns.start),
+                    Integer::from(plan.columns.end),
+                    Integer::from(plan.clear_column),
+                    Integer::from(clear_attribute),
                     plan.flags,
                     characters.as_ptr(),
                     attributes.as_ptr(),
@@ -3757,10 +3764,6 @@ pub unsafe extern "C" fn ui_comp_process_raw_line(
 ///
 /// # Safety
 ///
-/// Every function pointer in `callbacks` must remain valid for this call.
-/// Callback implementations may reenter the compositor because all grid
-/// guards are dropped before any callback is invoked.
-///
 /// A disabled compositor or a grid handle absent from the registered layers
 /// produces a successful no-op. `message_grid` is used only for pointer
 /// identity and may be null.
@@ -3768,11 +3771,13 @@ pub unsafe extern "C" fn ui_comp_process_raw_line(
 pub unsafe extern "C" fn ui_comp_process_scroll(
     message_grid: *mut CScreenGrid,
     request: CCompositorScrollRequest,
-    callbacks: CCompositorScrollCallbacks,
 ) -> bool {
     if !lock_compositor_draw_state().should_draw() {
         return true;
     }
+    let Some(runtime) = compositor_runtime_snapshot() else {
+        return false;
+    };
 
     let Ok(grid_handle) = i32::try_from(request.grid_handle) else {
         return false;
@@ -3826,32 +3831,20 @@ pub unsafe extern "C" fn ui_comp_process_scroll(
                     Integer::from(row_delta),
                     Integer::from(column_delta),
                 );
-                if callbacks.delay_after_forward {
-                    (callbacks.delay)(2);
-                }
+            }
+            if runtime.debug_enabled {
+                runtime.delay(2);
             }
         }
         CompositorScrollOperation::Recompose { region, rows } => {
-            let top = Integer::from(region.rows.start);
-            let bottom = Integer::from(region.rows.end);
-            let left = Integer::from(region.columns.start);
-            let right = Integer::from(region.columns.end);
-
-            // SAFETY: Grid ownership was restored before invoking the debug
-            // callback, which the caller guarantees remains valid.
-            unsafe {
-                (callbacks.debug)(
-                    top,
-                    bottom,
-                    left,
-                    right,
-                    callbacks.recomposed_debug_highlight,
-                    true,
-                );
-            }
-            let Ok(settings) = CompositorLineSettings::try_from(callbacks.line_settings) else {
-                return false;
-            };
+            runtime.visualize(
+                &CompositorRecomposeArea {
+                    rows: region.rows.clone(),
+                    columns: region.columns.clone(),
+                },
+                runtime.debug_highlights.recomposed,
+                true,
+            );
             for row in rows {
                 // SAFETY: The caller satisfies the documented message-grid
                 // requirements. The planning guards were dropped before this
@@ -3863,7 +3856,7 @@ pub unsafe extern "C" fn ui_comp_process_scroll(
                             row,
                             columns: region.columns.clone(),
                             flags: 0,
-                            settings,
+                            settings: runtime.line_settings,
                         },
                     )
                 } {
@@ -4020,44 +4013,34 @@ mod tests {
     }
 
     #[test]
-    fn recompose_area_converts_ffi_coordinates() {
-        assert_eq!(
-            CompositorRecomposeArea::try_from(CCompositorRecomposeArea {
-                start_row: 3,
-                end_row: 5,
-                start_column: 2,
-                end_column: 7,
-            }),
-            Ok(CompositorRecomposeArea {
-                rows: 3..5,
-                columns: 2..7,
-            })
-        );
-    }
-
-    #[test]
-    fn line_settings_convert_and_validate_ffi_values() {
-        let settings = CCompositorLineSettings {
-            message_separator_attribute: 9,
-            screen_columns: 10,
-            abort_on_invalid: true,
+    fn runtime_validates_and_owns_dynamic_inputs() {
+        let debug_highlights = CompositorDebugHighlights {
+            normal: 1,
+            clear: 2,
+            composed: 3,
+            recomposed: 4,
         };
+        let flags = RdbFlags::Compositor as u32 | RdbFlags::Invalid as u32;
 
         assert_eq!(
-            CompositorLineSettings::try_from(settings),
-            Ok(CompositorLineSettings {
-                message_separator_attribute: 9,
-                screen_columns: 10,
-                abort_on_invalid: true,
+            CompositorRuntime::try_new(20, 10, 9, flags, -7, debug_highlights),
+            Some(CompositorRuntime {
+                screen_size: CompositorSize {
+                    height: 20,
+                    width: 10,
+                },
+                line_settings: CompositorLineSettings {
+                    message_separator_attribute: 9,
+                    screen_columns: 10,
+                    abort_on_invalid: true,
+                },
+                debug_highlights,
+                debug_enabled: true,
+                write_delay_ms: 7,
             })
         );
-        assert!(
-            CompositorLineSettings::try_from(CCompositorLineSettings {
-                screen_columns: -1,
-                ..settings
-            })
-            .is_err()
-        );
+        assert!(CompositorRuntime::try_new(-1, 10, 9, flags, 0, debug_highlights).is_none());
+        assert!(CompositorRuntime::try_new(20, -1, 9, flags, 0, debug_highlights).is_none());
     }
 
     #[test]
@@ -4259,13 +4242,10 @@ mod tests {
                 })
             );
             assert_eq!(
-                clip_recompose_area_to_registered_grid(
-                    grid_id,
-                    CompositorRecomposeArea {
-                        rows: 1..5,
-                        columns: 2..6,
-                    },
-                ),
+                clip_recompose_area_to_default_grid(CompositorRecomposeArea {
+                    rows: 1..5,
+                    columns: 2..6,
+                }),
                 Some(CompositorRecomposeArea {
                     rows: 1..3,
                     columns: 2..4,

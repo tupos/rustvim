@@ -198,6 +198,16 @@ bool logmsg(int log_level, const char *context, const char *func_name, int line_
   return ret;
 }
 
+/// Logs an already formatted debug message from a non-C caller.
+void log_debug_message(const char *message)
+{
+#ifdef NVIM_LOG_DEBUG
+  DLOG("%s", message);
+#else
+  (void)message;
+#endif
+}
+
 void log_uv_handles(void *loop)
 {
   uv_loop_t *l = loop;

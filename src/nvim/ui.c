@@ -117,6 +117,11 @@ static void ui_log(const char *funname)
 
 #include "ui_events_call.generated.h"
 
+sattr_T ui_get_message_separator_attr(void)
+{
+  return (sattr_T)HL_ATTR(HLF_MSGSEP);
+}
+
 void ui_init(void)
 {
   default_grid.handle = 1;
