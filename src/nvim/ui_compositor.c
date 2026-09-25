@@ -10,7 +10,6 @@
 #include <stdlib.h>
 #include <uv.h>
 
-#include "klib/kvec.h"
 #include "nvim/api/private/defs.h"
 #include "nvim/buffer_defs.h"
 #include "nvim/globals.h"
@@ -29,8 +28,6 @@
 
 #include "ui_compositor.c.generated.h"
 
-kvec_t(ScreenGrid *) layers = KV_INITIAL_VALUE;
-
 static int dbghl_normal, dbghl_clear, dbghl_composed, dbghl_recompose;
 
 void ui_comp_init(void)
@@ -38,7 +35,6 @@ void ui_comp_init(void)
   bool initialized = ui_comp_initialize_layer_registry(&default_grid);
   assert(initialized);
   (void)initialized;
-  kv_push(layers, &default_grid);
 }
 
 #ifdef EXITFREE
@@ -47,7 +43,6 @@ void ui_comp_free_all_mem(void)
   bool cleared = ui_comp_clear_layer_registry();
   assert(cleared);
   (void)cleared;
-  kv_destroy(layers);
 
   bool released = ui_comp_release_buffer();
   assert(released);
@@ -112,15 +107,9 @@ bool ui_comp_put_grid(ScreenGrid *grid, int row, int col, int height, int width,
     .on_top = on_top,
   };
 
-  // Reserve and initialize one candidate slot without making it active.
-  // Rust decides whether the grid is already registered and publishes a
-  // larger layer count only when it inserts the candidate.
-  kv_ensure_space(layers, 1);
-  layers.items[layers.size] = grid;
-
   ScreenGrid *current_window_grid = curwin ? &curwin->w_grid_alloc : NULL;
-  bool placed = ui_comp_place_grid_in_layer_stack(
-    layers.items, &layers.size, grid, current_window_grid,
+  bool placed = ui_comp_process_grid_placement(
+    grid, current_window_grid,
     request, &msg_grid, compositor_area_callbacks(),
     &moved);
   assert(placed);
@@ -130,8 +119,8 @@ bool ui_comp_put_grid(ScreenGrid *grid, int row, int col, int height, int width,
 void ui_comp_remove_grid(ScreenGrid *grid)
 {
   assert(grid != &default_grid);
-  bool valid = ui_comp_remove_grid_from_layer_stack(
-    layers.items, &layers.size, &msg_grid, grid,
+  bool valid = ui_comp_process_grid_removal(
+    &msg_grid, grid,
     compositor_area_callbacks());
   assert(valid);
   (void)valid;

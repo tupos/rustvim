@@ -103,8 +103,7 @@ extern bool ui_comp_process_grid_resize(
   Integer grid, Integer width, Integer height);
 extern bool ui_comp_release_buffer(void);
 
-extern bool ui_comp_place_grid_in_layer_stack(
-  ScreenGrid *const *layer_grids, size_t *layer_count,
+extern bool ui_comp_process_grid_placement(
   ScreenGrid *grid, ScreenGrid *current_window_grid,
   CompositorGridPlacementRequest request,
   ScreenGrid *message_grid, CompositorAreaCallbacks callbacks,
@@ -125,8 +124,7 @@ extern bool ui_comp_process_grid_cursor_goto(
 extern bool ui_comp_adjust_grid_layer_order(
   ScreenGrid *grid, bool raise);
 
-extern bool ui_comp_remove_grid_from_layer_stack(
-  ScreenGrid **layer_grids, size_t *layer_count,
+extern bool ui_comp_process_grid_removal(
   ScreenGrid *message_grid, ScreenGrid *grid,
   CompositorAreaCallbacks callbacks);
 
