@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     ops::Range,
     ptr::NonNull,
     slice,
@@ -1255,6 +1256,58 @@ struct CompositorLayerMove {
     target_index: usize,
 }
 
+/// Rust-owned identities and ordering of compositor layers.
+///
+/// C grid pointers are deliberately excluded. During the ownership transition,
+/// `CompositorLayerGuards` maintains the temporary C bindings separately.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CompositorLayerRegistry {
+    layer_ids: Vec<GridId>,
+}
+
+impl CompositorLayerRegistry {
+    /// Creates a nonempty registry containing unique grid identities.
+    fn try_new(layer_ids: Vec<GridId>) -> Option<Self> {
+        if layer_ids.is_empty()
+            || layer_ids
+                .iter()
+                .enumerate()
+                .any(|(index, grid_id)| layer_ids[..index].contains(grid_id))
+        {
+            return None;
+        }
+
+        Some(Self { layer_ids })
+    }
+
+    /// Returns the number of registered compositor layers.
+    fn len(&self) -> usize {
+        self.layer_ids.len()
+    }
+
+    /// Returns the ordered registered identities.
+    fn layer_ids(&self) -> &[GridId] {
+        &self.layer_ids
+    }
+
+    /// Returns one identity by its layer index.
+    fn layer_id(&self, index: usize) -> Option<GridId> {
+        self.layer_ids.get(index).copied()
+    }
+
+    /// Returns the layer index of one registered grid.
+    fn index_of(&self, grid_id: GridId) -> Option<usize> {
+        self.layer_ids
+            .iter()
+            .position(|candidate| *candidate == grid_id)
+    }
+
+    /// Applies one validated layer relocation.
+    fn apply_layer_move(&mut self, movement: CompositorLayerMove) -> Option<()> {
+        movement.apply_to(&mut self.layer_ids)
+    }
+}
+
 /// Result of removing one grid from the active compositor layers.
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum CompositorLayerRemoval {
@@ -1666,19 +1719,21 @@ impl<'grid> CompositorLayerStack<'grid> {
     }
 }
 
-/// One C grid identity paired with its temporary Rust owner.
+/// One temporary C pointer binding paired with its Rust grid owner.
 struct GuardedCompositorLayer {
     cgrid: NonNull<CScreenGrid>,
     grid: ScreenGridGuard,
 }
 
-/// Temporary Rust ownership of the ordered compositor layers received from C.
+/// Temporary Rust ownership of compositor layers received from C.
 ///
-/// Each contained `ScreenGridGuard` restores its grid allocations when this
-/// collection is dropped.
+/// The native registry owns layer identity and ordering. C pointers exist only
+/// in the transitional binding map. Each `ScreenGridGuard` restores its grid
+/// allocations when this collection is dropped.
 #[must_use = "dropping the layer guards restores ownership to the C grids"]
 struct CompositorLayerGuards {
-    layers: Vec<GuardedCompositorLayer>,
+    registry: CompositorLayerRegistry,
+    bindings: HashMap<GridId, GuardedCompositorLayer>,
 }
 
 impl CompositorLayerGuards {
@@ -1710,7 +1765,7 @@ impl CompositorLayerGuards {
             return None;
         }
 
-        let layers = cgrids
+        let guarded_layers = cgrids
             .into_iter()
             .map(|cgrid| {
                 // SAFETY: Null and duplicate pointers were rejected, and the
@@ -1718,39 +1773,56 @@ impl CompositorLayerGuards {
                 let grid = unsafe { ScreenGridGuard::take(cgrid.as_ptr()) };
                 GuardedCompositorLayer { cgrid, grid }
             })
+            .collect::<Vec<_>>();
+        let registry = CompositorLayerRegistry::try_new(
+            guarded_layers.iter().map(|layer| layer.grid.id()).collect(),
+        )?;
+        let bindings = guarded_layers
+            .into_iter()
+            .map(|layer| (layer.grid.id(), layer))
             .collect();
-        Some(Self { layers })
+
+        Some(Self { registry, bindings })
     }
 
     /// Returns the stack index belonging to one C grid identity.
     fn index_of(&self, cgrid: *mut CScreenGrid) -> Option<usize> {
         let cgrid = NonNull::new(cgrid)?;
-        self.layers.iter().position(|layer| layer.cgrid == cgrid)
+        let grid_id = self
+            .bindings
+            .values()
+            .find_map(|layer| (layer.cgrid == cgrid).then_some(layer.grid.id()))?;
+        self.registry.index_of(grid_id)
     }
 
     /// Borrows one owned Rust grid by its layer index.
     fn grid(&self, index: usize) -> Option<&ScreenGrid> {
-        self.layers.get(index).map(|layer| &*layer.grid)
+        let grid_id = self.registry.layer_id(index)?;
+        self.bindings.get(&grid_id).map(|layer| &*layer.grid)
     }
 
     /// Mutably borrows one owned Rust grid by its layer index.
     fn grid_mut(&mut self, index: usize) -> Option<&mut ScreenGrid> {
-        self.layers.get_mut(index).map(|layer| &mut *layer.grid)
+        let grid_id = self.registry.layer_id(index)?;
+        self.bindings
+            .get_mut(&grid_id)
+            .map(|layer| &mut *layer.grid)
     }
 
     /// Borrows all owned grids as a validated compositor layer stack.
     fn layer_stack(&self) -> Option<CompositorLayerStack<'_>> {
-        self.layer_stack_prefix(self.layers.len())
+        self.layer_stack_prefix(self.registry.len())
     }
 
     /// Borrows an initial prefix as a validated compositor layer stack.
     fn layer_stack_prefix(&self, layer_count: usize) -> Option<CompositorLayerStack<'_>> {
         let grids = self
-            .layers
+            .registry
+            .layer_ids()
             .get(..layer_count)?
             .iter()
-            .map(|layer| &*layer.grid)
-            .collect::<Vec<_>>();
+            .map(|grid_id| self.bindings.get(grid_id).map(|layer| &*layer.grid))
+            .collect::<Option<Vec<_>>>()?;
         CompositorLayerStack::try_from_grids(&grids)
     }
 
@@ -1760,7 +1832,7 @@ impl CompositorLayerGuards {
         insertion_index: usize,
         placement: CompositorGridPlacement,
     ) -> Option<()> {
-        let appended_index = self.layers.len().checked_sub(1)?;
+        let appended_index = self.registry.len().checked_sub(1)?;
         if insertion_index == 0 || insertion_index > appended_index {
             return None;
         }
@@ -1775,16 +1847,13 @@ impl CompositorLayerGuards {
 
     /// Applies a planned relocation and synchronizes affected grid metadata.
     fn apply_layer_move(&mut self, movement: CompositorLayerMove) -> Option<()> {
-        movement.apply_to(&mut self.layers)?;
+        self.registry.apply_layer_move(movement)?;
 
         let affected_indices = movement.affected_indices();
         let first_index = *affected_indices.start();
-        for (offset, layer) in self
-            .layers
-            .get_mut(affected_indices)?
-            .iter_mut()
-            .enumerate()
-        {
+        for (offset, index) in affected_indices.enumerate() {
+            let grid_id = self.registry.layer_id(index)?;
+            let layer = self.bindings.get_mut(&grid_id)?;
             layer.grid.set_compositor_index(first_index + offset);
         }
 
@@ -1800,22 +1869,25 @@ impl CompositorLayerGuards {
             return None;
         }
 
-        let last_index = self.layers.len().checked_sub(1)?;
+        let last_index = self.registry.len().checked_sub(1)?;
         self.apply_layer_move(CompositorLayerMove {
             source_index: layer_index,
             target_index: last_index,
         })?;
-        self.layers.last_mut()?.grid.set_compositor_index(0);
+        self.grid_mut(last_index)?.set_compositor_index(0);
         Some(())
     }
 
     /// Writes the current grid identity order into a C pointer slice.
     fn write_cgrid_order(&self, cgrids: &mut [*mut CScreenGrid]) -> bool {
-        if cgrids.len() != self.layers.len() {
+        if cgrids.len() != self.registry.len() {
             return false;
         }
 
-        for (cgrid, layer) in cgrids.iter_mut().zip(&self.layers) {
+        for (cgrid, grid_id) in cgrids.iter_mut().zip(self.registry.layer_ids()) {
+            let Some(layer) = self.bindings.get(grid_id) else {
+                return false;
+            };
             *cgrid = layer.cgrid.as_ptr();
         }
         true
@@ -3667,7 +3739,16 @@ fn is_negative_space(character: VimSCharT) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicI32, Ordering};
+
     use crate::grid::LineBuffer;
+
+    static NEXT_TEST_GRID_ID: AtomicI32 = AtomicI32::new(10_000);
+
+    fn assign_test_grid_id(mut grid: ScreenGrid) -> ScreenGrid {
+        grid.handle = NEXT_TEST_GRID_ID.fetch_add(1, Ordering::Relaxed);
+        grid
+    }
 
     fn grid_with_row(characters: &[VimSCharT], attributes: &[VimSAttrT]) -> ScreenGrid {
         assert_eq!(characters.len(), attributes.len());
@@ -3680,12 +3761,34 @@ mod tests {
         );
         grid.chars.copy_from_slice(characters);
         grid.attrs.copy_from_slice(attributes);
-        grid
+        assign_test_grid_id(grid)
     }
 
     fn grid_with_size(rows: i32, columns: i32) -> ScreenGrid {
         let mut line_buffer = LineBuffer::new(columns as usize);
-        ScreenGrid::new(rows, columns, true, &mut line_buffer)
+        assign_test_grid_id(ScreenGrid::new(rows, columns, true, &mut line_buffer))
+    }
+
+    #[test]
+    fn layer_registry_owns_unique_grid_order() {
+        let first = GridId::new(1);
+        let second = GridId::new(2);
+        let third = GridId::new(3);
+
+        assert!(CompositorLayerRegistry::try_new(Vec::new()).is_none());
+        assert!(CompositorLayerRegistry::try_new(vec![first, first]).is_none());
+
+        let mut registry = CompositorLayerRegistry::try_new(vec![first, second, third]).unwrap();
+        assert_eq!(registry.len(), 3);
+        assert_eq!(registry.index_of(second), Some(1));
+
+        registry
+            .apply_layer_move(CompositorLayerMove {
+                source_index: 2,
+                target_index: 1,
+            })
+            .unwrap();
+        assert_eq!(registry.layer_ids(), &[first, third, second]);
     }
 
     fn compositor_layer(
