@@ -92,6 +92,9 @@ typedef struct {
   bool delay_after_forward;
 } CompositorScrollCallbacks;
 
+extern bool ui_comp_initialize_layer_registry(Integer default_grid_handle);
+extern bool ui_comp_clear_layer_registry(void);
+
 extern void ui_comp_register_composed_ui(void);
 extern bool ui_comp_unregister_composed_ui(void);
 extern bool ui_comp_set_screen_valid(bool valid);
