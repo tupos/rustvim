@@ -371,8 +371,8 @@ impl ScreenGrid {
     }
 
     /// Reports whether this grid is at least `minimum_gap` above another grid.
-    pub(crate) fn is_at_least_z_index_above(&self, lower_grid: &Self, minimum_gap: u32) -> bool {
-        i64::from(self.zindex) - i64::from(lower_grid.zindex) >= i64::from(minimum_gap)
+    pub(crate) fn is_at_least_z_index_above(&self, lower_z_index: i32, minimum_gap: u32) -> bool {
+        i64::from(self.zindex) - i64::from(lower_z_index) >= i64::from(minimum_gap)
     }
 
     /// Returns the size currently requested by the compositor.
@@ -4991,11 +4991,11 @@ mod tests {
         lower_grid.zindex = 50;
         upper_grid.zindex = 99;
 
-        assert!(!upper_grid.is_at_least_z_index_above(&lower_grid, 50));
+        assert!(!upper_grid.is_at_least_z_index_above(lower_grid.z_index(), 50));
 
         upper_grid.zindex = 100;
-        assert!(upper_grid.is_at_least_z_index_above(&lower_grid, 50));
-        assert!(!lower_grid.is_at_least_z_index_above(&upper_grid, 50));
+        assert!(upper_grid.is_at_least_z_index_above(lower_grid.z_index(), 50));
+        assert!(!lower_grid.is_at_least_z_index_above(upper_grid.z_index(), 50));
     }
 
     #[test]

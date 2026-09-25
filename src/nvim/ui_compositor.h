@@ -104,17 +104,17 @@ extern bool ui_comp_process_grid_resize(
 extern bool ui_comp_release_buffer(void);
 
 extern bool ui_comp_process_grid_placement(
-  ScreenGrid *grid, ScreenGrid *current_window_grid,
+  ScreenGrid *grid, Integer current_window_grid_handle,
   CompositorGridPlacementRequest request,
   ScreenGrid *message_grid, CompositorAreaCallbacks callbacks,
   bool *moved);
 
 extern bool ui_comp_clip_recompose_area(
-  ScreenGrid *grid, CompositorRecomposeArea area,
+  Integer grid_handle, CompositorRecomposeArea area,
   CompositorRecomposeArea *output);
 
 extern bool ui_comp_recompose_grid(
-  ScreenGrid *message_grid, ScreenGrid *grid, CompositorAreaCallbacks callbacks);
+  ScreenGrid *message_grid, Integer grid_handle, CompositorAreaCallbacks callbacks);
 
 extern bool ui_comp_process_grid_cursor_goto(
   ScreenGrid *message_grid, Integer grid_handle,
@@ -122,10 +122,10 @@ extern bool ui_comp_process_grid_cursor_goto(
   CompositorAreaCallbacks callbacks);
 
 extern bool ui_comp_adjust_grid_layer_order(
-  ScreenGrid *grid, bool raise);
+  Integer grid_handle, bool raise);
 
 extern bool ui_comp_process_grid_removal(
-  ScreenGrid *message_grid, ScreenGrid *grid,
+  ScreenGrid *message_grid, Integer grid_handle,
   CompositorAreaCallbacks callbacks);
 
 extern ScreenGrid *ui_comp_find_grid_at_coord(
@@ -143,7 +143,8 @@ extern bool ui_comp_cursor_is_covered_by_higher_layer(
   int minimum_z_index_gap);
 
 extern bool ui_comp_cursor_is_covered_by_higher_layer_in_stack(
-  ScreenGrid *current_grid, int row, int column, int minimum_z_index_gap);
+  Integer current_grid_handle, int current_grid_z_index,
+  int row, int column, int minimum_z_index_gap);
 
 extern void ui_comp_hide_message_separator(void);
 

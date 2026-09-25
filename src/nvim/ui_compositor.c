@@ -83,7 +83,7 @@ void ui_comp_detach(RemoteUI *ui)
 /// @param[in]  raise  Raise the layer if true, else lower it.
 void ui_comp_layers_adjust(ScreenGrid *grid, bool raise)
 {
-  bool adjusted = ui_comp_adjust_grid_layer_order(grid, raise);
+  bool adjusted = ui_comp_adjust_grid_layer_order(grid->handle, raise);
   assert(adjusted);
   (void)adjusted;
 }
@@ -107,9 +107,9 @@ bool ui_comp_put_grid(ScreenGrid *grid, int row, int col, int height, int width,
     .on_top = on_top,
   };
 
-  ScreenGrid *current_window_grid = curwin ? &curwin->w_grid_alloc : NULL;
+  Integer current_window_grid_handle = curwin ? curwin->w_grid_alloc.handle : 0;
   bool placed = ui_comp_process_grid_placement(
-    grid, current_window_grid,
+    grid, current_window_grid_handle,
     request, &msg_grid, compositor_area_callbacks(),
     &moved);
   assert(placed);
@@ -120,7 +120,7 @@ void ui_comp_remove_grid(ScreenGrid *grid)
 {
   assert(grid != &default_grid);
   bool valid = ui_comp_process_grid_removal(
-    &msg_grid, grid,
+    &msg_grid, grid->handle,
     compositor_area_callbacks());
   assert(valid);
   (void)valid;
@@ -174,7 +174,7 @@ bool ui_comp_cursor_is_covered_by_higher_layer(ScreenGrid *current_grid, int row
                                                int minimum_z_index_gap)
 {
   return ui_comp_cursor_is_covered_by_higher_layer_in_stack(
-    current_grid, row, col, minimum_z_index_gap);
+    current_grid->handle, current_grid->zindex, row, col, minimum_z_index_gap);
 }
 
 static CompositorLineSettings compositor_line_settings(void)
@@ -197,7 +197,7 @@ static CompositorAreaCallbacks compositor_area_callbacks(void)
 
 static bool clip_area_to_default_grid(CompositorRecomposeArea *area)
 {
-  bool clipped = ui_comp_clip_recompose_area(&default_grid, *area, area);
+  bool clipped = ui_comp_clip_recompose_area(default_grid.handle, *area, area);
   assert(clipped);
   return clipped;
 }
@@ -251,7 +251,7 @@ static void debug_delay(Integer lines)
 void ui_comp_compose_grid(ScreenGrid *grid)
 {
   bool recomposed = ui_comp_recompose_grid(
-    &msg_grid, grid, compositor_area_callbacks());
+    &msg_grid, grid->handle, compositor_area_callbacks());
   assert(recomposed);
   (void)recomposed;
 }

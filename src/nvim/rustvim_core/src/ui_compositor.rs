@@ -181,6 +181,24 @@ struct CompositorPoint {
     column: i32,
 }
 
+/// Identity and stacking position of the grid whose cursor is being tested.
+///
+/// The grid need not be registered as a compositor layer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CompositorCursorGrid {
+    grid_id: GridId,
+    z_index: i32,
+}
+
+impl From<&ScreenGrid> for CompositorCursorGrid {
+    fn from(grid: &ScreenGrid) -> Self {
+        Self {
+            grid_id: grid.id(),
+            z_index: grid.z_index(),
+        }
+    }
+}
+
 /// A Rust-owned grid positioned at an explicit screen origin.
 #[derive(Clone, Copy, Debug)]
 struct PositionedGrid<'grid> {
@@ -1589,17 +1607,17 @@ impl<'grid> CompositorLayerStack<'grid> {
     fn is_cursor_covered_by_higher_layer(
         &self,
         point: CompositorPoint,
-        current_grid: &ScreenGrid,
+        current_grid: CompositorCursorGrid,
         minimum_z_index_gap: u32,
     ) -> bool {
         self.topmost_grid_at(point, LayerHitTest::Any)
             .and_then(|grid_id| self.layer_index_with_id(grid_id))
             .and_then(|index| self.layer(index))
             .is_some_and(|top_layer| {
-                !std::ptr::eq(top_layer.grid, current_grid)
+                top_layer.grid.id() != current_grid.grid_id
                     && top_layer
                         .grid
-                        .is_at_least_z_index_above(current_grid, minimum_z_index_gap)
+                        .is_at_least_z_index_above(current_grid.z_index, minimum_z_index_gap)
             })
     }
 
@@ -2050,6 +2068,12 @@ impl CompositorLayerGuards {
     fn grid(&self, index: usize) -> Option<&ScreenGrid> {
         let grid_id = self.registry.layer_id(index)?;
         self.bindings.get(&grid_id).map(|layer| &*layer.grid)
+    }
+
+    /// Borrows one registered Rust grid by its stable identity.
+    fn grid_by_id(&self, grid_id: GridId) -> Option<&ScreenGrid> {
+        let layer_index = self.registry.index_of(grid_id)?;
+        self.grid(layer_index)
     }
 
     /// Mutably borrows one owned Rust grid by its layer index.
@@ -2732,38 +2756,47 @@ pub unsafe extern "C" fn ui_comp_update_message_position(
     true
 }
 
-/// Clamps a recomposition area's exclusive ends to an allocated grid.
+/// Clamps a recomposition area's exclusive ends to a registered grid.
 ///
 /// The returned area contains only owned scalar data. Grid ownership is
 /// restored before this function returns.
+fn clip_recompose_area_to_registered_grid(
+    grid_id: GridId,
+    area: CompositorRecomposeArea,
+) -> Option<CompositorRecomposeArea> {
+    let layer_guards = CompositorLayerGuards::try_take_registered()?;
+    area.with_ends_clamped_to_grid(layer_guards.grid_by_id(grid_id)?)
+}
+
+/// Returns the screen area occupied by one registered grid.
+fn recompose_area_for_registered_grid(grid_id: GridId) -> Option<CompositorRecomposeArea> {
+    let layer_guards = CompositorLayerGuards::try_take_registered()?;
+    CompositorRecomposeArea::try_from_grid(layer_guards.grid_by_id(grid_id)?)
+}
+
+/// Clamps a recomposition area to the grid identified by one C handle.
 ///
 /// # Safety
 ///
-/// `grid` must point to a valid, exclusively accessible `CScreenGrid` whose
-/// buffers satisfy the ownership and layout requirements of `ScreenGrid`.
-///
 /// `output` must point to writable, properly aligned storage for one
-/// `CCompositorRecomposeArea` and must not overlap `grid`.
+/// `CCompositorRecomposeArea`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ui_comp_clip_recompose_area(
-    grid: *mut CScreenGrid,
+    grid_handle: Integer,
     area: CCompositorRecomposeArea,
     output: *mut CCompositorRecomposeArea,
 ) -> bool {
-    if grid.is_null() || output.is_null() {
+    if output.is_null() {
         return false;
     }
+    let Ok(grid_handle) = i32::try_from(grid_handle) else {
+        return false;
+    };
     let Ok(area) = CompositorRecomposeArea::try_from(area) else {
         return false;
     };
 
-    let area = {
-        // SAFETY: The caller transfers exclusive ownership of the grid buffers
-        // into the guard for the duration of this operation.
-        let grid = unsafe { ScreenGridGuard::take(grid) };
-        area.with_ends_clamped_to_grid(&grid)
-    };
-    let Some(area) = area else {
+    let Some(area) = clip_recompose_area_to_registered_grid(GridId::new(grid_handle), area) else {
         return false;
     };
 
@@ -2774,10 +2807,9 @@ pub unsafe extern "C" fn ui_comp_clip_recompose_area(
 
 /// Recomposes the screen area occupied by one grid when drawing is enabled.
 ///
-/// # Safety
+/// When drawing is enabled, `grid_handle` must identify a registered grid.
 ///
-/// `grid` must point to a valid, exclusively accessible `CScreenGrid` whose
-/// buffers satisfy the ownership and layout requirements of `ScreenGrid`.
+/// # Safety
 ///
 /// `message_grid` must satisfy the message-grid requirements of
 /// `compose_area_from_registered_grids`. `callbacks.debug` must remain valid
@@ -2786,28 +2818,22 @@ pub unsafe extern "C" fn ui_comp_clip_recompose_area(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ui_comp_recompose_grid(
     message_grid: *mut CScreenGrid,
-    grid: *mut CScreenGrid,
+    grid_handle: Integer,
     callbacks: CCompositorAreaCallbacks,
 ) -> bool {
-    if grid.is_null() {
+    let Ok(grid_handle) = i32::try_from(grid_handle) else {
         return false;
-    }
+    };
     if !lock_compositor_draw_state().should_draw() {
         return true;
     }
 
-    let area = {
-        // SAFETY: The caller transfers exclusive ownership of the grid buffers
-        // into the guard for the duration of this operation.
-        let grid = unsafe { ScreenGridGuard::take(grid) };
-        CompositorRecomposeArea::try_from_grid(&grid)
-    };
-    let Some(area) = area else {
+    let Some(area) = recompose_area_for_registered_grid(GridId::new(grid_handle)) else {
         return false;
     };
 
     // SAFETY: The caller satisfies the helper's message-grid and callback
-    // requirements. The grid guard was dropped above.
+    // requirements. The registered grid guard was dropped above.
     unsafe { recompose_area_from_registered_grids(message_grid, area, callbacks) }
 }
 
@@ -2914,7 +2940,7 @@ fn place_grid_in_registered_layers(
 ///
 /// If `grid` is not registered, it must satisfy
 /// `CompositorLayerGuards::try_take_registered_with_candidate` requirements.
-/// `current_window_grid` may be null or identify a registered grid.
+/// `current_window_grid_handle` may be zero or identify a registered grid.
 ///
 /// `message_grid` must satisfy `recompose_area_from_registered_grids`
 /// requirements. `callbacks.debug` must remain valid for this call and may
@@ -2926,7 +2952,7 @@ fn place_grid_in_registered_layers(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ui_comp_process_grid_placement(
     grid: *mut CScreenGrid,
-    current_window_grid: *mut CScreenGrid,
+    current_window_grid_handle: Integer,
     request: CCompositorGridPlacementRequest,
     message_grid: *mut CScreenGrid,
     callbacks: CCompositorAreaCallbacks,
@@ -2938,6 +2964,11 @@ pub unsafe extern "C" fn ui_comp_process_grid_placement(
     let Ok(request) = CompositorGridPlacementRequest::try_from(request) else {
         return false;
     };
+    let current_window_grid_id = match i32::try_from(current_window_grid_handle) {
+        Ok(0) => None,
+        Ok(handle) => Some(GridId::new(handle)),
+        Err(_) => return false,
+    };
     let should_draw = lock_compositor_draw_state().should_draw();
 
     // SAFETY: The caller satisfies the candidate ownership requirements.
@@ -2946,7 +2977,8 @@ pub unsafe extern "C" fn ui_comp_process_grid_placement(
     else {
         return false;
     };
-    let current_window_layer = layer_guards.index_of(current_window_grid);
+    let current_window_layer =
+        current_window_grid_id.and_then(|grid_id| layer_guards.registry.index_of(grid_id));
     let recompose_area = |area| {
         // SAFETY: Every grid guard is dropped before this closure, and the
         // outer caller satisfies the recomposition requirements.
@@ -3075,21 +3107,12 @@ pub unsafe extern "C" fn ui_comp_process_grid_cursor_goto(
 /// the previous C-side `comp_index == 0` check.
 ///
 /// Every temporarily owned grid is restored before this function returns.
-#[unsafe(no_mangle)]
-pub extern "C" fn ui_comp_adjust_grid_layer_order(grid: *mut CScreenGrid, raise: bool) -> bool {
-    if grid.is_null() {
-        return false;
-    }
+fn adjust_registered_layer_order(grid_id: GridId, adjustment: CompositorLayerAdjustment) -> bool {
     let Some(mut layer_guards) = CompositorLayerGuards::try_take_registered() else {
         return false;
     };
-    let Some(layer_index) = layer_guards.index_of(grid) else {
+    let Some(layer_index) = layer_guards.registry.index_of(grid_id) else {
         return true;
-    };
-    let adjustment = if raise {
-        CompositorLayerAdjustment::Raise
-    } else {
-        CompositorLayerAdjustment::Lower
     };
     let movement = {
         let Some(layers) = layer_guards.layer_stack() else {
@@ -3106,6 +3129,22 @@ pub extern "C" fn ui_comp_adjust_grid_layer_order(grid: *mut CScreenGrid, raise:
     }
 
     replace_compositor_layer_registry(&previous_registry, layer_guards.registry.clone()).is_some()
+}
+
+/// Adjusts the layer position identified by one C grid handle.
+#[unsafe(no_mangle)]
+pub extern "C" fn ui_comp_adjust_grid_layer_order(grid_handle: Integer, raise: bool) -> bool {
+    let Ok(grid_handle) = i32::try_from(grid_handle) else {
+        return false;
+    };
+    let grid_id = GridId::new(grid_handle);
+    let adjustment = if raise {
+        CompositorLayerAdjustment::Raise
+    } else {
+        CompositorLayerAdjustment::Lower
+    };
+
+    adjust_registered_layer_order(grid_id, adjustment)
 }
 
 /// Removes one grid from the registered compositor layers.
@@ -3149,18 +3188,19 @@ fn remove_registered_layer(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ui_comp_process_grid_removal(
     message_grid: *mut CScreenGrid,
-    grid: *mut CScreenGrid,
+    grid_handle: Integer,
     callbacks: CCompositorAreaCallbacks,
 ) -> bool {
-    if grid.is_null() {
+    let Ok(grid_handle) = i32::try_from(grid_handle) else {
         return false;
-    }
+    };
+    let grid_id = GridId::new(grid_handle);
 
     let should_draw = lock_compositor_draw_state().should_draw();
     let Some(layer_guards) = CompositorLayerGuards::try_take_registered() else {
         return false;
     };
-    let Some(layer_index) = layer_guards.index_of(grid) else {
+    let Some(layer_index) = layer_guards.registry.index_of(grid_id) else {
         return true;
     };
     let Some(removal) = remove_registered_layer(layer_guards, layer_index, should_draw) else {
@@ -3275,59 +3315,25 @@ pub unsafe extern "C" fn ui_comp_grid_accepts_mouse_at(
     .is_some_and(|grid| grid.matches(CompositorPoint { row, column }, LayerHitTest::MouseEnabled))
 }
 
-/// Checks cursor coverage using the grids registered at the FFI boundary.
-///
-/// # Safety
-///
-/// `current_grid` must either identify one registered grid or another valid,
-/// exclusively accessible grid satisfying the ownership and layout
-/// requirements of `ScreenGrid`.
-unsafe fn cursor_is_covered_by_registered_layers(
-    current_grid: *mut CScreenGrid,
-    row: libc::c_int,
-    column: libc::c_int,
+/// Checks cursor coverage using the registered compositor layers.
+fn cursor_is_covered_by_registered_layers(
+    current_grid: CompositorCursorGrid,
+    row: i32,
+    column: i32,
     minimum_z_index_gap: u32,
 ) -> Option<bool> {
-    if current_grid.is_null() {
-        return None;
-    }
-
     let layer_guards = CompositorLayerGuards::try_take_registered()?;
-    let current_layer_index = layer_guards.index_of(current_grid);
     let layers = layer_guards.layer_stack()?;
     let point = CompositorPoint { row, column };
 
-    if let Some(current_layer_index) = current_layer_index {
-        return Some(
-            layer_guards
-                .grid(current_layer_index)
-                .is_some_and(|current_grid| {
-                    layers.is_cursor_covered_by_higher_layer(
-                        point,
-                        current_grid,
-                        minimum_z_index_gap,
-                    )
-                }),
-        );
-    }
-
-    // SAFETY: The current-grid pointer was not present in the validated layer
-    // registry, and the caller guarantees that it is otherwise distinct,
-    // valid, and exclusively accessible.
-    let current_grid = unsafe { ScreenGridGuard::take(current_grid) };
-    Some(layers.is_cursor_covered_by_higher_layer(point, &current_grid, minimum_z_index_gap))
+    Some(layers.is_cursor_covered_by_higher_layer(point, current_grid, minimum_z_index_gap))
 }
 
 /// Reports whether a sufficiently higher compositor layer covers the cursor.
-///
-/// # Safety
-///
-/// `current_grid` may be null. Otherwise, it must either identify one
-/// registered grid or another valid, exclusively accessible grid satisfying
-/// the ownership and layout requirements of `ScreenGrid`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ui_comp_cursor_is_covered_by_higher_layer_in_stack(
-    current_grid: *mut CScreenGrid,
+pub extern "C" fn ui_comp_cursor_is_covered_by_higher_layer_in_stack(
+    current_grid_handle: Integer,
+    current_grid_z_index: libc::c_int,
     row: libc::c_int,
     column: libc::c_int,
     minimum_z_index_gap: libc::c_int,
@@ -3335,14 +3341,22 @@ pub unsafe extern "C" fn ui_comp_cursor_is_covered_by_higher_layer_in_stack(
     if !lock_compositor_draw_state().should_draw() {
         return false;
     }
-    let Ok(minimum_z_index_gap) = u32::try_from(minimum_z_index_gap) else {
+    let (Ok(current_grid_handle), Ok(minimum_z_index_gap)) = (
+        i32::try_from(current_grid_handle),
+        u32::try_from(minimum_z_index_gap),
+    ) else {
         return false;
     };
 
-    // SAFETY: The caller satisfies the current-grid ownership requirements.
-    unsafe {
-        cursor_is_covered_by_registered_layers(current_grid, row, column, minimum_z_index_gap)
-    }
+    cursor_is_covered_by_registered_layers(
+        CompositorCursorGrid {
+            grid_id: GridId::new(current_grid_handle),
+            z_index: current_grid_z_index,
+        },
+        row,
+        column,
+        minimum_z_index_gap,
+    )
     .unwrap_or(false)
 }
 
@@ -4221,6 +4235,50 @@ mod tests {
     }
 
     #[test]
+    fn registered_recomposition_areas_use_grid_geometry() {
+        let mut grid = grid_with_size(3, 4);
+        grid.set_compositor_position(2, 5);
+        let grid_id = grid.id();
+
+        // SAFETY: This conversion transfers the grid allocation to its C
+        // representation.
+        let mut cgrid = unsafe { grid.to_cgrid() };
+        let grid_pointer = &mut cgrid as *mut CScreenGrid;
+        let cgrids = [grid_pointer];
+
+        {
+            // SAFETY: The array contains one valid, exclusively accessible
+            // grid for the duration of the operation.
+            let _registry = unsafe { register_test_compositor_layers(&cgrids) };
+
+            assert_eq!(
+                recompose_area_for_registered_grid(grid_id),
+                Some(CompositorRecomposeArea {
+                    rows: 2..5,
+                    columns: 5..9,
+                })
+            );
+            assert_eq!(
+                clip_recompose_area_to_registered_grid(
+                    grid_id,
+                    CompositorRecomposeArea {
+                        rows: 1..5,
+                        columns: 2..6,
+                    },
+                ),
+                Some(CompositorRecomposeArea {
+                    rows: 1..3,
+                    columns: 2..4,
+                })
+            );
+        }
+
+        // SAFETY: The registry guard has restored the grid allocation.
+        let grid = unsafe { ScreenGrid::take_from_cgrid(&mut cgrid) };
+        assert_eq!(grid.id(), grid_id);
+    }
+
+    #[test]
     fn layer_guards_follow_registry_order_and_restore_all_grids() {
         let first = grid_with_row(&[schar_from_ascii('a')], &[1]);
         let second = grid_with_row(&[schar_from_ascii('b')], &[2]);
@@ -4309,10 +4367,11 @@ mod tests {
         let mut equal_grid = grid_with_size(1, 1);
         equal_grid.set_z_index(30);
         equal_grid.set_compositor_index(3);
+        let moving_grid_id = moving_grid.id();
         let expected_registry = [
             default_grid.id(),
             lower_grid.id(),
-            moving_grid.id(),
+            moving_grid_id,
             equal_grid.id(),
         ];
 
@@ -4342,7 +4401,10 @@ mod tests {
             // grids for the duration of the adjustment.
             let _registry = unsafe { register_test_compositor_layers(&cgrids) };
 
-            assert!(ui_comp_adjust_grid_layer_order(moving_pointer, true));
+            assert!(adjust_registered_layer_order(
+                moving_grid_id,
+                CompositorLayerAdjustment::Raise,
+            ));
             assert_eq!(
                 lock_compositor_layer_state()
                     .as_ref()
@@ -4707,7 +4769,8 @@ mod tests {
         let mut current_grid = grid_with_size(2, 2);
         current_grid.set_compositor_index(1);
         let appended_grid = grid_with_size(2, 2);
-        let expected_registry = [default_grid.id(), appended_grid.id(), current_grid.id()];
+        let current_grid_id = current_grid.id();
+        let expected_registry = [default_grid.id(), appended_grid.id(), current_grid_id];
         // SAFETY: Each conversion transfers its grid allocations to a distinct
         // C representation.
         let (mut default_cgrid, mut current_cgrid, mut appended_cgrid) = unsafe {
@@ -4734,7 +4797,7 @@ mod tests {
             )
         }
         .unwrap();
-        let current_window_layer = layer_guards.index_of(current_pointer);
+        let current_window_layer = layer_guards.registry.index_of(current_grid_id);
         assert_eq!(
             place_grid_in_registered_layers(
                 layer_guards,
@@ -5004,7 +5067,7 @@ mod tests {
         let _registry = unsafe { register_test_compositor_layers(&registry_cgrids) };
 
         let layer_guards = CompositorLayerGuards::try_take_registered().unwrap();
-        let layer_index = layer_guards.index_of(removed_pointer).unwrap();
+        let layer_index = layer_guards.registry.index_of(removed_grid_id).unwrap();
         assert_eq!(
             remove_registered_layer(layer_guards, layer_index, true),
             Some(CompositorLayerRemoval {
@@ -5212,12 +5275,15 @@ mod tests {
         };
         let covered_point = CompositorPoint { row: 0, column: 1 };
 
-        assert!(layers.is_cursor_covered_by_higher_layer(covered_point, &current_grid, 0));
-        assert!(!layers.is_cursor_covered_by_higher_layer(covered_point, &current_grid, 1,));
-        assert!(!layers.is_cursor_covered_by_higher_layer(covered_point, &upper_grid, 0,));
+        let current_cursor_grid = CompositorCursorGrid::from(&current_grid);
+        let upper_cursor_grid = CompositorCursorGrid::from(&upper_grid);
+
+        assert!(layers.is_cursor_covered_by_higher_layer(covered_point, current_cursor_grid, 0));
+        assert!(!layers.is_cursor_covered_by_higher_layer(covered_point, current_cursor_grid, 1));
+        assert!(!layers.is_cursor_covered_by_higher_layer(covered_point, upper_cursor_grid, 0));
         assert!(!layers.is_cursor_covered_by_higher_layer(
             CompositorPoint { row: 2, column: 2 },
-            &current_grid,
+            current_cursor_grid,
             0,
         ));
     }
@@ -5235,21 +5301,21 @@ mod tests {
         upper_grid.set_compositor_size(2, 2);
         upper_grid.set_compositor_index(2);
         let external_grid = grid_with_size(2, 2);
+        let current_cursor_grid = CompositorCursorGrid::from(&current_grid);
+        let external_cursor_grid = CompositorCursorGrid::from(&external_grid);
 
         // SAFETY: Each conversion transfers its grid allocations to a
         // distinct C representation.
-        let (mut default_cgrid, mut current_cgrid, mut upper_cgrid, mut external_cgrid) = unsafe {
+        let (mut default_cgrid, mut current_cgrid, mut upper_cgrid) = unsafe {
             (
                 default_grid.to_cgrid(),
                 current_grid.to_cgrid(),
                 upper_grid.to_cgrid(),
-                external_grid.to_cgrid(),
             )
         };
         let default_pointer = &mut default_cgrid as *mut CScreenGrid;
         let current_pointer = &mut current_cgrid as *mut CScreenGrid;
         let upper_pointer = &mut upper_cgrid as *mut CScreenGrid;
-        let external_pointer = &mut external_cgrid as *mut CScreenGrid;
         let cgrids = [default_pointer, current_pointer, upper_pointer];
 
         {
@@ -5257,33 +5323,26 @@ mod tests {
             // grids for the duration of the coverage queries.
             let _registry = unsafe { register_test_compositor_layers(&cgrids) };
 
-            // SAFETY: The current grid is registered and exclusively
-            // accessible through the boundary state.
             assert_eq!(
-                unsafe { cursor_is_covered_by_registered_layers(current_pointer, 0, 0, 0) },
+                cursor_is_covered_by_registered_layers(current_cursor_grid, 0, 0, 0),
                 Some(true)
             );
-            // SAFETY: The external grid is distinct from every registered
-            // grid and remains exclusively accessible during the call.
             assert_eq!(
-                unsafe { cursor_is_covered_by_registered_layers(external_pointer, 0, 0, 0) },
+                cursor_is_covered_by_registered_layers(external_cursor_grid, 0, 0, 0),
                 Some(true)
             );
-            // SAFETY: The current grid is registered and exclusively
-            // accessible through the boundary state.
             assert_eq!(
-                unsafe { cursor_is_covered_by_registered_layers(current_pointer, 0, 0, 1) },
+                cursor_is_covered_by_registered_layers(current_cursor_grid, 0, 0, 1),
                 Some(false)
             );
         }
 
         // SAFETY: Every coverage query restored all grid allocations.
-        let (_default_grid, _current_grid, _upper_grid, _external_grid) = unsafe {
+        let (_default_grid, _current_grid, _upper_grid) = unsafe {
             (
                 ScreenGrid::take_from_cgrid(&mut default_cgrid),
                 ScreenGrid::take_from_cgrid(&mut current_cgrid),
                 ScreenGrid::take_from_cgrid(&mut upper_cgrid),
-                ScreenGrid::take_from_cgrid(&mut external_cgrid),
             )
         };
     }
