@@ -41,6 +41,17 @@ pub type VimColNrT = i32;
 pub type VimHandleT = libc::c_int;
 pub type VimDirtyColT = libc::c_int;
 
+/// Stable identity of one screen grid within Rust implementation code.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct GridId(i32);
+
+impl GridId {
+    /// Creates an identity from a validated native grid handle.
+    pub(crate) const fn new(handle: i32) -> Self {
+        Self(handle)
+    }
+}
+
 /// Per-row redraw extent used while grid output is throttled.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct DirtyColumns {
@@ -313,9 +324,9 @@ impl ScreenGrid {
         grid
     }
 
-    /// Returns the identifier used by UI grid events.
-    pub(crate) fn handle(&self) -> i32 {
-        self.handle
+    /// Returns this grid's stable Rust identity.
+    pub(crate) fn id(&self) -> GridId {
+        GridId::new(self.handle)
     }
 
     /// Returns whether this grid blends with the default-grid background.

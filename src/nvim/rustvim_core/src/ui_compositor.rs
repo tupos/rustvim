@@ -8,8 +8,8 @@ use std::{
 use crate::{
     defines::Integer,
     grid::{
-        CScreenGrid, GridRow, GridRowSegment, Highlight, ScreenGrid, ScreenGridGuard, VimSAttrT,
-        VimSCharT, schar_from_ascii, schar_from_char,
+        CScreenGrid, GridId, GridRow, GridRowSegment, Highlight, ScreenGrid, ScreenGridGuard,
+        VimSAttrT, VimSCharT, schar_from_ascii, schar_from_char,
     },
 };
 
@@ -321,7 +321,7 @@ struct CompositorSize {
 /// Validated native inputs for positioning the composed cursor.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct CompositorCursorRequest {
-    grid_handle: i32,
+    grid_id: GridId,
     local_position: CompositorPoint,
 }
 
@@ -1368,17 +1368,17 @@ impl<'grid> CompositorLayerStack<'grid> {
         Some(insertion_index)
     }
 
-    /// Finds the compositor layer identified by one native grid handle.
-    fn layer_index_with_handle(&self, handle: i32) -> Option<usize> {
+    /// Finds the compositor layer identified by one native grid identity.
+    fn layer_index_with_id(&self, grid_id: GridId) -> Option<usize> {
         self.layers
             .iter()
-            .position(|layer| layer.grid.handle() == handle)
+            .position(|layer| layer.grid.id() == grid_id)
     }
 
     /// Selects a grid and plans its composed-screen cursor update.
     fn plan_cursor(&self, request: CompositorCursorRequest) -> Option<CompositorCursorAction> {
         let screen_size = self.default_layer()?.allocated_size();
-        let Some(layer_index) = self.layer_index_with_handle(request.grid_handle) else {
+        let Some(layer_index) = self.layer_index_with_id(request.grid_id) else {
             return Some(CompositorCursorAction::Ignore);
         };
 
@@ -2710,7 +2710,7 @@ pub unsafe extern "C" fn ui_comp_grid_cursor_goto_in_layer_stack(
         return false;
     };
     let request = CompositorCursorRequest {
-        grid_handle,
+        grid_id: GridId::new(grid_handle),
         local_position: CompositorPoint { row, column },
     };
 
@@ -3367,6 +3367,7 @@ pub unsafe extern "C" fn ui_comp_process_raw_line(
     let Ok(grid_handle) = i32::try_from(request.grid_handle) else {
         return false;
     };
+    let grid_id = GridId::new(grid_handle);
     let Ok(raw_line) = CompositorRawLineRequest::try_from(request) else {
         return false;
     };
@@ -3384,7 +3385,7 @@ pub unsafe extern "C" fn ui_comp_process_raw_line(
         let Some(layers) = layer_guards.layer_stack() else {
             return false;
         };
-        let Some(current_layer_index) = layers.layer_index_with_handle(grid_handle) else {
+        let Some(current_layer_index) = layers.layer_index_with_id(grid_id) else {
             return true;
         };
 
@@ -3554,6 +3555,7 @@ pub unsafe extern "C" fn ui_comp_process_scroll(
     let Ok(grid_handle) = i32::try_from(request.grid_handle) else {
         return false;
     };
+    let grid_id = GridId::new(grid_handle);
     let Ok(request) = CompositorScrollRequest::try_from(request) else {
         return false;
     };
@@ -3571,7 +3573,7 @@ pub unsafe extern "C" fn ui_comp_process_scroll(
         let Some(layers) = layer_guards.layer_stack() else {
             return false;
         };
-        let Some(current_layer_index) = layers.layer_index_with_handle(grid_handle) else {
+        let Some(current_layer_index) = layers.layer_index_with_id(grid_id) else {
             return true;
         };
         let Some(plan) = layers.plan_scroll(
@@ -4135,7 +4137,7 @@ mod tests {
 
         assert_eq!(
             layers.plan_cursor(CompositorCursorRequest {
-                grid_handle: 7,
+                grid_id: GridId::new(7),
                 local_position: CompositorPoint { row: 1, column: 2 },
             }),
             Some(CompositorCursorAction::Update(CompositorCursorPlan {
@@ -4147,7 +4149,7 @@ mod tests {
         );
         assert_eq!(
             layers.plan_cursor(CompositorCursorRequest {
-                grid_handle: 7,
+                grid_id: GridId::new(7),
                 local_position: CompositorPoint { row: 10, column: 2 },
             }),
             Some(CompositorCursorAction::Update(CompositorCursorPlan {
@@ -4159,7 +4161,7 @@ mod tests {
         );
         assert_eq!(
             layers.plan_cursor(CompositorCursorRequest {
-                grid_handle: 99,
+                grid_id: GridId::new(99),
                 local_position: CompositorPoint { row: 0, column: 0 },
             }),
             Some(CompositorCursorAction::Ignore)
@@ -4201,7 +4203,7 @@ mod tests {
                     cgrids.as_mut_ptr(),
                     cgrids.len(),
                     CompositorCursorRequest {
-                        grid_handle: 99,
+                        grid_id: GridId::new(99),
                         local_position: CompositorPoint { row: 0, column: 0 },
                     },
                 )
@@ -4219,7 +4221,7 @@ mod tests {
                     cgrids.as_mut_ptr(),
                     cgrids.len(),
                     CompositorCursorRequest {
-                        grid_handle: 7,
+                        grid_id: GridId::new(7),
                         local_position: CompositorPoint { row: 10, column: 0 },
                     },
                 )
