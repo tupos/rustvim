@@ -8,21 +8,18 @@
 #include "nvim/types_defs.h"  // IWYU pragma: keep
 #include "nvim/ui_defs.h"  // IWYU pragma: keep
 
-typedef struct {
-  int row;
-  int column;
-  int height;
-  int width;
-  bool valid;
-  bool on_top;
-} CompositorGridPlacementRequest;
+extern void ui_comp_init(void);
+extern void ui_comp_free_all_mem(void);
+extern void ui_comp_syn_init(void);
+extern void ui_comp_attach(void);
+extern void ui_comp_detach(void);
+extern void ui_comp_layers_adjust(ScreenGrid *grid, bool raise);
+extern bool ui_comp_put_grid(
+  ScreenGrid *grid, int row, int column, int height, int width,
+  bool valid, bool on_top, Integer current_window_grid_handle);
+extern void ui_comp_remove_grid(ScreenGrid *grid);
+extern void ui_comp_compose_grid(ScreenGrid *grid);
 
-extern bool ui_comp_initialize_layer_registry(ScreenGrid *default_grid);
-extern bool ui_comp_clear_layer_registry(void);
-extern void ui_comp_initialize_debug_highlights(void);
-
-extern void ui_comp_register_composed_ui(void);
-extern bool ui_comp_unregister_composed_ui(void);
 extern bool ui_comp_set_screen_valid(bool valid);
 
 extern void ui_comp_grid_resize(Integer grid, Integer width, Integer height);
@@ -37,22 +34,6 @@ extern void ui_comp_raw_line(
 extern void ui_comp_msg_set_pos(
   Integer grid, Integer row, Boolean scrolled, String separator_character,
   Integer z_index, Integer compositor_index);
-extern bool ui_comp_release_buffer(void);
-
-extern bool ui_comp_process_grid_placement(
-  ScreenGrid *grid, Integer current_window_grid_handle,
-  CompositorGridPlacementRequest request,
-  ScreenGrid *message_grid, bool *moved);
-
-extern bool ui_comp_recompose_grid(
-  ScreenGrid *message_grid, Integer grid_handle);
-
-extern bool ui_comp_adjust_grid_layer_order(
-  Integer grid_handle, bool raise);
-
-extern bool ui_comp_process_grid_removal(
-  ScreenGrid *message_grid, Integer grid_handle);
-
 extern ScreenGrid *ui_comp_find_grid_at_coord(
   int row, int column, bool require_mouse_input);
 

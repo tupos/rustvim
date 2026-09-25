@@ -662,7 +662,7 @@ void pum_redraw(void)
   pum_right_col = pum_left_col + grid_width;
   bool moved = ui_comp_put_grid(&pum_grid, pum_row, pum_left_col,
                                 pum_height + border_width, grid_width + border_width, false,
-                                true);
+                                true, curwin ? curwin->w_grid_alloc.handle : 0);
   bool invalid_grid = moved || pum_invalid;
   pum_invalid = false;
   must_redraw_pum = false;
