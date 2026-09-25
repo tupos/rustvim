@@ -3006,24 +3006,14 @@ pub unsafe extern "C" fn ui_comp_place_grid_in_layer_stack(
     true
 }
 
-/// Applies one validated cursor request to temporarily C-owned grids.
+/// Applies one validated cursor request to the registered compositor grids.
 ///
 /// The returned update contains only owned Rust values. Every grid is restored
 /// before this function returns.
-///
-/// # Safety
-///
-/// `layer_grids` must point to `layer_count` readable, distinct, non-null grid
-/// pointers. Every grid must be exclusively accessible and its buffers must
-/// satisfy the ownership and layout requirements of `ScreenGrid`.
-unsafe fn apply_cursor_update_to_c_grids(
-    layer_grids: *const *mut CScreenGrid,
-    layer_count: usize,
+fn apply_cursor_update_to_registered_grids(
     request: CompositorCursorRequest,
 ) -> Option<CompositorCursorUpdate> {
-    // SAFETY: The caller satisfies the documented layer-array and grid
-    // ownership requirements.
-    let mut layer_guards = unsafe { CompositorLayerGuards::try_take(layer_grids, layer_count) }?;
+    let mut layer_guards = CompositorLayerGuards::try_take_registered()?;
     let action = {
         let layers = layer_guards.layer_stack()?;
         layers.plan_cursor(request)?
@@ -3059,17 +3049,11 @@ unsafe fn apply_cursor_update_to_c_grids(
 ///
 /// # Safety
 ///
-/// `layer_grids` must point to `layer_count` readable, distinct, non-null grid
-/// pointers. Every grid must be exclusively accessible and its buffers must
-/// satisfy the ownership and layout requirements of `ScreenGrid`.
-///
 /// `message_grid` must satisfy the message-grid requirements of
 /// `recompose_area_from_registered_grids`. `callbacks.debug` must remain valid
 /// for this call.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ui_comp_grid_cursor_goto_in_layer_stack(
-    layer_grids: *const *mut CScreenGrid,
-    layer_count: usize,
+pub unsafe extern "C" fn ui_comp_process_grid_cursor_goto(
     message_grid: *mut CScreenGrid,
     grid_handle: Integer,
     row: Integer,
@@ -3088,11 +3072,7 @@ pub unsafe extern "C" fn ui_comp_grid_cursor_goto_in_layer_stack(
         local_position: CompositorPoint { row, column },
     };
 
-    // SAFETY: The caller satisfies the helper's layer-array and grid-ownership
-    // requirements.
-    let Some(update) =
-        (unsafe { apply_cursor_update_to_c_grids(layer_grids, layer_count, request) })
-    else {
+    let Some(update) = apply_cursor_update_to_registered_grids(request) else {
         return false;
     };
     let CompositorCursorUpdate::Apply {
@@ -4662,7 +4642,7 @@ mod tests {
     }
 
     #[test]
-    fn c_grid_cursor_update_raises_the_layer_and_restores_grid_ownership() {
+    fn registered_cursor_update_raises_the_layer_and_restores_grid_ownership() {
         let mut default_grid = grid_with_size(10, 12);
         default_grid.set_compositor_size(10, 12);
         let mut selected_grid = grid_with_size(2, 2);
@@ -4692,36 +4672,22 @@ mod tests {
         // SAFETY: The array contains distinct, exclusively accessible grids.
         let _registry = unsafe { register_test_compositor_layers(&cgrids) };
 
-        // SAFETY: The array contains distinct, exclusively accessible grids.
         assert_eq!(
-            unsafe {
-                apply_cursor_update_to_c_grids(
-                    cgrids.as_ptr(),
-                    cgrids.len(),
-                    CompositorCursorRequest {
-                        grid_id: GridId::new(99),
-                        local_position: CompositorPoint { row: 0, column: 0 },
-                    },
-                )
-            },
+            apply_cursor_update_to_registered_grids(CompositorCursorRequest {
+                grid_id: GridId::new(99),
+                local_position: CompositorPoint { row: 0, column: 0 },
+            }),
             Some(CompositorCursorUpdate::Ignore)
         );
         assert_eq!(cgrids, [default_pointer, selected_pointer, upper_pointer]);
 
         // The cursor lies outside the default grid, so production code will
         // recompose the exposed area before suppressing cursor output.
-        // SAFETY: The array contains distinct, exclusively accessible grids.
         assert_eq!(
-            unsafe {
-                apply_cursor_update_to_c_grids(
-                    cgrids.as_ptr(),
-                    cgrids.len(),
-                    CompositorCursorRequest {
-                        grid_id: GridId::new(7),
-                        local_position: CompositorPoint { row: 10, column: 0 },
-                    },
-                )
-            },
+            apply_cursor_update_to_registered_grids(CompositorCursorRequest {
+                grid_id: GridId::new(7),
+                local_position: CompositorPoint { row: 10, column: 0 },
+            }),
             Some(CompositorCursorUpdate::Apply {
                 plan: CompositorCursorPlan {
                     layer_index: 1,

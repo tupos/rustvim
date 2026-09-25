@@ -117,8 +117,7 @@ extern bool ui_comp_clip_recompose_area(
 extern bool ui_comp_recompose_grid(
   ScreenGrid *message_grid, ScreenGrid *grid, CompositorAreaCallbacks callbacks);
 
-extern bool ui_comp_grid_cursor_goto_in_layer_stack(
-  ScreenGrid *const *layer_grids, size_t layer_count,
+extern bool ui_comp_process_grid_cursor_goto(
   ScreenGrid *message_grid, Integer grid_handle,
   Integer row, Integer column,
   CompositorAreaCallbacks callbacks);

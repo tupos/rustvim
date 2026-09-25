@@ -139,9 +139,8 @@ void ui_comp_remove_grid(ScreenGrid *grid)
 
 void ui_comp_grid_cursor_goto(Integer grid_handle, Integer r, Integer c)
 {
-  bool updated = ui_comp_grid_cursor_goto_in_layer_stack(
-    layers.items, layers.size, &msg_grid, grid_handle, r, c,
-    compositor_area_callbacks());
+  bool updated = ui_comp_process_grid_cursor_goto(
+    &msg_grid, grid_handle, r, c, compositor_area_callbacks());
   assert(updated);
   (void)updated;
 }
