@@ -35,7 +35,7 @@ static int dbghl_normal, dbghl_clear, dbghl_composed, dbghl_recompose;
 
 void ui_comp_init(void)
 {
-  bool initialized = ui_comp_initialize_layer_registry(default_grid.handle);
+  bool initialized = ui_comp_initialize_layer_registry(&default_grid);
   assert(initialized);
   (void)initialized;
   kv_push(layers, &default_grid);

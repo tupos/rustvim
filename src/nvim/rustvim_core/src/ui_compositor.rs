@@ -1323,6 +1323,76 @@ impl CompositorLayerRegistry {
     }
 }
 
+/// One temporary pointer connecting a native grid identity to C storage.
+///
+/// This boundary-only representation will disappear when grids become
+/// permanently owned by Rust.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CCompositorGridBinding {
+    cgrid: NonNull<CScreenGrid>,
+}
+
+// SAFETY: Neovim invokes compositor operations synchronously on its main
+// thread. Moving this wrapper does not access the referenced C grid, and the
+// pointer is dereferenced only while an FFI operation has exclusive ownership
+// of that grid.
+unsafe impl Send for CCompositorGridBinding {}
+
+/// Transitional C-grid pointers keyed by safe native grid identities.
+#[derive(Clone, Debug)]
+struct CCompositorGridBindings {
+    grids: HashMap<GridId, CCompositorGridBinding>,
+}
+
+impl CCompositorGridBindings {
+    /// Creates a nonempty registry containing unique C grid pointers.
+    fn try_new(grids: HashMap<GridId, CCompositorGridBinding>) -> Option<Self> {
+        if grids.is_empty() {
+            return None;
+        }
+
+        let mut pointers = Vec::with_capacity(grids.len());
+        for binding in grids.values() {
+            if pointers.contains(&binding.cgrid) {
+                return None;
+            }
+            pointers.push(binding.cgrid);
+        }
+
+        Some(Self { grids })
+    }
+
+    /// Reports whether every ordered grid has exactly one C binding.
+    fn matches_registry(&self, registry: &CompositorLayerRegistry) -> bool {
+        self.grids.len() == registry.len()
+            && registry
+                .layer_ids()
+                .iter()
+                .all(|grid_id| self.grids.contains_key(grid_id))
+    }
+}
+
+/// Process-global compositor state at the transitional C boundary.
+///
+/// Safe compositor logic receives only a clone of `registry`; C pointers stay
+/// confined to ownership adapters.
+struct CompositorLayerFfiState {
+    registry: CompositorLayerRegistry,
+    c_grids: CCompositorGridBindings,
+}
+
+impl CompositorLayerFfiState {
+    /// Combines matching safe layer order and C-grid bindings.
+    fn try_new(
+        registry: CompositorLayerRegistry,
+        c_grids: CCompositorGridBindings,
+    ) -> Option<Self> {
+        c_grids
+            .matches_registry(&registry)
+            .then_some(Self { registry, c_grids })
+    }
+}
+
 /// Result of removing one grid from the active compositor layers.
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum CompositorLayerRemoval {
@@ -2001,6 +2071,27 @@ impl CompositorLayerGuards {
         self.grid_mut(last_index)?.set_compositor_index(0);
         Some(())
     }
+
+    /// Captures all current identities and their temporary C bindings.
+    fn ffi_state(&self) -> Option<CompositorLayerFfiState> {
+        self.ffi_state_prefix(self.registry.len())
+    }
+
+    /// Captures an initial ordered prefix and its temporary C bindings.
+    fn ffi_state_prefix(&self, layer_count: usize) -> Option<CompositorLayerFfiState> {
+        let registry = self.registry.prefix(layer_count)?;
+        let c_grids = registry
+            .layer_ids()
+            .iter()
+            .map(|grid_id| {
+                let layer = self.bindings.get(grid_id)?;
+                Some((*grid_id, CCompositorGridBinding { cgrid: layer.cgrid }))
+            })
+            .collect::<Option<HashMap<_, _>>>()?;
+        let c_grids = CCompositorGridBindings::try_new(c_grids)?;
+
+        CompositorLayerFfiState::try_new(registry, c_grids)
+    }
 }
 
 /// Message-separator replacement applied below its compositor layer.
@@ -2333,18 +2424,20 @@ impl CompositorBuffer {
     }
 }
 
-static COMPOSITOR_LAYER_REGISTRY: Mutex<Option<CompositorLayerRegistry>> = Mutex::new(None);
+static COMPOSITOR_LAYER_STATE: Mutex<Option<CompositorLayerFfiState>> = Mutex::new(None);
 
-/// Acquires exclusive access to the process-global compositor layer registry.
-fn lock_compositor_layer_registry() -> MutexGuard<'static, Option<CompositorLayerRegistry>> {
-    COMPOSITOR_LAYER_REGISTRY
+/// Acquires exclusive access to the transitional compositor boundary state.
+fn lock_compositor_layer_state() -> MutexGuard<'static, Option<CompositorLayerFfiState>> {
+    COMPOSITOR_LAYER_STATE
         .try_lock()
-        .expect("compositor layer registry is already borrowed")
+        .expect("compositor layer state is already borrowed")
 }
 
 /// Returns an owned snapshot without retaining the registry lock.
 fn compositor_layer_registry() -> Option<CompositorLayerRegistry> {
-    lock_compositor_layer_registry().clone()
+    lock_compositor_layer_state()
+        .as_ref()
+        .map(|state| state.registry.clone())
 }
 
 /// Replaces the current registry if it still matches the supplied snapshot.
@@ -2352,38 +2445,75 @@ fn replace_compositor_layer_registry(
     expected: &CompositorLayerRegistry,
     replacement: CompositorLayerRegistry,
 ) -> Option<()> {
-    let mut registry = lock_compositor_layer_registry();
-    if registry.as_ref() != Some(expected) {
+    let mut current_state = lock_compositor_layer_state();
+    let state = current_state.as_mut()?;
+    if &state.registry != expected || !state.c_grids.matches_registry(&replacement) {
         return None;
     }
 
-    *registry = Some(replacement);
+    state.registry = replacement;
     Some(())
 }
 
-/// Initializes compositor layer ownership with the default grid.
+/// Replaces the complete boundary state if its registry snapshot still
+/// matches.
+fn replace_compositor_layer_state(
+    expected: &CompositorLayerRegistry,
+    replacement: CompositorLayerFfiState,
+) -> Option<()> {
+    let mut current_state = lock_compositor_layer_state();
+    if &current_state.as_ref()?.registry != expected {
+        return None;
+    }
+
+    *current_state = Some(replacement);
+    Some(())
+}
+
+/// Initializes compositor layer ownership and its default-grid binding.
+///
+/// # Safety
+///
+/// `default_grid` must point to a valid, exclusively accessible C grid whose
+/// buffers satisfy the ownership and layout requirements of `ScreenGrid`.
 #[unsafe(no_mangle)]
-pub extern "C" fn ui_comp_initialize_layer_registry(default_grid_handle: Integer) -> bool {
-    let Ok(default_grid_handle) = i32::try_from(default_grid_handle) else {
-        return false;
-    };
-    let Some(registry) = CompositorLayerRegistry::try_new(vec![GridId::new(default_grid_handle)])
-    else {
+pub unsafe extern "C" fn ui_comp_initialize_layer_registry(default_grid: *mut CScreenGrid) -> bool {
+    let Some(default_cgrid) = NonNull::new(default_grid) else {
         return false;
     };
 
-    let mut current_registry = lock_compositor_layer_registry();
-    if current_registry.is_some() {
+    let default_grid_id = {
+        // SAFETY: The caller transfers exclusive ownership for this scope.
+        let default_grid = unsafe { ScreenGridGuard::take(default_grid) };
+        default_grid.id()
+    };
+    let Some(registry) = CompositorLayerRegistry::try_new(vec![default_grid_id]) else {
+        return false;
+    };
+    let Some(c_grids) = CCompositorGridBindings::try_new(HashMap::from([(
+        default_grid_id,
+        CCompositorGridBinding {
+            cgrid: default_cgrid,
+        },
+    )])) else {
+        return false;
+    };
+    let Some(state) = CompositorLayerFfiState::try_new(registry, c_grids) else {
+        return false;
+    };
+
+    let mut current_state = lock_compositor_layer_state();
+    if current_state.is_some() {
         return false;
     }
-    *current_registry = Some(registry);
+    *current_state = Some(state);
     true
 }
 
-/// Clears the compositor layer registry during process teardown.
+/// Clears compositor layer order and temporary C bindings during teardown.
 #[unsafe(no_mangle)]
 pub extern "C" fn ui_comp_clear_layer_registry() -> bool {
-    lock_compositor_layer_registry().take().is_some()
+    lock_compositor_layer_state().take().is_some()
 }
 
 static MESSAGE_COMPOSITOR_STATE: Mutex<MessageCompositorState> =
@@ -2746,7 +2876,8 @@ unsafe fn place_grid_in_c_layers(
             let previous_registry = layer_guards.registry.prefix(appended_index)?;
 
             layer_guards.place_appended_layer(insertion_index, request.placement)?;
-            replace_compositor_layer_registry(&previous_registry, layer_guards.registry.clone())?;
+            let replacement_state = layer_guards.ffi_state()?;
+            replace_compositor_layer_state(&previous_registry, replacement_state)?;
             plan
         }
     };
@@ -3087,8 +3218,8 @@ unsafe fn remove_layer_from_c_grids(
 
     let previous_registry = layer_guards.registry.clone();
     layer_guards.remove_layer(layer_index)?;
-    let remaining_registry = layer_guards.registry.prefix(remaining_layer_count)?;
-    replace_compositor_layer_registry(&previous_registry, remaining_registry)?;
+    let remaining_state = layer_guards.ffi_state_prefix(remaining_layer_count)?;
+    replace_compositor_layer_state(&previous_registry, remaining_state)?;
 
     Some(CompositorLayerRemoval::Removed {
         remaining_layer_count,
@@ -3922,11 +4053,11 @@ mod tests {
 
     impl Drop for TestCompositorLayerRegistry {
         fn drop(&mut self) {
-            *lock_compositor_layer_registry() = None;
+            *lock_compositor_layer_state() = None;
         }
     }
 
-    /// Installs the supplied C grid bindings as the registry for one test.
+    /// Installs the supplied C grid bindings and layer order for one test.
     ///
     /// # Safety
     ///
@@ -3945,13 +4076,15 @@ mod tests {
             CompositorLayerGuards::try_take_in_binding_order(cgrids.as_ptr(), cgrids.len())
         }
         .expect("test compositor layers must be valid");
-        let registry = layer_guards.registry.clone();
+        let state = layer_guards
+            .ffi_state()
+            .expect("test compositor layer state must be valid");
         drop(layer_guards);
 
-        let mut current_registry = lock_compositor_layer_registry();
-        assert!(current_registry.is_none());
-        *current_registry = Some(registry);
-        drop(current_registry);
+        let mut current_state = lock_compositor_layer_state();
+        assert!(current_state.is_none());
+        *current_state = Some(state);
+        drop(current_state);
 
         TestCompositorLayerRegistry { _lock: test_lock }
     }
