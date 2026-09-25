@@ -95,13 +95,6 @@ static OPT_SCOPE_SIZE: usize = 3;
 
 type OptScopeFlags = u8;
 
-pub union OptValData1 {
-    // boolean options are actually tri-states because they have a third "None" value.
-    boolean: defines::TriState,
-    number: defines::OptInt,
-    string: defines::VimString,
-}
-
 pub enum OptValData {
     // boolean options are actually tri-states because they have a third "None" value.
     Boolean(defines::TriState),
