@@ -115,7 +115,6 @@ extern bool ui_comp_clip_recompose_area(
   CompositorRecomposeArea *output);
 
 extern bool ui_comp_recompose_grid(
-  ScreenGrid *const *layer_grids, size_t layer_count,
   ScreenGrid *message_grid, ScreenGrid *grid, CompositorAreaCallbacks callbacks);
 
 extern bool ui_comp_grid_cursor_goto_in_layer_stack(
@@ -152,7 +151,6 @@ extern bool ui_comp_cursor_is_covered_by_higher_layer_in_stack(
 extern void ui_comp_hide_message_separator(void);
 
 extern bool ui_comp_update_message_position(
-  ScreenGrid *const *layer_grids, size_t layer_count,
   ScreenGrid *message_grid, ScreenGrid *default_grid,
   CompositorMessagePositionRequest request, CompositorAreaCallbacks callbacks);
 

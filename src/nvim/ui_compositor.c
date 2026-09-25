@@ -263,7 +263,7 @@ static void debug_delay(Integer lines)
 void ui_comp_compose_grid(ScreenGrid *grid)
 {
   bool recomposed = ui_comp_recompose_grid(
-    layers.items, layers.size, &msg_grid, grid, compositor_area_callbacks());
+    &msg_grid, grid, compositor_area_callbacks());
   assert(recomposed);
   (void)recomposed;
 }
@@ -321,7 +321,6 @@ void ui_comp_msg_set_pos(Integer grid, Integer row, Boolean scrolled, String sep
     .has_separator_character = has_separator_character,
   };
   bool updated = ui_comp_update_message_position(
-    layers.items, layers.size,
     &msg_grid, &default_grid,
     request, compositor_area_callbacks());
   assert(updated);
