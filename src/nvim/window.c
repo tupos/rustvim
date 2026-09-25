@@ -925,12 +925,11 @@ void ui_ext_win_position(win_T *wp, bool validate)
       row += tabline_height();
     }
 
-    bool resort = wp->w_grid_alloc.comp_index != 0
-                  && wp->w_grid_alloc.zindex != wp->w_config.zindex;
-    bool raise = resort && wp->w_grid_alloc.zindex < wp->w_config.zindex;
+    bool zindex_changed = wp->w_grid_alloc.zindex != wp->w_config.zindex;
+    bool raise = wp->w_grid_alloc.zindex < wp->w_config.zindex;
     wp->w_grid_alloc.zindex = wp->w_config.zindex;
-    if (resort) {
-      ui_comp_layers_adjust(wp->w_grid_alloc.comp_index, raise);
+    if (zindex_changed) {
+      ui_comp_layers_adjust(&wp->w_grid_alloc, raise);
     }
     bool valid = (wp->w_redr_type == 0 || ui_has(kUIMultigrid));
     if (!valid && !validate) {

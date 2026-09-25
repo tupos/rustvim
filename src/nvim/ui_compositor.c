@@ -77,12 +77,12 @@ void ui_comp_detach(RemoteUI *ui)
 /// This function adjusts the position of a layer in the layers array
 /// based on its zindex, either raising or lowering it.
 ///
-/// @param[in]  layer_idx  Index of the layer to be raised or lowered.
-/// @param[in]  raise      Raise the layer if true, else lower it.
-void ui_comp_layers_adjust(size_t layer_idx, bool raise)
+/// @param[in]  grid   Grid whose layer is to be raised or lowered.
+/// @param[in]  raise  Raise the layer if true, else lower it.
+void ui_comp_layers_adjust(ScreenGrid *grid, bool raise)
 {
-  bool adjusted = ui_comp_adjust_layer_order(
-    layers.items, layers.size, layer_idx, raise);
+  bool adjusted = ui_comp_adjust_grid_layer_order(
+    layers.items, layers.size, grid, raise);
   assert(adjusted);
   (void)adjusted;
 }

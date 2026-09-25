@@ -2754,7 +2754,10 @@ pub unsafe extern "C" fn ui_comp_grid_cursor_goto_in_layer_stack(
     true
 }
 
-/// Adjusts one layer's position after its z-index changes.
+/// Adjusts a registered grid's layer position after its z-index changes.
+///
+/// A grid that is not currently registered is accepted as a no-op, matching
+/// the previous C-side `comp_index == 0` check.
 ///
 /// Every temporarily owned grid is restored before this function returns.
 ///
@@ -2763,19 +2766,28 @@ pub unsafe extern "C" fn ui_comp_grid_cursor_goto_in_layer_stack(
 /// `layer_grids` must point to `layer_count` writable, distinct, non-null grid
 /// pointers. Every grid must be exclusively accessible and its buffers must
 /// satisfy the ownership and layout requirements of `ScreenGrid`.
+///
+/// `grid` must be non-null. It may identify one grid in `layer_grids`; an
+/// unregistered grid is not dereferenced.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ui_comp_adjust_layer_order(
+pub unsafe extern "C" fn ui_comp_adjust_grid_layer_order(
     layer_grids: *mut *mut CScreenGrid,
     layer_count: usize,
-    layer_index: usize,
+    grid: *mut CScreenGrid,
     raise: bool,
 ) -> bool {
+    if grid.is_null() {
+        return false;
+    }
     // SAFETY: The caller satisfies the documented layer-array and grid
     // ownership requirements.
     let Some(mut layer_guards) =
         (unsafe { CompositorLayerGuards::try_take(layer_grids, layer_count) })
     else {
         return false;
+    };
+    let Some(layer_index) = layer_guards.index_of(grid) else {
+        return true;
     };
     let adjustment = if raise {
         CompositorLayerAdjustment::Raise

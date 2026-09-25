@@ -121,9 +121,9 @@ extern bool ui_comp_grid_cursor_goto_in_layer_stack(
   Integer row, Integer column,
   CompositorAreaCallbacks callbacks);
 
-extern bool ui_comp_adjust_layer_order(
+extern bool ui_comp_adjust_grid_layer_order(
   ScreenGrid **layer_grids, size_t layer_count,
-  size_t layer_index, bool raise);
+  ScreenGrid *grid, bool raise);
 
 extern bool ui_comp_remove_grid_from_layer_stack(
   ScreenGrid **layer_grids, size_t *layer_count,
