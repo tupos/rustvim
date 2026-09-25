@@ -3149,30 +3149,12 @@ pub unsafe extern "C" fn ui_comp_grid_cursor_goto_in_layer_stack(
 /// the previous C-side `comp_index == 0` check.
 ///
 /// Every temporarily owned grid is restored before this function returns.
-///
-/// # Safety
-///
-/// `layer_grids` must point to `layer_count` readable, distinct, non-null grid
-/// pointers. Every grid must be exclusively accessible and its buffers must
-/// satisfy the ownership and layout requirements of `ScreenGrid`.
-///
-/// `grid` must be non-null. It may identify one grid in `layer_grids`; an
-/// unregistered grid is not dereferenced.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ui_comp_adjust_grid_layer_order(
-    layer_grids: *const *mut CScreenGrid,
-    layer_count: usize,
-    grid: *mut CScreenGrid,
-    raise: bool,
-) -> bool {
+pub extern "C" fn ui_comp_adjust_grid_layer_order(grid: *mut CScreenGrid, raise: bool) -> bool {
     if grid.is_null() {
         return false;
     }
-    // SAFETY: The caller satisfies the documented layer-array and grid
-    // ownership requirements.
-    let Some(mut layer_guards) =
-        (unsafe { CompositorLayerGuards::try_take(layer_grids, layer_count) })
-    else {
+    let Some(mut layer_guards) = CompositorLayerGuards::try_take_registered() else {
         return false;
     };
     let Some(layer_index) = layer_guards.index_of(grid) else {
@@ -4491,6 +4473,86 @@ mod tests {
                 target_index: 2,
             })
         );
+    }
+
+    #[test]
+    fn registered_layer_adjustment_updates_rust_order_and_indices() {
+        let default_grid = grid_with_size(1, 1);
+        let mut moving_grid = grid_with_size(1, 1);
+        moving_grid.set_z_index(30);
+        moving_grid.set_compositor_index(1);
+        let mut lower_grid = grid_with_size(1, 1);
+        lower_grid.set_z_index(20);
+        lower_grid.set_compositor_index(2);
+        let mut equal_grid = grid_with_size(1, 1);
+        equal_grid.set_z_index(30);
+        equal_grid.set_compositor_index(3);
+        let expected_registry = [
+            default_grid.id(),
+            lower_grid.id(),
+            moving_grid.id(),
+            equal_grid.id(),
+        ];
+
+        // SAFETY: Each conversion transfers its grid allocations to a
+        // distinct C representation.
+        let (mut default_cgrid, mut moving_cgrid, mut lower_cgrid, mut equal_cgrid) = unsafe {
+            (
+                default_grid.to_cgrid(),
+                moving_grid.to_cgrid(),
+                lower_grid.to_cgrid(),
+                equal_grid.to_cgrid(),
+            )
+        };
+        let default_pointer = &mut default_cgrid as *mut CScreenGrid;
+        let moving_pointer = &mut moving_cgrid as *mut CScreenGrid;
+        let lower_pointer = &mut lower_cgrid as *mut CScreenGrid;
+        let equal_pointer = &mut equal_cgrid as *mut CScreenGrid;
+        let cgrids = [
+            default_pointer,
+            moving_pointer,
+            lower_pointer,
+            equal_pointer,
+        ];
+
+        {
+            // SAFETY: The array contains distinct, exclusively accessible
+            // grids for the duration of the adjustment.
+            let _registry = unsafe { register_test_compositor_layers(&cgrids) };
+
+            assert!(ui_comp_adjust_grid_layer_order(moving_pointer, true));
+            assert_eq!(
+                lock_compositor_layer_state()
+                    .as_ref()
+                    .unwrap()
+                    .registry
+                    .layer_ids(),
+                &expected_registry
+            );
+            assert_eq!(
+                cgrids,
+                [
+                    default_pointer,
+                    moving_pointer,
+                    lower_pointer,
+                    equal_pointer,
+                ]
+            );
+        }
+
+        // SAFETY: The adjustment restored every grid allocation.
+        let (default_grid, moving_grid, lower_grid, equal_grid) = unsafe {
+            (
+                ScreenGrid::take_from_cgrid(&mut default_cgrid),
+                ScreenGrid::take_from_cgrid(&mut moving_cgrid),
+                ScreenGrid::take_from_cgrid(&mut lower_cgrid),
+                ScreenGrid::take_from_cgrid(&mut equal_cgrid),
+            )
+        };
+        assert_eq!(default_grid.compositor_index(), 0);
+        assert_eq!(moving_grid.compositor_index(), 2);
+        assert_eq!(lower_grid.compositor_index(), 1);
+        assert_eq!(equal_grid.compositor_index(), 3);
     }
 
     #[test]

@@ -88,8 +88,7 @@ void ui_comp_detach(RemoteUI *ui)
 /// @param[in]  raise  Raise the layer if true, else lower it.
 void ui_comp_layers_adjust(ScreenGrid *grid, bool raise)
 {
-  bool adjusted = ui_comp_adjust_grid_layer_order(
-    layers.items, layers.size, grid, raise);
+  bool adjusted = ui_comp_adjust_grid_layer_order(grid, raise);
   assert(adjusted);
   (void)adjusted;
 }

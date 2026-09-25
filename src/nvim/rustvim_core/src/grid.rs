@@ -365,6 +365,11 @@ impl ScreenGrid {
         self.zindex
     }
 
+    /// Updates this grid's compositor z-index.
+    pub(crate) fn set_z_index(&mut self, z_index: i32) {
+        self.zindex = z_index;
+    }
+
     /// Reports whether this grid is at least `minimum_gap` above another grid.
     pub(crate) fn is_at_least_z_index_above(&self, lower_grid: &Self, minimum_gap: u32) -> bool {
         i64::from(self.zindex) - i64::from(lower_grid.zindex) >= i64::from(minimum_gap)
