@@ -148,7 +148,6 @@ extern bool ui_comp_cursor_is_covered_by_higher_layer(
   int minimum_z_index_gap);
 
 extern bool ui_comp_cursor_is_covered_by_higher_layer_in_stack(
-  ScreenGrid *const *layer_grids, size_t layer_count,
   ScreenGrid *current_grid, int row, int column, int minimum_z_index_gap);
 
 extern void ui_comp_hide_message_separator(void);

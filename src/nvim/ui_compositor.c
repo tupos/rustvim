@@ -187,7 +187,7 @@ bool ui_comp_cursor_is_covered_by_higher_layer(ScreenGrid *current_grid, int row
                                                int minimum_z_index_gap)
 {
   return ui_comp_cursor_is_covered_by_higher_layer_in_stack(
-    layers.items, layers.size, current_grid, row, col, minimum_z_index_gap);
+    current_grid, row, col, minimum_z_index_gap);
 }
 
 static CompositorLineSettings compositor_line_settings(void)

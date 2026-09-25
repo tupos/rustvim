@@ -3423,20 +3423,58 @@ pub unsafe extern "C" fn ui_comp_grid_accepts_mouse_at(
     .is_some_and(|grid| grid.matches(CompositorPoint { row, column }, LayerHitTest::MouseEnabled))
 }
 
+/// Checks cursor coverage using the grids registered at the FFI boundary.
+///
+/// # Safety
+///
+/// `current_grid` must either identify one registered grid or another valid,
+/// exclusively accessible grid satisfying the ownership and layout
+/// requirements of `ScreenGrid`.
+unsafe fn cursor_is_covered_by_registered_layers(
+    current_grid: *mut CScreenGrid,
+    row: libc::c_int,
+    column: libc::c_int,
+    minimum_z_index_gap: u32,
+) -> Option<bool> {
+    if current_grid.is_null() {
+        return None;
+    }
+
+    let layer_guards = CompositorLayerGuards::try_take_registered()?;
+    let current_layer_index = layer_guards.index_of(current_grid);
+    let layers = layer_guards.layer_stack()?;
+    let point = CompositorPoint { row, column };
+
+    if let Some(current_layer_index) = current_layer_index {
+        return Some(
+            layer_guards
+                .grid(current_layer_index)
+                .is_some_and(|current_grid| {
+                    layers.is_cursor_covered_by_higher_layer(
+                        point,
+                        current_grid,
+                        minimum_z_index_gap,
+                    )
+                }),
+        );
+    }
+
+    // SAFETY: The current-grid pointer was not present in the validated layer
+    // registry, and the caller guarantees that it is otherwise distinct,
+    // valid, and exclusively accessible.
+    let current_grid = unsafe { ScreenGridGuard::take(current_grid) };
+    Some(layers.is_cursor_covered_by_higher_layer(point, &current_grid, minimum_z_index_gap))
+}
+
 /// Reports whether a sufficiently higher compositor layer covers the cursor.
 ///
 /// # Safety
 ///
-/// `layer_grids` must point to `layer_count` readable, distinct, non-null grid
-/// pointers. Every grid must be exclusively accessible and its buffers must
-/// satisfy the ownership and layout requirements of `ScreenGrid`.
-///
-/// `current_grid` must either identify one grid in `layer_grids` or identify
-/// another exclusively accessible grid satisfying the same requirements.
+/// `current_grid` may be null. Otherwise, it must either identify one
+/// registered grid or another valid, exclusively accessible grid satisfying
+/// the ownership and layout requirements of `ScreenGrid`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ui_comp_cursor_is_covered_by_higher_layer_in_stack(
-    layer_grids: *const *mut CScreenGrid,
-    layer_count: usize,
     current_grid: *mut CScreenGrid,
     row: libc::c_int,
     column: libc::c_int,
@@ -3445,38 +3483,15 @@ pub unsafe extern "C" fn ui_comp_cursor_is_covered_by_higher_layer_in_stack(
     if !lock_compositor_draw_state().should_draw() {
         return false;
     }
-    if current_grid.is_null() {
-        return false;
-    }
     let Ok(minimum_z_index_gap) = u32::try_from(minimum_z_index_gap) else {
         return false;
     };
 
-    // SAFETY: The caller satisfies the documented layer-array and grid
-    // ownership requirements.
-    let Some(layer_guards) = (unsafe { CompositorLayerGuards::try_take(layer_grids, layer_count) })
-    else {
-        return false;
-    };
-    let current_layer_index = layer_guards.index_of(current_grid);
-    let Some(layers) = layer_guards.layer_stack() else {
-        return false;
-    };
-    let point = CompositorPoint { row, column };
-
-    if let Some(current_layer_index) = current_layer_index {
-        return layer_guards
-            .grid(current_layer_index)
-            .is_some_and(|current_grid| {
-                layers.is_cursor_covered_by_higher_layer(point, current_grid, minimum_z_index_gap)
-            });
+    // SAFETY: The caller satisfies the current-grid ownership requirements.
+    unsafe {
+        cursor_is_covered_by_registered_layers(current_grid, row, column, minimum_z_index_gap)
     }
-
-    // SAFETY: The current-grid pointer was not present in the validated layer
-    // array, and the caller guarantees that it is otherwise distinct, valid,
-    // and exclusively accessible.
-    let current_grid = unsafe { ScreenGridGuard::take(current_grid) };
-    layers.is_cursor_covered_by_higher_layer(point, &current_grid, minimum_z_index_gap)
+    .unwrap_or(false)
 }
 
 /// Composes and submits one validated line from temporarily C-owned grids.
@@ -5351,6 +5366,72 @@ mod tests {
             &current_grid,
             0,
         ));
+    }
+
+    #[test]
+    fn registered_bindings_support_cursor_coverage_queries() {
+        let mut default_grid = grid_with_size(4, 4);
+        default_grid.set_compositor_size(4, 4);
+        let mut current_grid = grid_with_size(2, 2);
+        current_grid.set_compositor_position(0, 0);
+        current_grid.set_compositor_size(2, 2);
+        current_grid.set_compositor_index(1);
+        let mut upper_grid = grid_with_size(2, 2);
+        upper_grid.set_compositor_position(0, 0);
+        upper_grid.set_compositor_size(2, 2);
+        upper_grid.set_compositor_index(2);
+        let external_grid = grid_with_size(2, 2);
+
+        // SAFETY: Each conversion transfers its grid allocations to a
+        // distinct C representation.
+        let (mut default_cgrid, mut current_cgrid, mut upper_cgrid, mut external_cgrid) = unsafe {
+            (
+                default_grid.to_cgrid(),
+                current_grid.to_cgrid(),
+                upper_grid.to_cgrid(),
+                external_grid.to_cgrid(),
+            )
+        };
+        let default_pointer = &mut default_cgrid as *mut CScreenGrid;
+        let current_pointer = &mut current_cgrid as *mut CScreenGrid;
+        let upper_pointer = &mut upper_cgrid as *mut CScreenGrid;
+        let external_pointer = &mut external_cgrid as *mut CScreenGrid;
+        let cgrids = [default_pointer, current_pointer, upper_pointer];
+
+        {
+            // SAFETY: The array contains distinct, exclusively accessible
+            // grids for the duration of the coverage queries.
+            let _registry = unsafe { register_test_compositor_layers(&cgrids) };
+
+            // SAFETY: The current grid is registered and exclusively
+            // accessible through the boundary state.
+            assert_eq!(
+                unsafe { cursor_is_covered_by_registered_layers(current_pointer, 0, 0, 0) },
+                Some(true)
+            );
+            // SAFETY: The external grid is distinct from every registered
+            // grid and remains exclusively accessible during the call.
+            assert_eq!(
+                unsafe { cursor_is_covered_by_registered_layers(external_pointer, 0, 0, 0) },
+                Some(true)
+            );
+            // SAFETY: The current grid is registered and exclusively
+            // accessible through the boundary state.
+            assert_eq!(
+                unsafe { cursor_is_covered_by_registered_layers(current_pointer, 0, 0, 1) },
+                Some(false)
+            );
+        }
+
+        // SAFETY: Every coverage query restored all grid allocations.
+        let (_default_grid, _current_grid, _upper_grid, _external_grid) = unsafe {
+            (
+                ScreenGrid::take_from_cgrid(&mut default_cgrid),
+                ScreenGrid::take_from_cgrid(&mut current_cgrid),
+                ScreenGrid::take_from_cgrid(&mut upper_cgrid),
+                ScreenGrid::take_from_cgrid(&mut external_cgrid),
+            )
+        };
     }
 
     #[test]
