@@ -3355,11 +3355,16 @@ fn cursor_is_covered_by_registered_layers(
     Some(layers.is_cursor_covered_by_higher_layer(point, current_grid, minimum_z_index_gap))
 }
 
-/// Reports whether a sufficiently higher compositor layer covers the cursor.
+/// Reports whether a sufficiently higher compositor layer covers a grid's
+/// cursor.
+///
+/// # Safety
+///
+/// `current_grid` must point to an exclusively accessible C grid whose buffers
+/// satisfy the ownership and layout requirements of `ScreenGrid`.
 #[unsafe(no_mangle)]
-pub extern "C" fn ui_comp_cursor_is_covered_by_higher_layer_in_stack(
-    current_grid_handle: Integer,
-    current_grid_z_index: libc::c_int,
+pub unsafe extern "C" fn ui_comp_cursor_is_covered_by_higher_layer(
+    current_grid: *mut CScreenGrid,
     row: libc::c_int,
     column: libc::c_int,
     minimum_z_index_gap: libc::c_int,
@@ -3367,23 +3372,20 @@ pub extern "C" fn ui_comp_cursor_is_covered_by_higher_layer_in_stack(
     if !lock_compositor_draw_state().should_draw() {
         return false;
     }
-    let (Ok(current_grid_handle), Ok(minimum_z_index_gap)) = (
-        i32::try_from(current_grid_handle),
-        u32::try_from(minimum_z_index_gap),
-    ) else {
+    let Some(current_grid) = NonNull::new(current_grid) else {
         return false;
     };
+    let Ok(minimum_z_index_gap) = u32::try_from(minimum_z_index_gap) else {
+        return false;
+    };
+    let current_grid = {
+        // SAFETY: The caller transfers exclusive ownership for this scope.
+        let grid = unsafe { ScreenGridGuard::take(current_grid.as_ptr()) };
+        CompositorCursorGrid::from(&*grid)
+    };
 
-    cursor_is_covered_by_registered_layers(
-        CompositorCursorGrid {
-            grid_id: GridId::new(current_grid_handle),
-            z_index: current_grid_z_index,
-        },
-        row,
-        column,
-        minimum_z_index_gap,
-    )
-    .unwrap_or(false)
+    cursor_is_covered_by_registered_layers(current_grid, row, column, minimum_z_index_gap)
+        .unwrap_or(false)
 }
 
 /// Composes and submits one validated line from registered compositor grids.

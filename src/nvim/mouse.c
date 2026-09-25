@@ -1854,7 +1854,18 @@ static win_T *mouse_find_grid_win(int *gridp, int *rowp, int *colp)
       return wp;
     }
   } else if (*gridp == 0) {
-    ScreenGrid *grid = ui_comp_mouse_focus(*rowp, *colp);
+    ScreenGrid *grid = ui_comp_find_grid_at_coord(*rowp, *colp, true);
+    if (grid == NULL && ui_has(kUIMultigrid)) {
+      FOR_ALL_WINDOWS_IN_TAB(wp, curtab) {
+        ScreenGrid *window_grid = &wp->w_grid_alloc;
+        if (ui_comp_grid_accepts_mouse_at(
+              window_grid, wp->w_winrow, wp->w_wincol, *rowp, *colp)) {
+          grid = window_grid;
+          break;
+        }
+      }
+    }
+
     if (grid == &pum_grid) {
       *gridp = grid->handle;
       *rowp -= grid->comp_row;

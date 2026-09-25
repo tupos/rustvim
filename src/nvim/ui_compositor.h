@@ -48,10 +48,6 @@ extern bool ui_comp_cursor_is_covered_by_higher_layer(
   ScreenGrid *current_grid, int row, int column,
   int minimum_z_index_gap);
 
-extern bool ui_comp_cursor_is_covered_by_higher_layer_in_stack(
-  Integer current_grid_handle, int current_grid_z_index,
-  int row, int column, int minimum_z_index_gap);
-
 extern void ui_comp_hide_message_separator(void);
 
 #include "ui_compositor.h.generated.h"
