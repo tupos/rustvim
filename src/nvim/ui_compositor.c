@@ -81,8 +81,8 @@ void ui_comp_detach(RemoteUI *ui)
 
 /// Raises or lowers the layer, syncing comp_index with zindex.
 ///
-/// This function adjusts the position of a layer in the layers array
-/// based on its zindex, either raising or lowering it.
+/// This function adjusts the position of a layer in the Rust registry based
+/// on its zindex, either raising or lowering it.
 ///
 /// @param[in]  grid   Grid whose layer is to be raised or lowered.
 /// @param[in]  raise  Raise the layer if true, else lower it.
