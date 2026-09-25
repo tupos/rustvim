@@ -1370,6 +1370,19 @@ impl CCompositorGridBindings {
                 .iter()
                 .all(|grid_id| self.grids.contains_key(grid_id))
     }
+
+    /// Returns C grid pointers in native compositor order.
+    fn ordered_cgrids(&self, registry: &CompositorLayerRegistry) -> Option<Vec<*mut CScreenGrid>> {
+        registry
+            .layer_ids()
+            .iter()
+            .map(|grid_id| {
+                self.grids
+                    .get(grid_id)
+                    .map(|binding| binding.cgrid.as_ptr())
+            })
+            .collect()
+    }
 }
 
 /// Process-global compositor state at the transitional C boundary.
@@ -1823,6 +1836,23 @@ struct CompositorLayerGuards {
 }
 
 impl CompositorLayerGuards {
+    /// Takes temporary ownership of all grids registered at the FFI boundary.
+    fn try_take_registered() -> Option<Self> {
+        let (registry, cgrids) = {
+            let state = lock_compositor_layer_state();
+            let state = state.as_ref()?;
+            let registry = state.registry.clone();
+            let cgrids = state.c_grids.ordered_cgrids(&registry)?;
+            (registry, cgrids)
+        };
+
+        // SAFETY: The boundary state contains distinct pointers established
+        // by validated FFI operations. Compositor calls are serialized on
+        // Neovim's main thread, and registered C grids remain alive until
+        // removal.
+        unsafe { Self::try_take_for_registry(cgrids.as_ptr(), cgrids.len(), registry) }
+    }
+
     /// Binds C grids to identities ordered by the persistent registry.
     ///
     /// # Safety
@@ -3298,18 +3328,11 @@ pub unsafe extern "C" fn ui_comp_remove_grid_from_layer_stack(
 
 /// Finds the topmost non-default compositor grid at one screen coordinate.
 ///
-/// Returns null when no matching grid exists or the binding array is invalid.
+/// Returns null when no matching grid exists or the registered state is
+/// invalid.
 /// Every temporarily owned grid is restored before this function returns.
-///
-/// # Safety
-///
-/// `layer_grids` must point to `layer_count` readable, distinct, non-null grid
-/// pointers. Every grid must be exclusively accessible and its buffers must
-/// satisfy the ownership and layout requirements of `ScreenGrid`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ui_comp_find_grid_at_coord(
-    layer_grids: *const *mut CScreenGrid,
-    layer_count: usize,
+pub extern "C" fn ui_comp_find_grid_at_coord(
     row: libc::c_int,
     column: libc::c_int,
     require_mouse_input: bool,
@@ -3320,10 +3343,7 @@ pub unsafe extern "C" fn ui_comp_find_grid_at_coord(
         LayerHitTest::Any
     };
 
-    // SAFETY: The caller satisfies the documented layer-array and grid
-    // ownership requirements.
-    let Some(layer_guards) = (unsafe { CompositorLayerGuards::try_take(layer_grids, layer_count) })
-    else {
+    let Some(layer_guards) = CompositorLayerGuards::try_take_registered() else {
         return std::ptr::null_mut();
     };
     let grid_id = {
@@ -5174,6 +5194,42 @@ mod tests {
             layers.topmost_grid_at(CompositorPoint { row: 2, column: 2 }, LayerHitTest::Any,),
             Some(upper_grid.id())
         );
+    }
+
+    #[test]
+    fn registered_hit_testing_returns_the_bound_c_grid() {
+        let default_grid = grid_with_size(4, 4);
+        let mut overlay_grid = grid_with_size(2, 2);
+        overlay_grid.set_compositor_position(1, 1);
+        overlay_grid.set_compositor_size(2, 2);
+        overlay_grid.set_compositor_index(1);
+        overlay_grid.set_accepts_mouse_input(false);
+
+        // SAFETY: Each conversion transfers its grid allocations to a
+        // distinct C representation.
+        let (mut default_cgrid, mut overlay_cgrid) =
+            unsafe { (default_grid.to_cgrid(), overlay_grid.to_cgrid()) };
+        let default_pointer = &mut default_cgrid as *mut CScreenGrid;
+        let overlay_pointer = &mut overlay_cgrid as *mut CScreenGrid;
+        let cgrids = [default_pointer, overlay_pointer];
+
+        {
+            // SAFETY: The array contains distinct, exclusively accessible
+            // grids for the duration of the registered operations.
+            let _registry = unsafe { register_test_compositor_layers(&cgrids) };
+
+            assert_eq!(ui_comp_find_grid_at_coord(1, 1, false), overlay_pointer);
+            assert!(ui_comp_find_grid_at_coord(1, 1, true).is_null());
+            assert!(ui_comp_find_grid_at_coord(0, 0, false).is_null());
+        }
+
+        // SAFETY: Hit-testing restored both grid allocations.
+        let (_default_grid, _overlay_grid) = unsafe {
+            (
+                ScreenGrid::take_from_cgrid(&mut default_cgrid),
+                ScreenGrid::take_from_cgrid(&mut overlay_cgrid),
+            )
+        };
     }
 
     #[test]

@@ -149,8 +149,7 @@ void ui_comp_grid_cursor_goto(Integer grid_handle, Integer r, Integer c)
 
 ScreenGrid *ui_comp_mouse_focus(int row, int col)
 {
-  ScreenGrid *layer_grid = ui_comp_find_grid_at_coord(
-    layers.items, layers.size, row, col, true);
+  ScreenGrid *layer_grid = ui_comp_find_grid_at_coord(row, col, true);
   if (layer_grid != NULL) {
     return layer_grid;
   }
@@ -170,8 +169,7 @@ ScreenGrid *ui_comp_mouse_focus(int row, int col)
 /// Compute which grid is on top at supplied screen coordinates
 ScreenGrid *ui_comp_get_grid_at_coord(int row, int col)
 {
-  ScreenGrid *layer_grid = ui_comp_find_grid_at_coord(
-    layers.items, layers.size, row, col, false);
+  ScreenGrid *layer_grid = ui_comp_find_grid_at_coord(row, col, false);
   if (layer_grid != NULL) {
     return layer_grid;
   }
