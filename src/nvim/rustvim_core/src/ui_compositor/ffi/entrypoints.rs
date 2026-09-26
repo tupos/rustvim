@@ -1050,48 +1050,33 @@ unsafe fn process_scroll(
     request: CompositorScrollRequest,
     output: &mut impl CompositorOutput,
 ) -> bool {
-    if !lock_compositor().should_draw() {
-        return true;
-    }
-    let Some(runtime) = compositor_runtime_snapshot() else {
-        return false;
-    };
-
-    let message_was_scrolled = lock_compositor().message_was_scrolled();
     let operation = {
         let Some(grid_store) = LegacyGridStore::try_take_registered() else {
             return false;
         };
         let message_layer_index = grid_store.index_of(message_grid);
-        let Some(layers) = grid_store.registry.layer_stack(&grid_store) else {
-            return false;
-        };
-        let Some(current_layer_index) = layers.layer_index_with_id(grid_id) else {
-            return true;
-        };
-        let Some(plan) = layers.plan_scroll(
-            current_layer_index,
+        let Some(operation) = lock_compositor().scroll(
+            &grid_store.registry,
+            &grid_store,
+            grid_id,
             message_layer_index,
-            message_was_scrolled,
             request,
         ) else {
             return false;
         };
-        let Some(current_grid_id) = grid_store.registry.layer_id(current_layer_index) else {
-            return false;
-        };
-        let Some(current_grid) = grid_store.grid(current_grid_id) else {
-            return false;
-        };
-        plan.prepare(current_grid)
+        operation
     };
 
     match operation {
+        CompositorScrollOperation::Ignore => return true,
         CompositorScrollOperation::Forward {
             region,
             row_delta,
             column_delta,
         } => {
+            let Some(runtime) = compositor_runtime_snapshot() else {
+                return false;
+            };
             output.emit(UiCommand::GridScroll {
                 region,
                 row_delta,
@@ -1102,6 +1087,9 @@ unsafe fn process_scroll(
             }
         }
         CompositorScrollOperation::Recompose { region, rows } => {
+            let Some(runtime) = compositor_runtime_snapshot() else {
+                return false;
+            };
             runtime.visualize(
                 &CompositorRecomposeArea {
                     rows: region.rows.clone(),

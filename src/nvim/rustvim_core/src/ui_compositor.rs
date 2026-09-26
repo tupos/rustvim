@@ -892,14 +892,37 @@ impl Compositor {
         Some(CompositorRawLineOperation::Process(plan))
     }
 
+    /// Selects and prepares the complete safe operation for one grid scroll.
+    fn scroll(
+        &self,
+        registry: &CompositorLayerRegistry,
+        grids: &impl GridAccess,
+        grid_id: GridId,
+        message_layer_index: Option<usize>,
+        request: CompositorScrollRequest,
+    ) -> Option<CompositorScrollOperation> {
+        if !self.should_draw() {
+            return Some(CompositorScrollOperation::Ignore);
+        }
+
+        let layers = registry.layer_stack(grids)?;
+        let Some(current_layer_index) = layers.layer_index_with_id(grid_id) else {
+            return Some(CompositorScrollOperation::Ignore);
+        };
+        let plan = layers.plan_scroll(
+            current_layer_index,
+            message_layer_index,
+            self.message.was_scrolled,
+            request,
+        )?;
+        let current_grid = layers.layer(current_layer_index)?.grid;
+
+        Some(plan.prepare(current_grid))
+    }
+
     /// Returns the active message-separator character for one screen row.
     fn message_separator_character_at(&self, row: i32) -> Option<VimSCharT> {
         self.message.separator_character_at(row)
-    }
-
-    /// Reports whether the most recent message-grid placement was scrolled.
-    fn message_was_scrolled(&self) -> bool {
-        self.message.was_scrolled
     }
 }
 
@@ -951,6 +974,9 @@ enum CompositorScrollPlan {
 /// A complete scroll action ready to execute after restoring grid ownership.
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum CompositorScrollOperation {
+    /// Ignore the event because composed output is disabled or absent.
+    Ignore,
+
     /// Forward the translated scroll directly to the composed UI.
     Forward {
         region: CompositorRegion,
