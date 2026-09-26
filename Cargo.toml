@@ -9,6 +9,7 @@ members = [
 
 [workspace.dependencies]
 libc = "0.2"
+thiserror = "2.0.21"
 
 [profile.release-debinfo]
 inherits = "release"

@@ -198,6 +198,20 @@ struct CompositorResizePlan {
     buffer_width: usize,
 }
 
+/// Failures produced by safe compositor operations.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+enum CompositorError {
+    /// No composed UI is available to detach.
+    #[error("cannot detach a composed UI when none is attached")]
+    NoAttachedUi,
+
+    /// The screen width cannot be represented by native buffer indices.
+    #[error("screen width cannot address native buffer storage")]
+    ScreenWidthOutOfRange,
+}
+
+type CompositorResult<T> = Result<T, CompositorError>;
+
 /// Validated native inputs for positioning the composed cursor.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct CompositorCursorRequest {
@@ -455,9 +469,12 @@ impl CompositorDrawState {
     }
 
     /// Removes one composed UI and reports whether none remain.
-    fn unregister_ui(&mut self) -> Option<bool> {
-        self.attached_ui_count = self.attached_ui_count.checked_sub(1)?;
-        Some(self.attached_ui_count == 0)
+    fn unregister_ui(&mut self) -> CompositorResult<bool> {
+        self.attached_ui_count = self
+            .attached_ui_count
+            .checked_sub(1)
+            .ok_or(CompositorError::NoAttachedUi)?;
+        Ok(self.attached_ui_count == 0)
     }
 
     /// Reports whether composed output may currently be emitted.
@@ -628,7 +645,7 @@ impl Compositor {
     }
 
     /// Removes one composed UI and reports whether none remain.
-    fn detach(&mut self) -> Option<bool> {
+    fn detach(&mut self) -> CompositorResult<bool> {
         self.display.unregister_ui()
     }
 
@@ -654,11 +671,12 @@ impl Compositor {
     }
 
     /// Records a composed-screen resize and plans its external effects.
-    fn resize(&mut self, size: CompositorSize) -> Option<CompositorResizePlan> {
-        let buffer_width = usize::try_from(size.width).ok()?;
+    fn resize(&mut self, size: CompositorSize) -> CompositorResult<CompositorResizePlan> {
+        let buffer_width =
+            usize::try_from(size.width).map_err(|_| CompositorError::ScreenWidthOutOfRange)?;
         self.display.screen_size = Some(size);
 
-        Some(CompositorResizePlan { size, buffer_width })
+        Ok(CompositorResizePlan { size, buffer_width })
     }
 
     /// Updates message-grid placement and returns its required display work.
@@ -2919,11 +2937,11 @@ mod tests {
         assert!(!compositor.set_screen_valid(true));
         assert!(compositor.should_draw());
 
-        assert_eq!(compositor.detach(), Some(false));
+        assert_eq!(compositor.detach(), Ok(false));
         assert!(compositor.should_draw());
-        assert_eq!(compositor.detach(), Some(true));
+        assert_eq!(compositor.detach(), Ok(true));
         assert!(!compositor.should_draw());
-        assert_eq!(compositor.detach(), None);
+        assert_eq!(compositor.detach(), Err(CompositorError::NoAttachedUi));
     }
 
     #[test]
@@ -2936,7 +2954,7 @@ mod tests {
 
         assert_eq!(
             compositor.resize(size),
-            Some(CompositorResizePlan {
+            Ok(CompositorResizePlan {
                 size,
                 buffer_width: 80,
             })
