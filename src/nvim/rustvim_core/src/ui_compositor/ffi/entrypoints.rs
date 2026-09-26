@@ -78,7 +78,7 @@ pub extern "C" fn ui_comp_grid_resize(grid: Integer, width: Integer, height: Int
         panic!("grid-resize arguments must fit native compositor coordinates");
     };
     let size =
-        CompositorSize::try_new(height, width).expect("grid-resize dimensions must be nonnegative");
+        GridSize::try_new(height, width).expect("grid-resize dimensions must be nonnegative");
     if GridId::new(grid) != GridId::new(1) {
         return;
     }
@@ -133,8 +133,7 @@ unsafe fn update_message_position(
     if let Some(scroll) = plan.scroll {
         output.emit(UiCommand::GridScroll {
             region: scroll.region,
-            row_delta: scroll.row_delta,
-            column_delta: 0,
+            delta: scroll.delta,
         });
     }
     if let Some(area) = plan.recompose {
@@ -971,8 +970,14 @@ pub unsafe extern "C" fn ui_comp_raw_line(
     ) else {
         panic!("raw-line arguments must fit native compositor coordinates");
     };
-    let request = CompositorRawLineRequest::try_new(row, start_col, end_col, clear_col, flags)
-        .expect("raw-line columns must be ordered");
+    let request = CompositorRawLineRequest::try_new(
+        row,
+        start_col,
+        end_col,
+        clear_col,
+        LineFlags::from_raw(flags),
+    )
+    .expect("raw-line columns must be ordered");
     let mut output = NvimOutput;
 
     // SAFETY: The generated caller supplies the documented cell arrays, and
@@ -1019,17 +1024,9 @@ unsafe fn process_scroll(
 
     match operation {
         CompositorScrollOperation::Ignore => return Ok(()),
-        CompositorScrollOperation::Forward {
-            region,
-            row_delta,
-            column_delta,
-        } => {
+        CompositorScrollOperation::Forward { region, delta } => {
             let runtime = compositor_runtime_snapshot().ok_or(CompositorError::InvalidGeometry)?;
-            output.emit(UiCommand::GridScroll {
-                region,
-                row_delta,
-                column_delta,
-            });
+            output.emit(UiCommand::GridScroll { region, delta });
             if runtime.debug_enabled {
                 runtime.delay(2, output);
             }
@@ -1055,7 +1052,7 @@ unsafe fn process_scroll(
                         CompositorLineInput {
                             row,
                             columns: region.columns.clone(),
-                            flags: 0,
+                            flags: LineFlags::default(),
                             settings: runtime.line_settings,
                         },
                         output,

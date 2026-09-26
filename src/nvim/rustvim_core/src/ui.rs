@@ -35,7 +35,7 @@ unsafe extern "C" {
         endcol: Integer,
         clearcol: Integer,
         clearattr: Integer,
-        flags: VimLineFlags,
+        flags: libc::c_int,
         chunk: *const VimSCharT,
         attrs: *const VimSAttrT,
     );
@@ -54,12 +54,39 @@ unsafe extern "C" {
     );
 }
 
-enum LineFlags {
-    Wrap = 1,
-    Invalid = 2,
-}
+/// Flags controlling one raw-line UI update.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct LineFlags(i32);
 
-type VimLineFlags = libc::c_int;
+impl LineFlags {
+    pub(crate) const WRAP: Self = Self(1);
+    pub(crate) const INVALID: Self = Self(2);
+
+    /// Creates flags while preserving bits received from the C API.
+    pub(crate) const fn from_raw(flags: i32) -> Self {
+        Self(flags)
+    }
+
+    /// Returns the representation expected by the C UI API.
+    pub(crate) const fn raw(self) -> i32 {
+        self.0
+    }
+
+    /// Adds one flag to this set.
+    pub(crate) fn insert(&mut self, flag: Self) {
+        self.0 |= flag.0;
+    }
+
+    /// Returns this set without the supplied flags.
+    pub(crate) const fn without(self, flags: Self) -> Self {
+        Self(self.0 & !flags.0)
+    }
+
+    /// Reports whether every supplied flag is present.
+    pub(crate) const fn contains(self, flags: Self) -> bool {
+        self.0 & flags.0 == flags.0
+    }
+}
 
 static mut PENDING_DEFAULT_COLORS: bool = false;
 
@@ -133,13 +160,13 @@ pub fn ui_line_r(
     wrap: bool,
 ) {
     assert!(0 <= row && row < grid.rows);
-    let mut flags: VimLineFlags = if wrap {
-        LineFlags::Wrap as VimLineFlags
+    let mut flags = if wrap {
+        LineFlags::WRAP
     } else {
-        0
+        LineFlags::default()
     };
     if start_col == 0 && invalid_row {
-        flags |= LineFlags::Invalid as VimLineFlags;
+        flags.insert(LineFlags::INVALID);
     }
 
     unsafe {
@@ -154,7 +181,7 @@ pub fn ui_line_r(
             end_col as i64,
             clear_col as i64,
             clear_attr as i64,
-            flags as i32,
+            flags.raw(),
             grid.chars.as_ptr().add(offset),
             grid.attrs.as_ptr().add(offset),
         );

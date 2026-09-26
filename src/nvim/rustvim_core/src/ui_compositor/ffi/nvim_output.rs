@@ -63,11 +63,7 @@ impl CompositorOutput for NvimOutput {
                     );
                 }
             }
-            UiCommand::GridScroll {
-                region,
-                row_delta,
-                column_delta,
-            } => {
+            UiCommand::GridScroll { region, delta } => {
                 // SAFETY: The region and deltas contain validated native
                 // values, and the callback is synchronous.
                 unsafe {
@@ -77,8 +73,8 @@ impl CompositorOutput for NvimOutput {
                         Integer::from(region.rows.end),
                         Integer::from(region.columns.start),
                         Integer::from(region.columns.end),
-                        Integer::from(row_delta),
-                        Integer::from(column_delta),
+                        Integer::from(delta.rows),
+                        Integer::from(delta.columns),
                     );
                 }
             }
@@ -94,7 +90,7 @@ impl CompositorOutput for NvimOutput {
                         Integer::from(line.columns.end),
                         Integer::from(line.clear_column),
                         Integer::from(line.clear_attribute),
-                        line.flags,
+                        line.flags.raw(),
                         line.characters.as_ptr(),
                         line.attributes.as_ptr(),
                     );

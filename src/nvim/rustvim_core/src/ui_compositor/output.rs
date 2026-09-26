@@ -2,9 +2,10 @@
 
 use std::ops::Range;
 
-use crate::grid::{ComposedPosition, VimSAttrT, VimSCharT};
-
-use super::{CompositorRegion, CompositorSize};
+use crate::{
+    grid::{ComposedPosition, ComposedRegion, GridDelta, GridSize, VimSAttrT, VimSCharT},
+    ui::LineFlags,
+};
 
 /// Receives validated output commands produced by the safe compositor.
 pub(super) trait CompositorOutput {
@@ -16,16 +17,15 @@ pub(super) trait CompositorOutput {
 /// logic.
 pub(super) enum UiCommand<'cells> {
     /// Resize the composed output grid.
-    GridResize(CompositorSize),
+    GridResize(GridSize),
 
     /// Move the cursor on the composed output grid.
     GridCursorGoto(ComposedPosition),
 
     /// Scroll a region of the composed output grid.
     GridScroll {
-        region: CompositorRegion,
-        row_delta: i32,
-        column_delta: i32,
+        region: ComposedRegion,
+        delta: GridDelta,
     },
 
     /// Submit one raw-line update to the composed output grid.
@@ -48,7 +48,7 @@ pub(super) struct RawLineCommand<'cells> {
     pub(super) columns: Range<i32>,
     pub(super) clear_column: i32,
     pub(super) clear_attribute: VimSAttrT,
-    pub(super) flags: i32,
+    pub(super) flags: LineFlags,
     pub(super) characters: &'cells [VimSCharT],
     pub(super) attributes: &'cells [VimSAttrT],
 }
@@ -60,7 +60,7 @@ impl<'cells> RawLineCommand<'cells> {
         columns: Range<i32>,
         clear_column: i32,
         clear_attribute: VimSAttrT,
-        flags: i32,
+        flags: LineFlags,
         characters: &'cells [VimSCharT],
         attributes: &'cells [VimSAttrT],
     ) -> Option<Self> {
@@ -90,14 +90,25 @@ mod tests {
 
     #[test]
     fn raw_line_requires_matching_payload_lengths() {
-        assert!(RawLineCommand::try_new(0, 2..4, 5, 0, 0, &[1, 2], &[3, 4]).is_some());
-        assert!(RawLineCommand::try_new(0, 2..4, 5, 0, 0, &[1], &[3, 4]).is_none());
+        assert!(
+            RawLineCommand::try_new(0, 2..4, 5, 0, LineFlags::default(), &[1, 2], &[3, 4],)
+                .is_some()
+        );
+        assert!(
+            RawLineCommand::try_new(0, 2..4, 5, 0, LineFlags::default(), &[1], &[3, 4]).is_none()
+        );
     }
 
     #[test]
     fn raw_line_requires_ordered_columns() {
         let reversed_columns = Range { start: 4, end: 2 };
-        assert!(RawLineCommand::try_new(0, reversed_columns, 5, 0, 0, &[], &[]).is_none());
-        assert!(RawLineCommand::try_new(0, 2..4, 3, 0, 0, &[1, 2], &[3, 4]).is_none());
+        assert!(
+            RawLineCommand::try_new(0, reversed_columns, 5, 0, LineFlags::default(), &[], &[],)
+                .is_none()
+        );
+        assert!(
+            RawLineCommand::try_new(0, 2..4, 3, 0, LineFlags::default(), &[1, 2], &[3, 4],)
+                .is_none()
+        );
     }
 }

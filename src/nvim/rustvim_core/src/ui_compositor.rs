@@ -21,16 +21,15 @@ use output::{CompositorOutput, RawLineCommand, UiCommand};
 use crate::{
     generated::enums::RdbFlags,
     grid::{
-        ComposedPosition, GridId, GridPosition, GridRow, GridRowSegment, Highlight, ScreenGrid,
-        VimSAttrT, VimSCharT, schar_from_ascii, schar_from_char,
+        ComposedPosition, ComposedRegion, GridDelta, GridId, GridPosition, GridRegion, GridRow,
+        GridRowSegment, GridSize, Highlight, ScreenGrid, VimSAttrT, VimSCharT, schar_from_ascii,
+        schar_from_char,
     },
+    ui::LineFlags,
 };
 
 #[cfg(test)]
 use crate::grid::CScreenGrid;
-
-const LINE_FLAG_WRAP: i32 = 1;
-const LINE_FLAG_INVALID: i32 = 2;
 
 /// Result of composing one foreground segment over its background.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -124,6 +123,18 @@ impl CompositorRect {
         })
     }
 
+    /// Uses a half-open region's ends as inclusive conservative boundaries.
+    ///
+    /// This preserves the compositor's historical coverage behavior.
+    fn from_region(region: &ComposedRegion) -> Self {
+        Self {
+            top: region.rows.start,
+            bottom: region.rows.end,
+            left: region.columns.start,
+            right: region.columns.end,
+        }
+    }
+
     /// Reports whether this rectangle intersects another at any cell.
     fn intersects(self, other: Self) -> bool {
         self.right >= other.left
@@ -170,24 +181,10 @@ impl CompositorRecomposeArea {
     }
 }
 
-/// Dimensions of a compositor layer.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct CompositorSize {
-    height: i32,
-    width: i32,
-}
-
-impl CompositorSize {
-    /// Constructs nonnegative compositor dimensions.
-    fn try_new(height: i32, width: i32) -> Option<Self> {
-        (height >= 0 && width >= 0).then_some(Self { height, width })
-    }
-}
-
 /// Safe state and follow-up work selected for a composed-grid resize.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct CompositorResizePlan {
-    size: CompositorSize,
+    size: GridSize,
     buffer_width: usize,
 }
 
@@ -262,7 +259,7 @@ enum CompositorCursorUpdate {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct CompositorGridPlacement {
     origin: ComposedPosition,
-    size: CompositorSize,
+    size: GridSize,
 }
 
 /// Validated native inputs for placing one compositor grid.
@@ -296,7 +293,7 @@ impl CompositorGridPlacement {
     fn try_new(row: i32, column: i32, height: i32, width: i32) -> Option<Self> {
         Some(Self {
             origin: ComposedPosition::new(row, column),
-            size: CompositorSize::try_new(height, width)?,
+            size: GridSize::try_new(height, width)?,
         })
     }
 
@@ -421,64 +418,12 @@ impl CompositorGridPlacementPlan {
     }
 }
 
-/// A half-open rectangular region in compositor coordinates.
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct CompositorRegion {
-    rows: Range<i32>,
-    columns: Range<i32>,
-}
-
-impl CompositorRegion {
-    /// Constructs a region with ordered row and column boundaries.
-    fn try_new(rows: Range<i32>, columns: Range<i32>) -> Option<Self> {
-        (rows.start <= rows.end && columns.start <= columns.end).then_some(Self { rows, columns })
-    }
-
-    /// Translates a grid-local region into composed-screen coordinates.
-    fn translated(self, row_offset: i32, column_offset: i32) -> CompositorResult<Self> {
-        Self::try_new(
-            self.rows
-                .start
-                .checked_add(row_offset)
-                .ok_or(CompositorError::InvalidGeometry)?
-                ..self
-                    .rows
-                    .end
-                    .checked_add(row_offset)
-                    .ok_or(CompositorError::InvalidGeometry)?,
-            self.columns
-                .start
-                .checked_add(column_offset)
-                .ok_or(CompositorError::InvalidGeometry)?
-                ..self
-                    .columns
-                    .end
-                    .checked_add(column_offset)
-                    .ok_or(CompositorError::InvalidGeometry)?,
-        )
-        .ok_or(CompositorError::InvalidGeometry)
-    }
-
-    /// Returns the boundaries used by the existing C coverage check.
-    ///
-    /// The compositor historically treats the scroll region's bottom and
-    /// right boundaries as inclusive for this conservative overlap check.
-    fn coverage_rect(&self) -> CompositorRect {
-        CompositorRect {
-            top: self.rows.start,
-            bottom: self.rows.end,
-            left: self.columns.start,
-            right: self.columns.end,
-        }
-    }
-}
-
 /// Validated native inputs for positioning the message grid.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct CompositorMessagePositionRequest {
     row: i32,
     separator_character: Option<VimSCharT>,
-    screen_size: CompositorSize,
+    screen_size: GridSize,
     scrolled: bool,
 }
 
@@ -487,7 +432,7 @@ impl CompositorMessagePositionRequest {
     fn new(
         row: i32,
         separator_character: Option<VimSCharT>,
-        screen_size: CompositorSize,
+        screen_size: GridSize,
         scrolled: bool,
     ) -> Self {
         Self {
@@ -502,8 +447,8 @@ impl CompositorMessagePositionRequest {
 /// One message-grid scroll emitted directly to the composed UI.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct MessageGridScroll {
-    region: CompositorRegion,
-    row_delta: i32,
+    region: ComposedRegion,
+    delta: GridDelta,
 }
 
 /// Effects required after repositioning the message grid.
@@ -518,7 +463,7 @@ struct CompositorMessagePositionPlan {
 struct CompositorDrawState {
     attached_ui_count: usize,
     screen_valid: bool,
-    screen_size: Option<CompositorSize>,
+    screen_size: Option<GridSize>,
 }
 
 impl CompositorDrawState {
@@ -634,13 +579,13 @@ impl MessageCompositorState {
 
         let previous_separator_offset = if self.was_scrolled { 1 } else { 0 };
         let scroll = MessageGridScroll {
-            region: CompositorRegion::try_new(
+            region: ComposedRegion::try_new(
                 request.row.saturating_sub(previous_separator_offset).max(0)
                     ..request.screen_size.height,
                 0..request.screen_size.width,
             )
             .ok_or(CompositorError::InvalidGeometry)?,
-            row_delta,
+            delta: GridDelta::new(row_delta, 0),
         };
         let recompose = if request.scrolled && !self.was_scrolled && request.row > 0 {
             Some(CompositorRecomposeArea {
@@ -758,7 +703,7 @@ impl Compositor {
     }
 
     /// Records a composed-screen resize and plans its external effects.
-    fn resize(&mut self, size: CompositorSize) -> CompositorResult<CompositorResizePlan> {
+    fn resize(&mut self, size: GridSize) -> CompositorResult<CompositorResizePlan> {
         let buffer_width =
             usize::try_from(size.width).map_err(|_| CompositorError::ScreenWidthOutOfRange)?;
         self.display.screen_size = Some(size);
@@ -1139,9 +1084,8 @@ impl Compositor {
 /// Validated grid-local inputs for planning one compositor scroll.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct CompositorScrollRequest {
-    region: CompositorRegion,
-    row_delta: i32,
-    column_delta: i32,
+    region: GridRegion,
+    delta: GridDelta,
 }
 
 impl CompositorScrollRequest {
@@ -1155,9 +1099,8 @@ impl CompositorScrollRequest {
         column_delta: i32,
     ) -> Option<Self> {
         Some(Self {
-            region: CompositorRegion::try_new(top..bottom, left..right)?,
-            row_delta,
-            column_delta,
+            region: GridRegion::try_new(top..bottom, left..right)?,
+            delta: GridDelta::new(row_delta, column_delta),
         })
     }
 }
@@ -1167,14 +1110,13 @@ impl CompositorScrollRequest {
 enum CompositorScrollPlan {
     /// Forward the translated scroll directly to the composed UI.
     Forward {
-        region: CompositorRegion,
-        row_delta: i32,
-        column_delta: i32,
+        region: ComposedRegion,
+        delta: GridDelta,
     },
 
     /// Recompose valid rows because another layer covers the region.
     Recompose {
-        region: CompositorRegion,
+        region: ComposedRegion,
         screen_rows: Range<i32>,
         first_grid_row: i32,
         grid_start_column: i32,
@@ -1189,14 +1131,13 @@ enum CompositorScrollOperation {
 
     /// Forward the translated scroll directly to the composed UI.
     Forward {
-        region: CompositorRegion,
-        row_delta: i32,
-        column_delta: i32,
+        region: ComposedRegion,
+        delta: GridDelta,
     },
 
     /// Recompose only rows whose source cells are valid.
     Recompose {
-        region: CompositorRegion,
+        region: ComposedRegion,
         rows: Vec<i32>,
     },
 }
@@ -1205,15 +1146,7 @@ impl CompositorScrollPlan {
     /// Resolves row validity while the selected grid is safely borrowed.
     fn prepare(self, grid: &ScreenGrid) -> CompositorScrollOperation {
         match self {
-            Self::Forward {
-                region,
-                row_delta,
-                column_delta,
-            } => CompositorScrollOperation::Forward {
-                region,
-                row_delta,
-                column_delta,
-            },
+            Self::Forward { region, delta } => CompositorScrollOperation::Forward { region, delta },
             Self::Recompose {
                 region,
                 screen_rows,
@@ -1244,7 +1177,7 @@ struct CompositorRawLineRequest {
     row: i32,
     columns: Range<i32>,
     clear_column: i32,
-    flags: i32,
+    flags: LineFlags,
 }
 
 impl CompositorRawLineRequest {
@@ -1254,7 +1187,7 @@ impl CompositorRawLineRequest {
         start_column: i32,
         end_column: i32,
         clear_column: i32,
-        flags: i32,
+        flags: LineFlags,
     ) -> Option<Self> {
         (start_column <= end_column && end_column <= clear_column).then_some(Self {
             row,
@@ -1287,7 +1220,7 @@ struct CompositorRawLinePlan {
     columns: Range<i32>,
     clear_column: i32,
     requested_clear_column: i32,
-    flags: i32,
+    flags: LineFlags,
     action: CompositorRawLineAction,
 }
 
@@ -1303,7 +1236,7 @@ enum CompositorRawLineOperation {
 struct CompositorSubmission {
     start_col: usize,
     end_col: usize,
-    flags: i32,
+    flags: LineFlags,
 }
 
 /// Mutable output slices for one compositor span.
@@ -1462,12 +1395,9 @@ struct CompositorLine {
 #[derive(Clone, Copy, Debug)]
 struct CompositorLayer<'grid> {
     grid: &'grid ScreenGrid,
-    origin_row: i32,
-    origin_column: i32,
-    requested_width: i32,
-    requested_height: i32,
-    visible_width: i32,
-    visible_height: i32,
+    origin: ComposedPosition,
+    requested_size: GridSize,
+    visible_size: GridSize,
     z_index: i32,
     layer_index: usize,
     blending: bool,
@@ -1480,20 +1410,18 @@ impl<'grid> CompositorLayer<'grid> {
     fn try_from_grid(grid: &'grid ScreenGrid, is_default: bool) -> Option<Self> {
         let (origin_row, origin_column) = grid.compositor_position();
         let (requested_width, requested_height) = grid.compositor_size();
-        let visible_width = grid.cols.min(requested_width);
-        let visible_height = grid.rows.min(requested_height);
-        if visible_width < 0 || visible_height < 0 {
-            return None;
-        }
+        let allocated_size = GridSize::try_new(grid.rows, grid.cols)?;
+        let requested_size = GridSize::try_new(requested_height, requested_width)?;
+        let visible_size = GridSize {
+            height: allocated_size.height.min(requested_size.height),
+            width: allocated_size.width.min(requested_size.width),
+        };
 
         Some(Self {
             grid,
-            origin_row,
-            origin_column,
-            requested_width,
-            requested_height,
-            visible_width,
-            visible_height,
+            origin: ComposedPosition::new(origin_row, origin_column),
+            requested_size,
+            visible_size,
             z_index: grid.z_index(),
             layer_index: grid.compositor_index(),
             blending: grid.blends_with_background(),
@@ -1503,8 +1431,8 @@ impl<'grid> CompositorLayer<'grid> {
     }
 
     /// Returns the allocated dimensions of this layer's grid.
-    fn allocated_size(self) -> CompositorSize {
-        CompositorSize {
+    fn allocated_size(self) -> GridSize {
+        GridSize {
             height: self.grid.rows,
             width: self.grid.cols,
         }
@@ -1512,8 +1440,9 @@ impl<'grid> CompositorLayer<'grid> {
 
     /// Returns the exclusive right edge of this layer.
     fn right_edge(self) -> CompositorResult<i32> {
-        self.origin_column
-            .checked_add(self.visible_width)
+        self.origin
+            .column
+            .checked_add(self.visible_size.width)
             .ok_or(CompositorError::InvalidGeometry)
     }
 
@@ -1521,23 +1450,26 @@ impl<'grid> CompositorLayer<'grid> {
     /// occupied by a scrolled message separator.
     fn coverage_rect(self, include_row_above: bool) -> CompositorResult<Option<CompositorRect>> {
         let top = self
-            .origin_row
+            .origin
+            .row
             .checked_sub(i32::from(include_row_above))
             .ok_or(CompositorError::InvalidGeometry)?;
         let bottom = self
-            .origin_row
-            .checked_add(self.requested_height)
+            .origin
+            .row
+            .checked_add(self.requested_size.height)
             .and_then(|bottom| bottom.checked_sub(1))
             .ok_or(CompositorError::InvalidGeometry)?;
         let right = self
-            .origin_column
-            .checked_add(self.requested_width)
+            .origin
+            .column
+            .checked_add(self.requested_size.width)
             .and_then(|right| right.checked_sub(1))
             .ok_or(CompositorError::InvalidGeometry)?;
         Ok(CompositorRect::try_new(
             top,
             bottom,
-            self.origin_column,
+            self.origin.column,
             right,
         ))
     }
@@ -1548,29 +1480,33 @@ impl<'grid> CompositorLayer<'grid> {
     /// receives them and applies its own clipping and debug behavior.
     fn recomposition_area_with(self, other: Self) -> CompositorResult<CompositorRecomposeArea> {
         let bottom = self
-            .origin_row
+            .origin
+            .row
             .checked_add(self.grid.rows)
             .ok_or(CompositorError::InvalidGeometry)?
             .min(
                 other
-                    .origin_row
+                    .origin
+                    .row
                     .checked_add(other.grid.rows)
                     .ok_or(CompositorError::InvalidGeometry)?,
             );
         let right = self
-            .origin_column
+            .origin
+            .column
             .checked_add(self.grid.cols)
             .ok_or(CompositorError::InvalidGeometry)?
             .min(
                 other
-                    .origin_column
+                    .origin
+                    .column
                     .checked_add(other.grid.cols)
                     .ok_or(CompositorError::InvalidGeometry)?,
             );
 
         Ok(CompositorRecomposeArea {
-            rows: self.origin_row.max(other.origin_row)..bottom,
-            columns: self.origin_column.max(other.origin_column)..right,
+            rows: self.origin.row.max(other.origin.row)..bottom,
+            columns: self.origin.column.max(other.origin.column)..right,
         })
     }
 
@@ -1581,44 +1517,45 @@ impl<'grid> CompositorLayer<'grid> {
         valid: bool,
         should_draw: bool,
     ) -> CompositorResult<CompositorGridPlacementPlan> {
-        let moved = placement.origin.row != self.origin_row
-            || placement.origin.column != self.origin_column;
+        let moved = placement.origin != self.origin;
         let mut exposed_areas = Vec::new();
 
         if should_draw {
             let old_bottom = self
-                .origin_row
-                .checked_add(self.requested_height)
+                .origin
+                .row
+                .checked_add(self.requested_size.height)
                 .ok_or(CompositorError::InvalidGeometry)?;
             let old_right = self
-                .origin_column
-                .checked_add(self.requested_width)
+                .origin
+                .column
+                .checked_add(self.requested_size.width)
                 .ok_or(CompositorError::InvalidGeometry)?;
             let new_bottom = placement.bottom_edge()?;
             let new_right = placement.right_edge()?;
 
             exposed_areas.push(CompositorRecomposeArea {
-                rows: self.origin_row..placement.origin.row,
-                columns: self.origin_column..old_right,
+                rows: self.origin.row..placement.origin.row,
+                columns: self.origin.column..old_right,
             });
 
-            if self.origin_column < placement.origin.column {
+            if self.origin.column < placement.origin.column {
                 exposed_areas.push(CompositorRecomposeArea {
-                    rows: placement.origin.row.max(self.origin_row)..new_bottom.min(old_bottom),
-                    columns: self.origin_column..placement.origin.column,
+                    rows: placement.origin.row.max(self.origin.row)..new_bottom.min(old_bottom),
+                    columns: self.origin.column..placement.origin.column,
                 });
             }
 
             if new_right < old_right {
                 exposed_areas.push(CompositorRecomposeArea {
-                    rows: placement.origin.row.max(self.origin_row)..new_bottom.min(old_bottom),
+                    rows: placement.origin.row.max(self.origin.row)..new_bottom.min(old_bottom),
                     columns: new_right..old_right,
                 });
             }
 
             exposed_areas.push(CompositorRecomposeArea {
                 rows: new_bottom..old_bottom,
-                columns: self.origin_column..old_right,
+                columns: self.origin.column..old_right,
             });
         }
 
@@ -1639,17 +1576,18 @@ impl<'grid> CompositorLayer<'grid> {
     /// Reports whether this layer participates in selection on `row`.
     fn is_visible_on_row(self, row: i32) -> bool {
         !self.disabled
-            && row >= self.origin_row
+            && row >= self.origin.row
             && self
-                .origin_row
-                .checked_add(self.visible_height)
+                .origin
+                .row
+                .checked_add(self.visible_size.height)
                 .is_some_and(|bottom| row < bottom)
     }
 
     /// Reports whether this layer covers one composed-screen cell.
     fn covers(self, row: i32, column: i32) -> bool {
         self.is_visible_on_row(row)
-            && column >= self.origin_column
+            && column >= self.origin.column
             && self.right_edge().is_ok_and(|right| column < right)
     }
 
@@ -1657,7 +1595,7 @@ impl<'grid> CompositorLayer<'grid> {
     fn positioned_grid(self) -> PositionedGrid<'grid> {
         PositionedGrid {
             grid: self.grid,
-            origin: ComposedPosition::new(self.origin_row, self.origin_column),
+            origin: self.origin,
         }
     }
 
@@ -1672,15 +1610,15 @@ impl<'grid> CompositorLayer<'grid> {
         let end_column =
             i32::try_from(columns.end).map_err(|_| CompositorError::InvalidGeometry)?;
         let grid_row = row
-            .checked_sub(self.origin_row)
+            .checked_sub(self.origin.row)
             .and_then(|row| usize::try_from(row).ok())
             .ok_or(CompositorError::InvalidGeometry)?;
         let grid_start = start_column
-            .checked_sub(self.origin_column)
+            .checked_sub(self.origin.column)
             .and_then(|column| usize::try_from(column).ok())
             .ok_or(CompositorError::InvalidGeometry)?;
         let grid_end = end_column
-            .checked_sub(self.origin_column)
+            .checked_sub(self.origin.column)
             .and_then(|column| usize::try_from(column).ok())
             .ok_or(CompositorError::InvalidGeometry)?;
 
@@ -1692,7 +1630,7 @@ impl<'grid> CompositorLayer<'grid> {
     /// Reports whether a line ending on this layer may retain its wrap flag.
     fn allows_wrap(self, screen_columns: usize) -> bool {
         self.is_default
-            || (self.origin_column == 0
+            || (self.origin.column == 0
                 && usize::try_from(self.grid.cols).ok() == Some(screen_columns))
     }
 }
@@ -2081,7 +2019,8 @@ impl<'grid> CompositorLayerStack<'grid> {
         let layer = self
             .layer(layer_index)
             .ok_or(CompositorError::InvalidLayerState)?;
-        let screen_position = ComposedPosition::new(layer.origin_row, layer.origin_column)
+        let screen_position = layer
+            .origin
             .checked_add_local(request.local_position)
             .ok_or(CompositorError::InvalidGeometry)?;
 
@@ -2251,12 +2190,13 @@ impl<'grid> CompositorLayerStack<'grid> {
         let current_layer = self
             .layer(current_layer_index)
             .ok_or(CompositorError::InvalidLayerState)?;
-        let row_delta = request.row_delta;
+        let row_delta = request.delta.rows;
         let region = request
             .region
-            .translated(current_layer.origin_row, current_layer.origin_column)?;
+            .checked_translate(current_layer.origin)
+            .ok_or(CompositorError::InvalidGeometry)?;
         let covered = self.is_covered_above(CompositorCoveredAboveQuery {
-            rectangle: region.coverage_rect(),
+            rectangle: CompositorRect::from_region(&region),
             current_layer_index,
             message_layer_index,
             message_was_scrolled,
@@ -2265,8 +2205,7 @@ impl<'grid> CompositorLayerStack<'grid> {
         if !covered && !current_layer.blending {
             return Ok(CompositorScrollPlan::Forward {
                 region,
-                row_delta,
-                column_delta: request.column_delta,
+                delta: request.delta,
             });
         }
 
@@ -2288,12 +2227,12 @@ impl<'grid> CompositorLayerStack<'grid> {
             .checked_sub(skipped_bottom)
             .ok_or(CompositorError::InvalidGeometry)?;
         let first_grid_row = first_recompose_row
-            .checked_sub(current_layer.origin_row)
+            .checked_sub(current_layer.origin.row)
             .ok_or(CompositorError::InvalidGeometry)?;
         let grid_start_column = region
             .columns
             .start
-            .checked_sub(current_layer.origin_column)
+            .checked_sub(current_layer.origin.column)
             .ok_or(CompositorError::InvalidGeometry)?;
 
         Ok(CompositorScrollPlan::Recompose {
@@ -2320,26 +2259,26 @@ impl<'grid> CompositorLayerStack<'grid> {
             .ok_or(CompositorError::InvalidLayerState)?;
         let row = request
             .row
-            .checked_add(current_layer.origin_row)
+            .checked_add(current_layer.origin.row)
             .ok_or(CompositorError::InvalidGeometry)?;
         let start_column = request
             .columns
             .start
-            .checked_add(current_layer.origin_column)
+            .checked_add(current_layer.origin.column)
             .ok_or(CompositorError::InvalidGeometry)?;
         let end_column = request
             .columns
             .end
-            .checked_add(current_layer.origin_column)
+            .checked_add(current_layer.origin.column)
             .ok_or(CompositorError::InvalidGeometry)?;
         let requested_clear_column = request
             .clear_column
-            .checked_add(current_layer.origin_column)
+            .checked_add(current_layer.origin.column)
             .ok_or(CompositorError::InvalidGeometry)?;
         let flags = if current_layer.is_default {
             request.flags
         } else {
-            request.flags & !LINE_FLAG_WRAP
+            request.flags.without(LineFlags::WRAP)
         };
         let mut plan = CompositorRawLinePlan {
             row,
@@ -2377,7 +2316,7 @@ impl<'grid> CompositorLayerStack<'grid> {
             message_layer_index,
             message_was_scrolled,
         })?;
-        if plan.flags & LINE_FLAG_INVALID != 0 || covered || current_layer.blending {
+        if plan.flags.contains(LineFlags::INVALID) || covered || current_layer.blending {
             plan.action = CompositorRawLineAction::Recompose;
         }
 
@@ -2403,8 +2342,8 @@ impl<'grid> CompositorLayerStack<'grid> {
             if layer.covers(row, column) {
                 selected = Some(index);
                 segment_end = layer.right_edge()?;
-            } else if layer.origin_column > column {
-                segment_end = segment_end.min(layer.origin_column);
+            } else if layer.origin.column > column {
+                segment_end = segment_end.min(layer.origin.column);
             }
         }
 
@@ -2460,7 +2399,7 @@ struct CompositorLineSettings {
 /// Owned runtime values used while processing one compositor event.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct CompositorRuntime {
-    screen_size: CompositorSize,
+    screen_size: GridSize,
     line_settings: CompositorLineSettings,
     debug_highlights: CompositorDebugHighlights,
     debug_enabled: bool,
@@ -2479,7 +2418,7 @@ impl CompositorRuntime {
     ) -> Option<Self> {
         let screen_columns_usize = usize::try_from(screen_columns).ok()?;
         Some(Self {
-            screen_size: CompositorSize::try_new(screen_rows, screen_columns)?,
+            screen_size: GridSize::try_new(screen_rows, screen_columns)?,
             line_settings: CompositorLineSettings {
                 message_separator_attribute,
                 screen_columns: screen_columns_usize,
@@ -2536,7 +2475,7 @@ impl CompositorRecomposePlan {
             .map(move |row| CompositorLineInput {
                 row,
                 columns: columns.clone(),
-                flags: LINE_FLAG_INVALID,
+                flags: LineFlags::INVALID,
                 settings,
             })
     }
@@ -2547,7 +2486,7 @@ impl CompositorRecomposePlan {
 struct CompositorLineInput {
     row: i32,
     columns: Range<i32>,
-    flags: i32,
+    flags: LineFlags,
     settings: CompositorLineSettings,
 }
 
@@ -2557,7 +2496,7 @@ struct CompositorLineRequest<'grid> {
     row: i32,
     start_column: i32,
     end_column: i32,
-    flags: i32,
+    flags: LineFlags,
     message_separator: Option<MessageSeparator<'grid>>,
     screen_columns: usize,
     abort_on_invalid: bool,
@@ -2663,7 +2602,7 @@ impl CompositorBuffer {
         &self,
         start_col: i32,
         end_col: i32,
-        flags: i32,
+        flags: LineFlags,
     ) -> CompositorResult<CompositorLine> {
         let width =
             i32::try_from(self.characters.len()).map_err(|_| CompositorError::InvalidLineState)?;
@@ -2672,7 +2611,7 @@ impl CompositorBuffer {
         let mut skip_start = 0;
         let mut skip_end = 0;
 
-        if flags & LINE_FLAG_INVALID != 0 {
+        if flags.contains(LineFlags::INVALID) {
             if start_col > 0 {
                 start_col -= 1;
                 skip_start = 1;
@@ -2780,7 +2719,7 @@ impl CompositorBuffer {
     fn finish_line(
         &mut self,
         mut line: CompositorLine,
-        mut flags: i32,
+        mut flags: LineFlags,
         allow_wrap: bool,
         abort_on_invalid: bool,
     ) -> CompositorResult<CompositorSubmission> {
@@ -2794,7 +2733,7 @@ impl CompositorBuffer {
             line.skip_end = 0;
         }
         if !allow_wrap {
-            flags &= !LINE_FLAG_WRAP;
+            flags = flags.without(LineFlags::WRAP);
         }
 
         let start_col = line
@@ -3052,7 +2991,7 @@ fn emit_compositor_debug_line(
         columns.start..columns.start,
         columns.end,
         attribute,
-        0,
+        LineFlags::default(),
         &[],
         &[],
     )
@@ -3201,12 +3140,15 @@ mod tests {
     ) -> CompositorLayer<'_> {
         CompositorLayer {
             grid,
-            origin_row: 0,
-            origin_column,
-            requested_width: visible_width,
-            requested_height: grid.rows,
-            visible_width,
-            visible_height: grid.rows,
+            origin: ComposedPosition::new(0, origin_column),
+            requested_size: GridSize {
+                height: grid.rows,
+                width: visible_width,
+            },
+            visible_size: GridSize {
+                height: grid.rows,
+                width: visible_width,
+            },
             z_index: 0,
             layer_index,
             blending: false,
@@ -3219,7 +3161,7 @@ mod tests {
         CompositorMessagePositionRequest {
             row,
             separator_character: Some(schar_from_ascii('-')),
-            screen_size: CompositorSize {
+            screen_size: GridSize {
                 height: 10,
                 width: 20,
             },
@@ -3240,7 +3182,7 @@ mod tests {
         assert_eq!(
             CompositorRuntime::try_new(20, 10, 9, flags, -7, debug_highlights),
             Some(CompositorRuntime {
-                screen_size: CompositorSize {
+                screen_size: GridSize {
                     height: 20,
                     width: 10,
                 },
@@ -3284,7 +3226,7 @@ mod tests {
     #[test]
     fn compositor_resize_records_screen_size_and_buffer_width() {
         let mut compositor = Compositor::new();
-        let size = CompositorSize {
+        let size = GridSize {
             height: 24,
             width: 80,
         };
@@ -3361,8 +3303,8 @@ mod tests {
             plan,
             CompositorMessagePositionPlan {
                 scroll: Some(MessageGridScroll {
-                    region: CompositorRegion::try_new(2..10, 0..20).unwrap(),
-                    row_delta: 3,
+                    region: ComposedRegion::try_new(2..10, 0..20).unwrap(),
+                    delta: GridDelta::new(3, 0),
                 }),
                 recompose: Some(CompositorRecomposeArea {
                     rows: 1..2,
@@ -3666,8 +3608,8 @@ mod tests {
     fn existing_grid_placement_plans_exposed_and_redrawn_areas() {
         let grid = grid_with_size(3, 4);
         let mut layer = compositor_layer(&grid, 3, 4, 1, false);
-        layer.origin_row = 2;
-        layer.requested_height = 3;
+        layer.origin.row = 2;
+        layer.requested_size.height = 3;
         let placement = CompositorGridPlacement::try_new(3, 5, 2, 2).unwrap();
 
         assert_eq!(
@@ -3701,8 +3643,8 @@ mod tests {
     fn stationary_grid_resize_only_plans_exposed_areas() {
         let grid = grid_with_size(3, 4);
         let mut layer = compositor_layer(&grid, 3, 4, 1, false);
-        layer.origin_row = 2;
-        layer.requested_height = 3;
+        layer.origin.row = 2;
+        layer.requested_size.height = 3;
         let placement = CompositorGridPlacement::try_new(2, 3, 2, 2).unwrap();
 
         assert_eq!(
@@ -3781,7 +3723,7 @@ mod tests {
         selected_grid.handle = 7;
         let upper_grid = grid_with_size(2, 2);
         let mut selected_layer = compositor_layer(&selected_grid, 3, 2, 1, false);
-        selected_layer.origin_row = 2;
+        selected_layer.origin.row = 2;
         selected_layer.z_index = 20;
         let mut upper_layer = compositor_layer(&upper_grid, 0, 2, 2, false);
         upper_layer.z_index = 10;
@@ -4110,11 +4052,11 @@ mod tests {
         let first_crossed_grid = grid_with_size(2, 2);
         let second_crossed_grid = grid_with_size(2, 2);
         let mut moving_layer = compositor_layer(&moving_grid, 1, 1, 1, false);
-        moving_layer.origin_row = 1;
+        moving_layer.origin.row = 1;
         let mut first_crossed_layer = compositor_layer(&first_crossed_grid, 0, 2, 2, false);
-        first_crossed_layer.origin_row = 2;
+        first_crossed_layer.origin.row = 2;
         let mut second_crossed_layer = compositor_layer(&second_crossed_grid, 3, 2, 3, false);
-        second_crossed_layer.origin_row = 0;
+        second_crossed_layer.origin.row = 0;
         let layers = CompositorLayerStack {
             layers: vec![
                 compositor_layer(&default_grid, 0, 8, 0, false),
@@ -4355,9 +4297,9 @@ mod tests {
         let lower_grid = grid_with_size(3, 3);
         let upper_grid = grid_with_size(3, 3);
         let mut lower_layer = compositor_layer(&lower_grid, 1, 1, 1, false);
-        lower_layer.origin_row = 1;
+        lower_layer.origin.row = 1;
         let mut upper_layer = compositor_layer(&upper_grid, 1, 1, 2, false);
-        upper_layer.origin_row = 1;
+        upper_layer.origin.row = 1;
         let layers = CompositorLayerStack {
             layers: vec![
                 compositor_layer(&default_grid, 0, 4, 0, false),
@@ -4478,7 +4420,7 @@ mod tests {
         let default_grid = grid_with_size(3, 3);
         let overlay_grid = grid_with_size(1, 1);
         let mut overlay_layer = compositor_layer(&overlay_grid, 2, 1, 1, false);
-        overlay_layer.origin_row = 2;
+        overlay_layer.origin.row = 2;
         let layers = CompositorLayerStack {
             layers: vec![
                 compositor_layer(&default_grid, 0, 3, 0, false),
@@ -4660,7 +4602,7 @@ mod tests {
     #[test]
     fn scroll_preparation_keeps_only_rows_with_valid_source_cells() {
         let grid = grid_with_row(&[schar_from_ascii('x'), schar_from_ascii('y')], &[1, -1]);
-        let region = CompositorRegion::try_new(4..7, 0..2).unwrap();
+        let region = ComposedRegion::try_new(4..7, 0..2).unwrap();
         let valid_column_plan = CompositorScrollPlan::Recompose {
             region: region.clone(),
             screen_rows: 4..7,
@@ -4704,9 +4646,11 @@ mod tests {
         let default_grid = grid_with_row(&[schar_from_ascii('a')], &[1]);
         let overlay_grid = grid_with_row(&[schar_from_ascii('b')], &[2]);
         let mut overlay = compositor_layer(&overlay_grid, 4, 1, 1, false);
-        overlay.origin_row = 2;
-        overlay.requested_width = 3;
-        overlay.requested_height = 2;
+        overlay.origin.row = 2;
+        overlay.requested_size = GridSize {
+            height: 2,
+            width: 3,
+        };
         let layers = CompositorLayerStack {
             layers: vec![compositor_layer(&default_grid, 0, 1, 0, false), overlay],
         };
@@ -4737,9 +4681,11 @@ mod tests {
         let default_grid = grid_with_row(&[schar_from_ascii('a')], &[1]);
         let message_grid = grid_with_row(&[schar_from_ascii('m')], &[2]);
         let mut message = compositor_layer(&message_grid, 1, 1, 1, false);
-        message.origin_row = 2;
-        message.requested_width = 2;
-        message.requested_height = 1;
+        message.origin.row = 2;
+        message.requested_size = GridSize {
+            height: 1,
+            width: 2,
+        };
         let layers = CompositorLayerStack {
             layers: vec![compositor_layer(&default_grid, 0, 1, 0, false), message],
         };
@@ -4766,7 +4712,7 @@ mod tests {
         let default_grid = grid_with_size(5, 10);
         let current_grid = grid_with_size(2, 5);
         let mut current_layer = compositor_layer(&current_grid, 3, 5, 1, false);
-        current_layer.origin_row = 1;
+        current_layer.origin.row = 1;
         let layers = CompositorLayerStack {
             layers: vec![
                 compositor_layer(&default_grid, 0, 10, 0, false),
@@ -4783,7 +4729,7 @@ mod tests {
                     row: 1,
                     columns: 0..3,
                     clear_column: 5,
-                    flags: LINE_FLAG_WRAP,
+                    flags: LineFlags::WRAP,
                 },
             )
             .unwrap();
@@ -4795,7 +4741,7 @@ mod tests {
                 columns: 3..6,
                 clear_column: 8,
                 requested_clear_column: 8,
-                flags: 0,
+                flags: LineFlags::default(),
                 action: CompositorRawLineAction::Forward,
             }
         );
@@ -4803,8 +4749,8 @@ mod tests {
 
     #[test]
     fn rejects_unordered_raw_line_columns() {
-        assert!(CompositorRawLineRequest::try_new(0, 2, 1, 3, 0).is_none());
-        assert!(CompositorRawLineRequest::try_new(0, 1, 3, 2, 0).is_none());
+        assert!(CompositorRawLineRequest::try_new(0, 2, 1, 3, LineFlags::default()).is_none());
+        assert!(CompositorRawLineRequest::try_new(0, 1, 3, 2, LineFlags::default()).is_none());
     }
 
     #[test]
@@ -4812,7 +4758,7 @@ mod tests {
         let default_grid = grid_with_size(5, 8);
         let overlay_grid = grid_with_size(1, 1);
         let mut overlay = compositor_layer(&overlay_grid, 6, 1, 1, false);
-        overlay.origin_row = 1;
+        overlay.origin.row = 1;
         let layers = CompositorLayerStack {
             layers: vec![compositor_layer(&default_grid, 0, 8, 0, false), overlay],
         };
@@ -4826,7 +4772,7 @@ mod tests {
                     row: 1,
                     columns: 4..7,
                     clear_column: 10,
-                    flags: LINE_FLAG_WRAP,
+                    flags: LineFlags::WRAP,
                 },
             )
             .unwrap();
@@ -4838,7 +4784,7 @@ mod tests {
                 columns: 4..7,
                 clear_column: 8,
                 requested_clear_column: 10,
-                flags: LINE_FLAG_WRAP,
+                flags: LineFlags::WRAP,
                 action: CompositorRawLineAction::Recompose,
             }
         );
@@ -4860,7 +4806,7 @@ mod tests {
                     row: 5,
                     columns: 0..3,
                     clear_column: 4,
-                    flags: 0,
+                    flags: LineFlags::default(),
                 },
             )
             .unwrap();
@@ -4873,7 +4819,7 @@ mod tests {
                     row: 1,
                     columns: 8..9,
                     clear_column: 10,
-                    flags: 0,
+                    flags: LineFlags::default(),
                 },
             )
             .unwrap();
@@ -4888,7 +4834,7 @@ mod tests {
     fn plans_uncovered_scroll_in_composed_screen_coordinates() {
         let grid = grid_with_row(&[schar_from_ascii('a')], &[1]);
         let mut layer = compositor_layer(&grid, 4, 1, 0, false);
-        layer.origin_row = 3;
+        layer.origin.row = 3;
         let layers = CompositorLayerStack {
             layers: vec![layer],
         };
@@ -4899,9 +4845,8 @@ mod tests {
                 None,
                 false,
                 CompositorScrollRequest {
-                    region: CompositorRegion::try_new(2..7, 1..5).unwrap(),
-                    row_delta: 2,
-                    column_delta: -1,
+                    region: GridRegion::try_new(2..7, 1..5).unwrap(),
+                    delta: GridDelta::new(2, -1),
                 },
             )
             .unwrap();
@@ -4909,9 +4854,8 @@ mod tests {
         assert_eq!(
             plan,
             CompositorScrollPlan::Forward {
-                region: CompositorRegion::try_new(5..10, 5..9).unwrap(),
-                row_delta: 2,
-                column_delta: -1,
+                region: ComposedRegion::try_new(5..10, 5..9).unwrap(),
+                delta: GridDelta::new(2, -1),
             }
         );
     }
@@ -4927,11 +4871,13 @@ mod tests {
         let default_grid = grid_with_row(&[schar_from_ascii('a')], &[1]);
         let overlay_grid = grid_with_row(&[schar_from_ascii('b')], &[2]);
         let mut default_layer = compositor_layer(&default_grid, 4, 1, 0, false);
-        default_layer.origin_row = 3;
+        default_layer.origin.row = 3;
         let mut overlay = compositor_layer(&overlay_grid, 6, 1, 1, false);
-        overlay.origin_row = 6;
-        overlay.requested_width = 1;
-        overlay.requested_height = 1;
+        overlay.origin.row = 6;
+        overlay.requested_size = GridSize {
+            height: 1,
+            width: 1,
+        };
         let layers = CompositorLayerStack {
             layers: vec![default_layer, overlay],
         };
@@ -4942,9 +4888,8 @@ mod tests {
                 None,
                 false,
                 CompositorScrollRequest {
-                    region: CompositorRegion::try_new(2..7, 1..5).unwrap(),
-                    row_delta: 2,
-                    column_delta: 0,
+                    region: GridRegion::try_new(2..7, 1..5).unwrap(),
+                    delta: GridDelta::new(2, 0),
                 },
             )
             .unwrap();
@@ -4952,7 +4897,7 @@ mod tests {
         assert_eq!(
             plan,
             CompositorScrollPlan::Recompose {
-                region: CompositorRegion::try_new(5..10, 5..9).unwrap(),
+                region: ComposedRegion::try_new(5..10, 5..9).unwrap(),
                 screen_rows: 5..8,
                 first_grid_row: 2,
                 grid_start_column: 1,
@@ -4964,7 +4909,7 @@ mod tests {
     fn plans_upward_scroll_recomposition_rows() {
         let default_grid = grid_with_row(&[schar_from_ascii('a')], &[1]);
         let mut layer = compositor_layer(&default_grid, 4, 1, 0, false);
-        layer.origin_row = 3;
+        layer.origin.row = 3;
         layer.blending = true;
         let layers = CompositorLayerStack {
             layers: vec![layer],
@@ -4976,9 +4921,8 @@ mod tests {
                 None,
                 false,
                 CompositorScrollRequest {
-                    region: CompositorRegion::try_new(2..7, 1..5).unwrap(),
-                    row_delta: -2,
-                    column_delta: 0,
+                    region: GridRegion::try_new(2..7, 1..5).unwrap(),
+                    delta: GridDelta::new(-2, 0),
                 },
             )
             .unwrap();
@@ -4986,7 +4930,7 @@ mod tests {
         assert_eq!(
             plan,
             CompositorScrollPlan::Recompose {
-                region: CompositorRegion::try_new(5..10, 5..9).unwrap(),
+                region: ComposedRegion::try_new(5..10, 5..9).unwrap(),
                 screen_rows: 7..10,
                 first_grid_row: 4,
                 grid_start_column: 1,
@@ -5152,12 +5096,14 @@ mod tests {
         let mut compositor = CompositorBuffer::new();
 
         compositor.resize(2);
-        let mut line = compositor.prepare_line(0, 2, 0).unwrap();
+        let mut line = compositor.prepare_line(0, 2, LineFlags::default()).unwrap();
         assert_eq!(line.columns, 0..2);
         compositor
             .try_compose_grid_segment(&mut line, 0..2, foreground, None)
             .unwrap();
-        let submission = compositor.finish_line(line, 0, true, false).unwrap();
+        let submission = compositor
+            .finish_line(line, LineFlags::default(), true, false)
+            .unwrap();
 
         assert_eq!(
             compositor.characters,
@@ -5169,7 +5115,7 @@ mod tests {
             CompositorSubmission {
                 start_col: 0,
                 end_col: 2,
-                flags: 0,
+                flags: LineFlags::default(),
             }
         );
     }
@@ -5212,7 +5158,7 @@ mod tests {
                     row: 0,
                     start_column: 0,
                     end_column: 6,
-                    flags: 0,
+                    flags: LineFlags::default(),
                     message_separator: None,
                     screen_columns: 6,
                     abort_on_invalid: false,
@@ -5260,7 +5206,7 @@ mod tests {
                     row: 0,
                     start_column: 0,
                     end_column: 3,
-                    flags: LINE_FLAG_WRAP,
+                    flags: LineFlags::WRAP,
                     message_separator: Some(MessageSeparator {
                         layer: compositor_layer(&message_grid, 0, 2, 1, false),
                         character: schar_from_ascii('-'),
@@ -5282,7 +5228,7 @@ mod tests {
             ]
         );
         assert_eq!(compositor.attributes, [7, 7, 7]);
-        assert_eq!(submission.flags, 0);
+        assert_eq!(submission.flags, LineFlags::default());
         compositor.release();
         assert!(compositor.characters.is_empty());
         assert!(compositor.attributes.is_empty());
