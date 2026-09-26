@@ -762,11 +762,6 @@ impl Compositor {
         self.display.should_draw()
     }
 
-    /// Hides the message separator while preserving its configured character.
-    fn hide_message_separator(&mut self) {
-        self.message.hide_separator();
-    }
-
     /// Records a composed-screen resize and plans its external effects.
     fn resize(&mut self, size: GridSize) -> CompositorResult<CompositorResizePlan> {
         let buffer_width =
@@ -3413,8 +3408,6 @@ mod tests {
             compositor.message_separator_character_at(1),
             Some(schar_from_ascii('-'))
         );
-        compositor.hide_message_separator();
-        assert_eq!(compositor.message_separator_character_at(1), None);
     }
 
     #[test]

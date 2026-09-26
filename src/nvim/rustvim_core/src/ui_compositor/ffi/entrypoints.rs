@@ -98,12 +98,6 @@ pub extern "C" fn ui_comp_grid_resize(grid: Integer, width: Integer, height: Int
     lock_compositor_buffer_pool().resize(plan.buffer_width);
 }
 
-/// Hides the message separator after the composed screen is invalidated.
-#[unsafe(no_mangle)]
-pub extern "C" fn ui_comp_hide_message_separator() {
-    lock_compositor().hide_message_separator();
-}
-
 /// Updates message-grid state and executes its scrolling and recomposition.
 ///
 /// Both explicit grids and all registered compositor layers are restored

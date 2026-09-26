@@ -47,5 +47,3 @@ extern bool ui_comp_grid_accepts_mouse_at(
 extern bool ui_comp_cursor_is_covered_by_higher_layer(
   ScreenGrid *current_grid, int row, int column,
   int minimum_z_index_gap);
-
-extern void ui_comp_hide_message_separator(void);
