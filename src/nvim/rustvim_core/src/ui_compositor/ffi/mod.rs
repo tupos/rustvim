@@ -1,5 +1,6 @@
 //! C boundary adapters for the Rust compositor.
 
+pub(in crate::ui_compositor) mod grid_store;
 mod nvim_output;
 mod runtime;
 
