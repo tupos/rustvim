@@ -9,10 +9,7 @@ use std::{
 
 use crate::grid::{CScreenGrid, GridId, ScreenGrid, ScreenGridGuard};
 
-use super::super::{
-    CompositorGridPlacement, CompositorGridPlacementTarget, CompositorLayerMove,
-    CompositorLayerRegistry, CompositorLayerStack,
-};
+use super::super::{CompositorGridPlacementTarget, CompositorLayerRegistry, GridAccess};
 
 /// One temporary pointer connecting a native grid identity to C storage.
 ///
@@ -109,12 +106,12 @@ struct GuardedCompositorLayer {
 /// in the transitional binding map. Each `ScreenGridGuard` restores its grid
 /// allocations when this collection is dropped.
 #[must_use = "dropping the layer guards restores ownership to the C grids"]
-pub(in crate::ui_compositor) struct CompositorLayerGuards {
+pub(in crate::ui_compositor) struct LegacyGridStore {
     pub(in crate::ui_compositor) registry: CompositorLayerRegistry,
     bindings: HashMap<GridId, GuardedCompositorLayer>,
 }
 
-impl CompositorLayerGuards {
+impl LegacyGridStore {
     /// Takes temporary ownership of all grids registered at the FFI boundary.
     pub(in crate::ui_compositor) fn try_take_registered() -> Option<Self> {
         let (registry, cgrids) = {
@@ -161,11 +158,11 @@ impl CompositorLayerGuards {
     pub(in crate::ui_compositor) unsafe fn try_take_registered_with_candidate(
         candidate: NonNull<CScreenGrid>,
     ) -> Option<(Self, CompositorGridPlacementTarget)> {
-        let mut layer_guards = Self::try_take_registered()?;
-        if let Some(layer_index) = layer_guards.index_of(candidate.as_ptr()) {
-            let grid_id = layer_guards.registry.layer_id(layer_index)?;
+        let mut grid_store = Self::try_take_registered()?;
+        if let Some(layer_index) = grid_store.index_of(candidate.as_ptr()) {
+            let grid_id = grid_store.registry.layer_id(layer_index)?;
             return Some((
-                layer_guards,
+                grid_store,
                 CompositorGridPlacementTarget {
                     grid_id,
                     layer_index,
@@ -178,13 +175,13 @@ impl CompositorLayerGuards {
         // candidate for the lifetime of the returned guard collection.
         let grid = unsafe { ScreenGridGuard::take(candidate.as_ptr()) };
         let grid_id = grid.id();
-        if layer_guards.bindings.contains_key(&grid_id) {
+        if grid_store.bindings.contains_key(&grid_id) {
             return None;
         }
 
-        let layer_index = layer_guards.registry.len();
-        layer_guards.registry.try_append(grid_id)?;
-        layer_guards
+        let layer_index = grid_store.registry.len();
+        grid_store.registry.try_append(grid_id)?;
+        grid_store
             .bindings
             .insert(
                 grid_id,
@@ -197,7 +194,7 @@ impl CompositorLayerGuards {
             .then_some(())?;
 
         Some((
-            layer_guards,
+            grid_store,
             CompositorGridPlacementTarget {
                 grid_id,
                 layer_index,
@@ -312,18 +309,6 @@ impl CompositorLayerGuards {
         self.registry.index_of(grid_id)
     }
 
-    /// Borrows one owned Rust grid by its layer index.
-    pub(in crate::ui_compositor) fn grid(&self, index: usize) -> Option<&ScreenGrid> {
-        let grid_id = self.registry.layer_id(index)?;
-        self.bindings.get(&grid_id).map(|layer| &*layer.grid)
-    }
-
-    /// Borrows one registered Rust grid by its stable identity.
-    pub(in crate::ui_compositor) fn grid_by_id(&self, grid_id: GridId) -> Option<&ScreenGrid> {
-        let layer_index = self.registry.index_of(grid_id)?;
-        self.grid(layer_index)
-    }
-
     /// Returns the transitional C pointer bound to one registered identity.
     pub(in crate::ui_compositor) fn cgrid_by_id(
         &self,
@@ -332,87 +317,6 @@ impl CompositorLayerGuards {
         self.bindings
             .get(&grid_id)
             .map(|layer| layer.cgrid.as_ptr())
-    }
-
-    /// Mutably borrows one owned Rust grid by its layer index.
-    pub(in crate::ui_compositor) fn grid_mut(&mut self, index: usize) -> Option<&mut ScreenGrid> {
-        let grid_id = self.registry.layer_id(index)?;
-        self.bindings
-            .get_mut(&grid_id)
-            .map(|layer| &mut *layer.grid)
-    }
-
-    /// Borrows all owned grids as a validated compositor layer stack.
-    pub(in crate::ui_compositor) fn layer_stack(&self) -> Option<CompositorLayerStack<'_>> {
-        self.layer_stack_prefix(self.registry.len())
-    }
-
-    /// Borrows an initial prefix as a validated compositor layer stack.
-    pub(in crate::ui_compositor) fn layer_stack_prefix(
-        &self,
-        layer_count: usize,
-    ) -> Option<CompositorLayerStack<'_>> {
-        let grids = self
-            .registry
-            .layer_ids()
-            .get(..layer_count)?
-            .iter()
-            .map(|grid_id| self.bindings.get(grid_id).map(|layer| &*layer.grid))
-            .collect::<Option<Vec<_>>>()?;
-        CompositorLayerStack::try_from_grids(&grids)
-    }
-
-    /// Places the appended owner at its planned compositor-stack index.
-    pub(in crate::ui_compositor) fn place_appended_layer(
-        &mut self,
-        insertion_index: usize,
-        placement: CompositorGridPlacement,
-    ) -> Option<()> {
-        let appended_index = self.registry.len().checked_sub(1)?;
-        if insertion_index == 0 || insertion_index > appended_index {
-            return None;
-        }
-
-        self.apply_layer_move(CompositorLayerMove {
-            source_index: appended_index,
-            target_index: insertion_index,
-        })?;
-        placement.apply_to(self.grid_mut(insertion_index)?);
-        Some(())
-    }
-
-    /// Applies a planned relocation and synchronizes affected grid metadata.
-    pub(in crate::ui_compositor) fn apply_layer_move(
-        &mut self,
-        movement: CompositorLayerMove,
-    ) -> Option<()> {
-        self.registry.apply_layer_move(movement)?;
-
-        let affected_indices = movement.affected_indices();
-        let first_index = *affected_indices.start();
-        for (offset, index) in affected_indices.enumerate() {
-            let grid_id = self.registry.layer_id(index)?;
-            let layer = self.bindings.get_mut(&grid_id)?;
-            layer.grid.set_compositor_index(first_index + offset);
-        }
-
-        Some(())
-    }
-
-    /// Removes one non-default layer and updates all shifted indices.
-    pub(in crate::ui_compositor) fn remove_layer(&mut self, layer_index: usize) -> Option<()> {
-        let removed_grid_id = self.registry.remove_non_default(layer_index)?;
-        let mut removed_layer = self.bindings.remove(&removed_grid_id)?;
-        removed_layer.grid.set_compositor_index(0);
-
-        for new_index in layer_index..self.registry.len() {
-            let grid_id = self.registry.layer_id(new_index)?;
-            self.bindings
-                .get_mut(&grid_id)?
-                .grid
-                .set_compositor_index(new_index);
-        }
-        Some(())
     }
 
     /// Captures all current identities and their temporary C bindings.
@@ -429,6 +333,18 @@ impl CompositorLayerGuards {
         let c_grids = CCompositorGridBindings::try_new(c_grids)?;
 
         CompositorLayerFfiState::try_new(registry, c_grids)
+    }
+}
+
+impl GridAccess for LegacyGridStore {
+    fn grid(&self, grid_id: GridId) -> Option<&ScreenGrid> {
+        self.bindings.get(&grid_id).map(|layer| &*layer.grid)
+    }
+
+    fn grid_mut(&mut self, grid_id: GridId) -> Option<&mut ScreenGrid> {
+        self.bindings
+            .get_mut(&grid_id)
+            .map(|layer| &mut *layer.grid)
     }
 }
 

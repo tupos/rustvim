@@ -8,6 +8,7 @@ use super::super::{
     CompositorDebugHighlights, CompositorRecomposeArea, CompositorRuntime,
     clip_recompose_area_to_default_grid, emit_compositor_debug_line,
 };
+use super::grid_store::LegacyGridStore;
 use crate::ui_compositor::output::{CompositorOutput, UiCommand};
 
 unsafe extern "C" {
@@ -83,7 +84,17 @@ impl CompositorRuntime {
         if !self.debug_enabled || requested_area.columns.start >= requested_area.columns.end {
             return;
         }
-        let Some(area) = clip_recompose_area_to_default_grid(requested_area.clone()) else {
+        let area = {
+            let Some(grid_store) = LegacyGridStore::try_take_registered() else {
+                return;
+            };
+            clip_recompose_area_to_default_grid(
+                &grid_store.registry,
+                &grid_store,
+                requested_area.clone(),
+            )
+        };
+        let Some(area) = area else {
             return;
         };
 
