@@ -1685,50 +1685,85 @@ struct CompositorLayerMove {
     target_index: usize,
 }
 
-/// Rust-owned identities and ordering of compositor layers.
+/// A compositor layer collection with a structurally separate default layer.
 ///
-/// C grid pointers are deliberately excluded. During the ownership transition,
-/// a `GridAccess` implementation supplies the corresponding Rust grid borrows.
+/// The default layer always exists and can never be reordered with or removed
+/// from the overlay collection.
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct CompositorLayerRegistry {
-    layer_ids: Vec<GridId>,
+struct Layers<T> {
+    default: T,
+    overlays: Vec<T>,
 }
 
-impl CompositorLayerRegistry {
-    /// Creates a nonempty registry containing unique grid identities.
+impl<T> Layers<T> {
+    /// Returns the number of layers, including the default layer.
+    fn len(&self) -> usize {
+        1 + self.overlays.len()
+    }
+
+    /// Returns the default layer.
+    fn default(&self) -> &T {
+        &self.default
+    }
+
+    /// Returns the ordered overlay layers.
+    fn overlays(&self) -> &[T] {
+        &self.overlays
+    }
+
+    /// Returns one layer by its complete stack index.
+    fn layer(&self, index: usize) -> Option<&T> {
+        if index == 0 {
+            Some(&self.default)
+        } else {
+            self.overlays.get(index - 1)
+        }
+    }
+
+    /// Iterates over the default layer followed by every overlay.
+    fn iter(&self) -> impl Iterator<Item = &T> {
+        std::iter::once(&self.default).chain(&self.overlays)
+    }
+}
+
+/// Transitional persisted layer identities.
+///
+/// C grid pointers remain excluded. During the ownership transition, a
+/// `GridAccess` implementation supplies the corresponding Rust grid borrows.
+type CompositorLayerRegistry = Layers<GridId>;
+
+impl Layers<GridId> {
+    /// Creates layers from nonempty, uniquely ordered grid identities.
     fn try_new(layer_ids: Vec<GridId>) -> Option<Self> {
-        if layer_ids.is_empty()
-            || layer_ids
-                .iter()
-                .enumerate()
-                .any(|(index, grid_id)| layer_ids[..index].contains(grid_id))
+        let mut layer_ids = layer_ids.into_iter();
+        let default = layer_ids.next()?;
+        let overlays = layer_ids.collect::<Vec<_>>();
+        if overlays
+            .iter()
+            .enumerate()
+            .any(|(index, grid_id)| *grid_id == default || overlays[..index].contains(grid_id))
         {
             return None;
         }
 
-        Some(Self { layer_ids })
-    }
-
-    /// Returns the number of registered compositor layers.
-    fn len(&self) -> usize {
-        self.layer_ids.len()
-    }
-
-    /// Returns the ordered registered identities.
-    fn layer_ids(&self) -> &[GridId] {
-        &self.layer_ids
+        Some(Self { default, overlays })
     }
 
     /// Returns one identity by its layer index.
     fn layer_id(&self, index: usize) -> Option<GridId> {
-        self.layer_ids.get(index).copied()
+        self.layer(index).copied()
     }
 
     /// Returns the layer index of one registered grid.
     fn index_of(&self, grid_id: GridId) -> Option<usize> {
-        self.layer_ids
+        if self.default == grid_id {
+            return Some(0);
+        }
+
+        self.overlays
             .iter()
             .position(|candidate| *candidate == grid_id)
+            .and_then(|index| index.checked_add(1))
     }
 
     /// Appends one previously unregistered grid identity.
@@ -1737,34 +1772,53 @@ impl CompositorLayerRegistry {
             return Err(CompositorError::InvalidLayerState);
         }
 
-        self.layer_ids.push(grid_id);
+        self.overlays.push(grid_id);
         Ok(())
     }
 
     /// Removes one non-default grid identity.
     fn remove_non_default(&mut self, layer_index: usize) -> CompositorResult<GridId> {
-        if layer_index == 0 {
-            return Err(CompositorError::DefaultLayerMutation);
-        }
-        if layer_index >= self.layer_ids.len() {
-            return Err(CompositorError::InvalidLayerState);
-        }
+        let overlay_index = layer_index
+            .checked_sub(1)
+            .ok_or(CompositorError::DefaultLayerMutation)?;
+        self.overlays
+            .get(overlay_index)
+            .ok_or(CompositorError::InvalidLayerState)?;
 
-        Ok(self.layer_ids.remove(layer_index))
+        Ok(self.overlays.remove(overlay_index))
     }
 
     /// Applies one validated layer relocation.
     fn apply_layer_move(&mut self, movement: CompositorLayerMove) -> CompositorResult<()> {
-        movement.apply_to(&mut self.layer_ids)
+        let source_index = movement
+            .source_index
+            .checked_sub(1)
+            .ok_or(CompositorError::DefaultLayerMutation)?;
+        let target_index = movement
+            .target_index
+            .checked_sub(1)
+            .ok_or(CompositorError::DefaultLayerMutation)?;
+        CompositorLayerMove {
+            source_index,
+            target_index,
+        }
+        .apply_to(&mut self.overlays)
     }
 
-    /// Clones the first `layer_count` layer identities into a new registry.
+    /// Clones the default layer and the requested initial overlay prefix.
     fn prefix(&self, layer_count: usize) -> CompositorResult<Self> {
-        let layer_ids = self
-            .layer_ids
-            .get(..layer_count)
+        let overlay_count = layer_count
+            .checked_sub(1)
             .ok_or(CompositorError::InvalidLayerState)?;
-        Self::try_new(layer_ids.to_vec()).ok_or(CompositorError::InvalidLayerState)
+        let overlays = self
+            .overlays
+            .get(..overlay_count)
+            .ok_or(CompositorError::InvalidLayerState)?
+            .to_vec();
+        Ok(Self {
+            default: self.default,
+            overlays,
+        })
     }
 
     /// Borrows every registered grid as a validated compositor layer stack.
@@ -1781,10 +1835,8 @@ impl CompositorLayerRegistry {
         grids: &'grid impl GridAccess,
         layer_count: usize,
     ) -> CompositorResult<CompositorLayerStack<'grid>> {
-        let grids = self
-            .layer_ids
-            .get(..layer_count)
-            .ok_or(CompositorError::InvalidLayerState)?
+        let layers = self.prefix(layer_count)?;
+        let grids = layers
             .iter()
             .map(|grid_id| {
                 grids
@@ -3103,18 +3155,29 @@ mod tests {
     }
 
     #[test]
-    fn layer_registry_owns_unique_grid_order() {
+    fn layers_separate_the_default_from_unique_overlays() {
         let first = GridId::new(1);
         let second = GridId::new(2);
         let third = GridId::new(3);
 
         assert!(CompositorLayerRegistry::try_new(Vec::new()).is_none());
         assert!(CompositorLayerRegistry::try_new(vec![first, first]).is_none());
+        assert!(CompositorLayerRegistry::try_new(vec![first, second, second]).is_none());
 
         let mut registry = CompositorLayerRegistry::try_new(vec![first, second, third]).unwrap();
+        assert_eq!(*registry.default(), first);
+        assert_eq!(registry.overlays(), &[second, third]);
         assert_eq!(registry.len(), 3);
         assert_eq!(registry.index_of(second), Some(1));
-        assert_eq!(registry.prefix(2).unwrap().layer_ids(), &[first, second]);
+        assert_eq!(
+            registry
+                .prefix(2)
+                .unwrap()
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            [first, second]
+        );
 
         registry
             .apply_layer_move(CompositorLayerMove {
@@ -3122,13 +3185,26 @@ mod tests {
                 target_index: 1,
             })
             .unwrap();
-        assert_eq!(registry.layer_ids(), &[first, third, second]);
+        assert_eq!(
+            registry.iter().copied().collect::<Vec<_>>(),
+            [first, third, second]
+        );
+        assert_eq!(
+            registry.apply_layer_move(CompositorLayerMove {
+                source_index: 1,
+                target_index: 0,
+            }),
+            Err(CompositorError::DefaultLayerMutation)
+        );
         assert_eq!(
             registry.remove_non_default(0),
             Err(CompositorError::DefaultLayerMutation)
         );
         assert_eq!(registry.remove_non_default(1), Ok(third));
-        assert_eq!(registry.layer_ids(), &[first, second]);
+        assert_eq!(
+            registry.iter().copied().collect::<Vec<_>>(),
+            [first, second]
+        );
     }
 
     fn compositor_layer(
@@ -3575,8 +3651,10 @@ mod tests {
                     .as_ref()
                     .unwrap()
                     .registry
-                    .layer_ids(),
-                &expected_registry
+                    .iter()
+                    .copied()
+                    .collect::<Vec<_>>(),
+                expected_registry
             );
             assert_eq!(
                 cgrids,
@@ -3996,8 +4074,10 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .registry
-                .layer_ids(),
-            &expected_registry
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            expected_registry
         );
 
         // SAFETY: The placement restored ownership to every C grid.
@@ -4151,7 +4231,10 @@ mod tests {
                     },
                 )
                 .unwrap();
-            assert_eq!(registry.layer_ids(), &expected_registry);
+            assert_eq!(
+                registry.iter().copied().collect::<Vec<_>>(),
+                expected_registry
+            );
         }
 
         assert_eq!(cgrids, [default_pointer, lower_pointer, upper_pointer]);
@@ -4202,7 +4285,10 @@ mod tests {
                 Err(CompositorError::DefaultLayerMutation)
             );
             assert_eq!(registry.remove_layer(&mut grid_store, 1), Ok(()));
-            assert_eq!(registry.layer_ids(), &expected_registry);
+            assert_eq!(
+                registry.iter().copied().collect::<Vec<_>>(),
+                expected_registry
+            );
         }
 
         assert_eq!(
@@ -4268,8 +4354,10 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .registry
-                .layer_ids(),
-            &expected_registry
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            expected_registry
         );
 
         {

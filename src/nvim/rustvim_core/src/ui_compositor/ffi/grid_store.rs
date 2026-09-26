@@ -57,7 +57,6 @@ impl CCompositorGridBindings {
     fn matches_registry(&self, registry: &CompositorLayerRegistry) -> bool {
         self.grids.len() == registry.len()
             && registry
-                .layer_ids()
                 .iter()
                 .all(|grid_id| self.grids.contains_key(grid_id))
     }
@@ -65,7 +64,6 @@ impl CCompositorGridBindings {
     /// Returns C grid pointers in native compositor order.
     fn ordered_cgrids(&self, registry: &CompositorLayerRegistry) -> Option<Vec<*mut CScreenGrid>> {
         registry
-            .layer_ids()
             .iter()
             .map(|grid_id| {
                 self.grids
@@ -233,7 +231,6 @@ impl LegacyGridStore {
     ) -> Option<Self> {
         if registry.len() != bindings.len()
             || registry
-                .layer_ids()
                 .iter()
                 .any(|grid_id| !bindings.contains_key(grid_id))
         {
@@ -326,7 +323,6 @@ impl LegacyGridStore {
     pub(in crate::ui_compositor) fn ffi_state(&self) -> Option<CompositorLayerFfiState> {
         let registry = self.registry.clone();
         let c_grids = registry
-            .layer_ids()
             .iter()
             .map(|grid_id| {
                 let layer = self.bindings.get(grid_id)?;
