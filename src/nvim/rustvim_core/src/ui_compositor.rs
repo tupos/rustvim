@@ -191,6 +191,13 @@ impl CompositorSize {
     }
 }
 
+/// Safe state and follow-up work selected for a composed-grid resize.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CompositorResizePlan {
+    size: CompositorSize,
+    buffer_width: usize,
+}
+
 /// Validated native inputs for positioning the composed cursor.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct CompositorCursorRequest {
@@ -412,6 +419,7 @@ struct CompositorMessagePositionPlan {
 struct CompositorDrawState {
     attached_ui_count: usize,
     screen_valid: bool,
+    screen_size: Option<CompositorSize>,
 }
 
 impl CompositorDrawState {
@@ -420,6 +428,7 @@ impl CompositorDrawState {
         Self {
             attached_ui_count: 0,
             screen_valid: true,
+            screen_size: None,
         }
     }
 
@@ -628,6 +637,36 @@ impl Compositor {
     /// Hides the message separator while preserving its configured character.
     fn hide_message_separator(&mut self) {
         self.message.hide_separator();
+    }
+
+    /// Records a composed-screen resize and plans its external effects.
+    fn resize(&mut self, size: CompositorSize) -> Option<CompositorResizePlan> {
+        let buffer_width = usize::try_from(size.width).ok()?;
+        self.display.screen_size = Some(size);
+
+        Some(CompositorResizePlan { size, buffer_width })
+    }
+
+    /// Updates message-grid placement and returns its required display work.
+    fn set_message_position(
+        &mut self,
+        message_grid: &mut ScreenGrid,
+        default_grid: &ScreenGrid,
+        request: CompositorMessagePositionRequest,
+    ) -> Option<CompositorMessagePositionPlan> {
+        let should_draw = self.should_draw();
+        self.message
+            .update_position(message_grid, default_grid, request, should_draw)
+    }
+
+    /// Returns the active message-separator character for one screen row.
+    fn message_separator_character_at(&self, row: i32) -> Option<VimSCharT> {
+        self.message.separator_character_at(row)
+    }
+
+    /// Reports whether the most recent message-grid placement was scrolled.
+    fn message_was_scrolled(&self) -> bool {
+        self.message.was_scrolled
     }
 }
 
@@ -2680,26 +2719,43 @@ mod tests {
     }
 
     #[test]
+    fn compositor_resize_records_screen_size_and_buffer_width() {
+        let mut compositor = Compositor::new();
+        let size = CompositorSize {
+            height: 24,
+            width: 80,
+        };
+
+        assert_eq!(
+            compositor.resize(size),
+            Some(CompositorResizePlan {
+                size,
+                buffer_width: 80,
+            })
+        );
+        assert_eq!(compositor.display.screen_size, Some(size));
+    }
+
+    #[test]
     fn moving_message_grid_down_recomposes_the_exposed_rows() {
-        let mut state = MessageCompositorState::new();
+        let mut compositor = Compositor::new();
         let mut message_grid = grid_with_size(10, 20);
         let default_grid = grid_with_size(10, 18);
         assert_eq!(
-            state.update_position(
+            compositor.set_message_position(
                 &mut message_grid,
                 &default_grid,
                 message_position_request(5, false),
-                false,
             ),
             Some(CompositorMessagePositionPlan::default())
         );
 
-        let plan = state
-            .update_position(
+        compositor.attach();
+        let plan = compositor
+            .set_message_position(
                 &mut message_grid,
                 &default_grid,
                 message_position_request(7, false),
-                true,
             )
             .unwrap();
 
@@ -2718,24 +2774,23 @@ mod tests {
 
     #[test]
     fn moving_message_grid_up_scrolls_text_and_recomposes_a_new_separator() {
-        let mut state = MessageCompositorState::new();
+        let mut compositor = Compositor::new();
         let mut message_grid = grid_with_size(10, 20);
         let default_grid = grid_with_size(10, 18);
-        state
-            .update_position(
+        compositor
+            .set_message_position(
                 &mut message_grid,
                 &default_grid,
                 message_position_request(5, false),
-                false,
             )
             .unwrap();
 
-        let plan = state
-            .update_position(
+        compositor.attach();
+        let plan = compositor
+            .set_message_position(
                 &mut message_grid,
                 &default_grid,
                 message_position_request(2, true),
-                true,
             )
             .unwrap();
 
@@ -2752,9 +2807,12 @@ mod tests {
                 }),
             }
         );
-        assert_eq!(state.separator_character_at(1), Some(schar_from_ascii('-')));
-        state.hide_separator();
-        assert_eq!(state.separator_character_at(1), None);
+        assert_eq!(
+            compositor.message_separator_character_at(1),
+            Some(schar_from_ascii('-'))
+        );
+        compositor.hide_message_separator();
+        assert_eq!(compositor.message_separator_character_at(1), None);
     }
 
     #[test]

@@ -77,18 +77,19 @@ pub extern "C" fn ui_comp_grid_resize(grid: Integer, width: Integer, height: Int
     ) else {
         panic!("grid-resize arguments must fit native compositor coordinates");
     };
-    let grid_id = GridId::new(grid);
     let size =
         CompositorSize::try_new(height, width).expect("grid-resize dimensions must be nonnegative");
-    if grid_id != GridId::new(1) {
+    if GridId::new(grid) != GridId::new(1) {
         return;
     }
+    let plan = lock_compositor()
+        .resize(size)
+        .expect("validated screen width must fit compositor storage");
 
     let mut output = NvimOutput;
-    output.emit(UiCommand::GridResize(size));
+    output.emit(UiCommand::GridResize(plan.size));
 
-    let width = usize::try_from(size.width).expect("validated width must fit usize");
-    assert!(lock_compositor_buffer_pool().resize(width));
+    assert!(lock_compositor_buffer_pool().resize(plan.buffer_width));
 }
 
 /// Hides the message separator after the composed screen is invalidated.
@@ -126,11 +127,7 @@ unsafe fn update_message_position(
         // buffers into distinct guards for the duration of this operation.
         let mut message_grid = unsafe { ScreenGridGuard::take(message_grid) };
         let default_grid = unsafe { ScreenGridGuard::take(default_grid) };
-        let mut compositor = lock_compositor();
-        let should_draw = compositor.should_draw();
-        compositor
-            .message
-            .update_position(&mut message_grid, &default_grid, request, should_draw)
+        lock_compositor().set_message_position(&mut message_grid, &default_grid, request)
     };
     let Some(plan) = plan else {
         return false;
@@ -689,9 +686,7 @@ unsafe fn compose_line_from_registered_grids(
     request: CompositorLineInput,
     output: &mut impl CompositorOutput,
 ) -> bool {
-    let separator_character = lock_compositor()
-        .message
-        .separator_character_at(request.row);
+    let separator_character = lock_compositor().message_separator_character_at(request.row);
     let separator_active = separator_character.is_some();
     if separator_active && message_grid.is_null() {
         return false;
@@ -885,7 +880,7 @@ unsafe fn process_raw_line(
         return false;
     };
 
-    let message_was_scrolled = lock_compositor().message.was_scrolled;
+    let message_was_scrolled = lock_compositor().message_was_scrolled();
     let plan = {
         let Some(grid_store) = LegacyGridStore::try_take_registered() else {
             return false;
@@ -1080,7 +1075,7 @@ unsafe fn process_scroll(
         return false;
     };
 
-    let message_was_scrolled = lock_compositor().message.was_scrolled;
+    let message_was_scrolled = lock_compositor().message_was_scrolled();
     let operation = {
         let Some(grid_store) = LegacyGridStore::try_take_registered() else {
             return false;
