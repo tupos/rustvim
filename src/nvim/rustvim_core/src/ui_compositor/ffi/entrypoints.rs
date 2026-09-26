@@ -196,7 +196,7 @@ pub(in crate::ui_compositor) fn recompose_area_for_registered_grid(
     grid_id: GridId,
 ) -> Option<CompositorRecomposeArea> {
     let grid_store = LegacyGridStore::try_take_registered()?;
-    recompose_area_for_grid(&grid_store.registry, &grid_store, grid_id)
+    lock_compositor().recompose_area_for_grid(&grid_store.registry, &grid_store, grid_id)
 }
 
 /// Recomposes the screen area occupied by one grid when drawing is enabled.
@@ -758,36 +758,23 @@ unsafe fn compose_area_from_registered_grids(
     request: CompositorAreaRequest,
     output: &mut impl CompositorOutput,
 ) -> bool {
-    let CompositorAreaRequest { area, settings } = request;
-    let area = {
+    let plan = {
         let Some(grid_store) = LegacyGridStore::try_take_registered() else {
             return false;
         };
-        clip_recompose_area_to_default_grid(&grid_store.registry, &grid_store, area)
+        let Some(plan) =
+            lock_compositor().plan_recompose_area(&grid_store.registry, &grid_store, request)
+        else {
+            return false;
+        };
+        plan
     };
-    let Some(area) = area else {
-        return false;
-    };
-    if area.columns.end <= area.columns.start {
-        return true;
-    }
 
-    for row in area.rows {
+    for line in plan.into_line_inputs() {
         // SAFETY: The caller satisfies the documented message-grid
         // requirements. The temporary clipping guards and every preceding
         // line's guards were dropped before this helper takes ownership.
-        if !unsafe {
-            compose_line_from_registered_grids(
-                message_grid,
-                CompositorLineInput {
-                    row,
-                    columns: area.columns.clone(),
-                    flags: LINE_FLAG_INVALID,
-                    settings,
-                },
-                output,
-            )
-        } {
+        if !unsafe { compose_line_from_registered_grids(message_grid, line, output) } {
             return false;
         }
     }

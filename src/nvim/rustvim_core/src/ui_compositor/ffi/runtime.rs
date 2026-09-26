@@ -6,7 +6,7 @@ use crate::{defines::OptInt, globals, grid::VimSAttrT};
 
 use super::super::{
     CompositorDebugHighlights, CompositorRecomposeArea, CompositorRuntime,
-    clip_recompose_area_to_default_grid, emit_compositor_debug_line,
+    emit_compositor_debug_line, lock_compositor,
 };
 use super::grid_store::LegacyGridStore;
 use crate::ui_compositor::output::{CompositorOutput, UiCommand};
@@ -88,7 +88,7 @@ impl CompositorRuntime {
             let Some(grid_store) = LegacyGridStore::try_take_registered() else {
                 return;
             };
-            clip_recompose_area_to_default_grid(
+            lock_compositor().clip_recompose_area(
                 &grid_store.registry,
                 &grid_store,
                 requested_area.clone(),

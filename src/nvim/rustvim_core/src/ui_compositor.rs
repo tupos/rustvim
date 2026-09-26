@@ -958,6 +958,40 @@ impl Compositor {
         )
     }
 
+    /// Clamps a recomposition area's exclusive ends to the default grid.
+    fn clip_recompose_area(
+        &self,
+        registry: &CompositorLayerRegistry,
+        grids: &impl GridAccess,
+        area: CompositorRecomposeArea,
+    ) -> Option<CompositorRecomposeArea> {
+        area.with_ends_clamped_to_grid(grids.grid(registry.layer_id(0)?)?)
+    }
+
+    /// Returns the screen area occupied by one registered grid.
+    fn recompose_area_for_grid(
+        &self,
+        registry: &CompositorLayerRegistry,
+        grids: &impl GridAccess,
+        grid_id: GridId,
+    ) -> Option<CompositorRecomposeArea> {
+        registry.index_of(grid_id)?;
+        CompositorRecomposeArea::try_from_grid(grids.grid(grid_id)?)
+    }
+
+    /// Plans the line requests required to recompose one clipped screen area.
+    fn plan_recompose_area(
+        &self,
+        registry: &CompositorLayerRegistry,
+        grids: &impl GridAccess,
+        request: CompositorAreaRequest,
+    ) -> Option<CompositorRecomposePlan> {
+        Some(CompositorRecomposePlan {
+            area: self.clip_recompose_area(registry, grids, request.area)?,
+            settings: request.settings,
+        })
+    }
+
     /// Returns the active message-separator character for one screen row.
     fn message_separator_character_at(&self, row: i32) -> Option<VimSCharT> {
         self.message.separator_character_at(row)
@@ -2187,6 +2221,32 @@ struct CompositorAreaRequest {
     settings: CompositorLineSettings,
 }
 
+/// A clipped screen area ready for line-by-line recomposition.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CompositorRecomposePlan {
+    area: CompositorRecomposeArea,
+    settings: CompositorLineSettings,
+}
+
+impl CompositorRecomposePlan {
+    /// Produces one owned line request for every row in a nonempty area.
+    fn into_line_inputs(self) -> impl Iterator<Item = CompositorLineInput> {
+        let has_columns = self.area.columns.start < self.area.columns.end;
+        let columns = self.area.columns;
+        let settings = self.settings;
+
+        self.area
+            .rows
+            .filter(move |_| has_columns)
+            .map(move |row| CompositorLineInput {
+                row,
+                columns: columns.clone(),
+                flags: LINE_FLAG_INVALID,
+                settings,
+            })
+    }
+}
+
 /// Validated inputs for composing one line from temporarily C-owned grids.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct CompositorLineInput {
@@ -2614,25 +2674,6 @@ fn lock_compositor_buffer_pool() -> MutexGuard<'static, CompositorBufferPool> {
 /// Checks out compositor storage without retaining the pool mutex.
 fn acquire_compositor_buffer() -> CompositorBufferLease<'static> {
     CompositorBufferLease::acquire(&COMPOSITOR_BUFFER_POOL)
-}
-
-/// Clamps a recomposition area's exclusive ends to the default grid.
-fn clip_recompose_area_to_default_grid(
-    registry: &CompositorLayerRegistry,
-    grids: &impl GridAccess,
-    area: CompositorRecomposeArea,
-) -> Option<CompositorRecomposeArea> {
-    area.with_ends_clamped_to_grid(grids.grid(registry.layer_id(0)?)?)
-}
-
-/// Returns the screen area occupied by one registered grid.
-fn recompose_area_for_grid(
-    registry: &CompositorLayerRegistry,
-    grids: &impl GridAccess,
-    grid_id: GridId,
-) -> Option<CompositorRecomposeArea> {
-    registry.index_of(grid_id)?;
-    CompositorRecomposeArea::try_from_grid(grids.grid(grid_id)?)
 }
 
 /// Emits one clear raw-line event used for compositor visualization.
@@ -3076,14 +3117,18 @@ mod tests {
             let grid_store = LegacyGridStore::try_take_registered().unwrap();
 
             assert_eq!(
-                recompose_area_for_grid(&grid_store.registry, &grid_store, grid_id),
+                Compositor::new().recompose_area_for_grid(
+                    &grid_store.registry,
+                    &grid_store,
+                    grid_id,
+                ),
                 Some(CompositorRecomposeArea {
                     rows: 2..5,
                     columns: 5..9,
                 })
             );
             assert_eq!(
-                clip_recompose_area_to_default_grid(
+                Compositor::new().clip_recompose_area(
                     &grid_store.registry,
                     &grid_store,
                     CompositorRecomposeArea {
