@@ -241,10 +241,7 @@ pub(in crate::ui_compositor) fn place_grid_in_registered_layers(
 ) -> CompositorResult<CompositorGridPlacementOutcome> {
     let preparation = {
         let mut grid_store = grid_store;
-        let previous_registry = grid_store
-            .registry
-            .prefix(target.layer_index)
-            .ok_or(CompositorError::InvalidLayerState)?;
+        let previous_registry = grid_store.registry.prefix(target.layer_index)?;
         let mut registry = grid_store.registry.clone();
         let preparation = lock_compositor().prepare_grid_placement(
             &mut registry,
@@ -719,10 +716,7 @@ unsafe fn compose_line_from_registered_grids(
             None
         };
 
-        let layers = grid_store
-            .registry
-            .layer_stack(&grid_store)
-            .ok_or(CompositorError::InvalidLayerState)?;
+        let layers = grid_store.registry.layer_stack(&grid_store)?;
         lock_compositor().compose_line(&mut line_buffer, &layers, message_grid, &request)
     })()?;
 
