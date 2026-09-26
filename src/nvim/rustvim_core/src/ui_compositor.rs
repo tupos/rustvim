@@ -580,6 +580,26 @@ impl MessageCompositorState {
     }
 }
 
+/// Safe process-global state of the UI compositor.
+///
+/// Reentrant line-buffer storage and transitional C grid bindings remain
+/// outside this state because their ownership must be released independently
+/// around synchronous UI callbacks.
+struct Compositor {
+    display: CompositorDrawState,
+    message: MessageCompositorState,
+}
+
+impl Compositor {
+    /// Creates the compositor state used before any composed UI is attached.
+    const fn new() -> Self {
+        Self {
+            display: CompositorDrawState::new(),
+            message: MessageCompositorState::new(),
+        }
+    }
+}
+
 /// Validated grid-local inputs for planning one compositor scroll.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct CompositorScrollRequest {
@@ -2198,14 +2218,13 @@ impl Drop for CompositorBufferLease<'_> {
     }
 }
 
-static MESSAGE_COMPOSITOR_STATE: Mutex<MessageCompositorState> =
-    Mutex::new(MessageCompositorState::new());
+static COMPOSITOR: Mutex<Compositor> = Mutex::new(Compositor::new());
 
-/// Acquires exclusive access to the process-global message compositor state.
-fn lock_message_compositor_state() -> MutexGuard<'static, MessageCompositorState> {
-    MESSAGE_COMPOSITOR_STATE
+/// Acquires exclusive access to the safe process-global compositor state.
+fn lock_compositor() -> MutexGuard<'static, Compositor> {
+    COMPOSITOR
         .try_lock()
-        .expect("message compositor state is already borrowed")
+        .expect("compositor state is already borrowed")
 }
 
 static COMPOSITOR_BUFFER_POOL: Mutex<CompositorBufferPool> =
@@ -2221,15 +2240,6 @@ fn lock_compositor_buffer_pool() -> MutexGuard<'static, CompositorBufferPool> {
 /// Checks out compositor storage without retaining the pool mutex.
 fn acquire_compositor_buffer() -> CompositorBufferLease<'static> {
     CompositorBufferLease::acquire(&COMPOSITOR_BUFFER_POOL)
-}
-
-static COMPOSITOR_DRAW_STATE: Mutex<CompositorDrawState> = Mutex::new(CompositorDrawState::new());
-
-/// Acquires exclusive access to the process-global compositor draw state.
-fn lock_compositor_draw_state() -> MutexGuard<'static, CompositorDrawState> {
-    COMPOSITOR_DRAW_STATE
-        .try_lock()
-        .expect("compositor draw state is already borrowed")
 }
 
 /// Clamps a recomposition area's exclusive ends to the default grid.

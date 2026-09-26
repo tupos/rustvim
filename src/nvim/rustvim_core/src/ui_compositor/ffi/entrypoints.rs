@@ -45,13 +45,14 @@ pub extern "C" fn ui_comp_syn_init() {
 /// Records one newly attached composed UI.
 #[unsafe(no_mangle)]
 pub extern "C" fn ui_comp_attach() {
-    lock_compositor_draw_state().register_ui();
+    lock_compositor().display.register_ui();
 }
 
 /// Removes one composed UI and releases the buffer after the final detach.
 #[unsafe(no_mangle)]
 pub extern "C" fn ui_comp_detach() {
-    let detached_last = lock_compositor_draw_state()
+    let detached_last = lock_compositor()
+        .display
         .unregister_ui()
         .expect("cannot unregister a composed UI when none are attached");
     if detached_last {
@@ -64,9 +65,10 @@ pub extern "C" fn ui_comp_detach() {
 /// Invalidating the composed screen also hides the message separator.
 #[unsafe(no_mangle)]
 pub extern "C" fn ui_comp_set_screen_valid(valid: bool) -> bool {
-    let previous = lock_compositor_draw_state().set_screen_valid(valid);
+    let mut compositor = lock_compositor();
+    let previous = compositor.display.set_screen_valid(valid);
     if !valid {
-        lock_message_compositor_state().hide_separator();
+        compositor.message.hide_separator();
     }
     previous
 }
@@ -98,7 +100,7 @@ pub extern "C" fn ui_comp_grid_resize(grid: Integer, width: Integer, height: Int
 /// Hides the message separator after the composed screen is invalidated.
 #[unsafe(no_mangle)]
 pub extern "C" fn ui_comp_hide_message_separator() {
-    lock_message_compositor_state().hide_separator();
+    lock_compositor().message.hide_separator();
 }
 
 /// Updates message-grid state and executes its scrolling and recomposition.
@@ -125,19 +127,16 @@ unsafe fn update_message_position(
     if message_grid.is_null() || default_grid.is_null() || message_grid == default_grid {
         return false;
     }
-    let should_draw = lock_compositor_draw_state().should_draw();
-
     let plan = {
         // SAFETY: The caller transfers exclusive ownership of both grids'
         // buffers into distinct guards for the duration of this operation.
         let mut message_grid = unsafe { ScreenGridGuard::take(message_grid) };
         let default_grid = unsafe { ScreenGridGuard::take(default_grid) };
-        lock_message_compositor_state().update_position(
-            &mut message_grid,
-            &default_grid,
-            request,
-            should_draw,
-        )
+        let mut compositor = lock_compositor();
+        let should_draw = compositor.display.should_draw();
+        compositor
+            .message
+            .update_position(&mut message_grid, &default_grid, request, should_draw)
     };
     let Some(plan) = plan else {
         return false;
@@ -224,7 +223,7 @@ pub unsafe extern "C" fn ui_comp_compose_grid(grid: *mut CScreenGrid) {
         grid.id()
     };
 
-    if !lock_compositor_draw_state().should_draw() {
+    if !lock_compositor().display.should_draw() {
         return;
     }
     let runtime = compositor_runtime_snapshot().expect("compositor runtime must be valid");
@@ -331,7 +330,7 @@ pub unsafe extern "C" fn ui_comp_put_grid(
         Ok(handle) => Some(GridId::new(handle)),
         Err(_) => panic!("current-window grid handle must fit GridId"),
     };
-    let should_draw = lock_compositor_draw_state().should_draw();
+    let should_draw = lock_compositor().display.should_draw();
 
     // SAFETY: The caller satisfies the candidate ownership requirements.
     let Some((grid_store, target)) =
@@ -520,7 +519,7 @@ pub unsafe extern "C" fn ui_comp_remove_grid(grid: *mut CScreenGrid) {
         grid.id()
     };
 
-    let should_draw = lock_compositor_draw_state().should_draw();
+    let should_draw = lock_compositor().display.should_draw();
     let grid_store =
         LegacyGridStore::try_take_registered().expect("compositor registry must be valid");
     let Some(layer_index) = grid_store.registry.index_of(grid_id) else {
@@ -664,7 +663,7 @@ pub unsafe extern "C" fn ui_comp_cursor_is_covered_by_higher_layer(
     column: libc::c_int,
     minimum_z_index_gap: libc::c_int,
 ) -> bool {
-    if !lock_compositor_draw_state().should_draw() {
+    if !lock_compositor().display.should_draw() {
         return false;
     }
     let Some(current_grid) = NonNull::new(current_grid) else {
@@ -696,7 +695,9 @@ unsafe fn compose_line_from_registered_grids(
     request: CompositorLineInput,
     output: &mut impl CompositorOutput,
 ) -> bool {
-    let separator_character = lock_message_compositor_state().separator_character_at(request.row);
+    let separator_character = lock_compositor()
+        .message
+        .separator_character_at(request.row);
     let separator_active = separator_character.is_some();
     if separator_active && message_grid.is_null() {
         return false;
@@ -883,14 +884,14 @@ unsafe fn process_raw_line(
     attributes: *const VimSAttrT,
     output: &mut impl CompositorOutput,
 ) -> bool {
-    if !lock_compositor_draw_state().should_draw() {
+    if !lock_compositor().display.should_draw() {
         return true;
     }
     let Some(runtime) = compositor_runtime_snapshot() else {
         return false;
     };
 
-    let message_was_scrolled = lock_message_compositor_state().was_scrolled;
+    let message_was_scrolled = lock_compositor().message.was_scrolled;
     let plan = {
         let Some(grid_store) = LegacyGridStore::try_take_registered() else {
             return false;
@@ -1078,14 +1079,14 @@ unsafe fn process_scroll(
     request: CompositorScrollRequest,
     output: &mut impl CompositorOutput,
 ) -> bool {
-    if !lock_compositor_draw_state().should_draw() {
+    if !lock_compositor().display.should_draw() {
         return true;
     }
     let Some(runtime) = compositor_runtime_snapshot() else {
         return false;
     };
 
-    let message_was_scrolled = lock_message_compositor_state().was_scrolled;
+    let message_was_scrolled = lock_compositor().message.was_scrolled;
     let operation = {
         let Some(grid_store) = LegacyGridStore::try_take_registered() else {
             return false;
