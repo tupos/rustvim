@@ -2476,6 +2476,121 @@ impl CompositorBuffer {
     }
 }
 
+/// Reusable compositor storage that can be checked out without retaining its
+/// mutex lock.
+///
+/// Ordinarily the pool retains one buffer. If composition is reentered while
+/// that buffer is leased, another buffer is allocated temporarily.
+struct CompositorBufferPool {
+    width: usize,
+    available_buffer: Option<CompositorBuffer>,
+}
+
+impl CompositorBufferPool {
+    /// Creates a pool containing one empty reusable buffer.
+    const fn new() -> Self {
+        Self {
+            width: 0,
+            available_buffer: Some(CompositorBuffer::new()),
+        }
+    }
+
+    /// Returns the configured composed-screen width.
+    fn width(&self) -> usize {
+        self.width
+    }
+
+    /// Reconfigures available storage for a new composed-screen width.
+    fn resize(&mut self, width: usize) -> bool {
+        self.width = width;
+        if let Some(buffer) = self.available_buffer.as_mut() {
+            return buffer.resize(width);
+        }
+        true
+    }
+
+    /// Releases all retained compositor storage.
+    fn release(&mut self) -> bool {
+        self.width = 0;
+        self.available_buffer = Some(CompositorBuffer::new());
+        true
+    }
+
+    /// Checks out reusable storage or allocates storage for reentrant work.
+    fn take_buffer(&mut self) -> CompositorBuffer {
+        let mut buffer = self
+            .available_buffer
+            .take()
+            .unwrap_or_else(CompositorBuffer::new);
+        assert!(buffer.resize(self.width));
+        buffer
+    }
+
+    /// Retains one returned buffer when it still has the configured width.
+    fn return_buffer(&mut self, buffer: CompositorBuffer) {
+        let has_current_width =
+            buffer.characters.len() == self.width && buffer.attributes.len() == self.width;
+        if self.available_buffer.is_none() && has_current_width {
+            self.available_buffer = Some(buffer);
+        }
+    }
+}
+
+/// Exclusive ownership of compositor storage without retaining the pool lock.
+///
+/// Dropping the lease returns compatible storage to the pool. If a synchronous
+/// callback resized the composed screen, the old-width storage is discarded.
+#[must_use = "dropping the lease returns its compositor buffer to the pool"]
+struct CompositorBufferLease<'pool> {
+    pool: &'pool Mutex<CompositorBufferPool>,
+    buffer: Option<CompositorBuffer>,
+}
+
+impl<'pool> CompositorBufferLease<'pool> {
+    /// Checks out one buffer while holding the pool lock only briefly.
+    fn acquire(pool: &'pool Mutex<CompositorBufferPool>) -> Self {
+        let buffer = pool
+            .try_lock()
+            .expect("compositor buffer pool is already borrowed")
+            .take_buffer();
+        Self {
+            pool,
+            buffer: Some(buffer),
+        }
+    }
+}
+
+impl std::ops::Deref for CompositorBufferLease<'_> {
+    type Target = CompositorBuffer;
+
+    fn deref(&self) -> &Self::Target {
+        self.buffer
+            .as_ref()
+            .expect("compositor buffer lease does not own a buffer")
+    }
+}
+
+impl std::ops::DerefMut for CompositorBufferLease<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.buffer
+            .as_mut()
+            .expect("compositor buffer lease does not own a buffer")
+    }
+}
+
+impl Drop for CompositorBufferLease<'_> {
+    fn drop(&mut self) {
+        let buffer = self
+            .buffer
+            .take()
+            .expect("compositor buffer lease does not own a buffer");
+        self.pool
+            .try_lock()
+            .expect("compositor buffer pool is already borrowed")
+            .return_buffer(buffer);
+    }
+}
+
 static COMPOSITOR_LAYER_STATE: Mutex<Option<CompositorLayerFfiState>> = Mutex::new(None);
 
 /// Acquires exclusive access to the transitional compositor boundary state.
@@ -2576,13 +2691,19 @@ fn lock_message_compositor_state() -> MutexGuard<'static, MessageCompositorState
         .expect("message compositor state is already borrowed")
 }
 
-static COMPOSITOR_BUFFER: Mutex<CompositorBuffer> = Mutex::new(CompositorBuffer::new());
+static COMPOSITOR_BUFFER_POOL: Mutex<CompositorBufferPool> =
+    Mutex::new(CompositorBufferPool::new());
 
-/// Acquires exclusive access to the process-global compositor buffer.
-fn lock_compositor_buffer() -> MutexGuard<'static, CompositorBuffer> {
-    COMPOSITOR_BUFFER
+/// Acquires exclusive access to the process-global compositor buffer pool.
+fn lock_compositor_buffer_pool() -> MutexGuard<'static, CompositorBufferPool> {
+    COMPOSITOR_BUFFER_POOL
         .try_lock()
-        .expect("compositor buffer is already borrowed")
+        .expect("compositor buffer pool is already borrowed")
+}
+
+/// Checks out compositor storage without retaining the pool mutex.
+fn acquire_compositor_buffer() -> CompositorBufferLease<'static> {
+    CompositorBufferLease::acquire(&COMPOSITOR_BUFFER_POOL)
 }
 
 static COMPOSITOR_DEBUG_HIGHLIGHTS: Mutex<CompositorDebugHighlights> =
@@ -2628,7 +2749,7 @@ pub extern "C" fn ui_comp_init() {
 #[unsafe(no_mangle)]
 pub extern "C" fn ui_comp_free_all_mem() {
     assert!(clear_layer_registry());
-    assert!(lock_compositor_buffer().release());
+    assert!(lock_compositor_buffer_pool().release());
 }
 
 /// Initializes compositor debug highlights.
@@ -2650,7 +2771,7 @@ pub extern "C" fn ui_comp_detach() {
         .unregister_ui()
         .expect("cannot unregister a composed UI when none are attached");
     if detached_last {
-        assert!(lock_compositor_buffer().release());
+        assert!(lock_compositor_buffer_pool().release());
     }
 }
 
@@ -2687,7 +2808,7 @@ pub extern "C" fn ui_comp_grid_resize(grid: Integer, width: Integer, height: Int
     output.emit(UiCommand::GridResize(size));
 
     let width = usize::try_from(size.width).expect("validated width must fit usize");
-    assert!(lock_compositor_buffer().resize(width));
+    assert!(lock_compositor_buffer_pool().resize(width));
 }
 
 /// Hides the message separator after the composed screen is invalidated.
@@ -3383,7 +3504,7 @@ unsafe fn compose_line_from_registered_grids(
         return false;
     }
 
-    let mut compositor = lock_compositor_buffer();
+    let mut compositor = acquire_compositor_buffer();
     let submission = (|| {
         let layer_guards = CompositorLayerGuards::try_take_registered()?;
         let message_grid_index = separator_active
@@ -3547,25 +3668,19 @@ fn emit_compositor_debug_line(
         return false;
     };
 
-    let compositor = lock_compositor_buffer();
-    if start_column > end_column || end_column > compositor.characters.len() {
+    let buffer_width = lock_compositor_buffer_pool().width();
+    if start_column > end_column || end_column > buffer_width {
         return false;
     }
 
-    let Some(characters) = compositor.characters.get(start_column..start_column) else {
-        return false;
-    };
-    let Some(attributes) = compositor.attributes.get(start_column..start_column) else {
-        return false;
-    };
     let Some(command) = RawLineCommand::try_new(
         row,
         columns.start..columns.start,
         columns.end,
         attribute,
         0,
-        characters,
-        attributes,
+        &[],
+        &[],
     ) else {
         return false;
     };
@@ -5884,6 +5999,47 @@ mod tests {
                 )
                 .is_none()
         );
+    }
+
+    #[test]
+    fn compositor_buffer_pool_allows_reentrant_leases() {
+        let pool = Mutex::new(CompositorBufferPool::new());
+        assert!(pool.try_lock().unwrap().resize(3));
+
+        {
+            let first = CompositorBufferLease::acquire(&pool);
+            assert_eq!(first.characters.len(), 3);
+            assert_eq!(first.attributes.len(), 3);
+
+            {
+                let second = CompositorBufferLease::acquire(&pool);
+                assert_eq!(second.characters.len(), 3);
+                assert_eq!(second.attributes.len(), 3);
+            }
+
+            assert!(pool.try_lock().unwrap().available_buffer.is_some());
+        }
+
+        assert!(pool.try_lock().unwrap().available_buffer.is_some());
+    }
+
+    #[test]
+    fn compositor_buffer_pool_discards_old_width_storage() {
+        let pool = Mutex::new(CompositorBufferPool::new());
+        assert!(pool.try_lock().unwrap().resize(2));
+
+        {
+            let leased = CompositorBufferLease::acquire(&pool);
+            assert_eq!(leased.characters.len(), 2);
+            assert_eq!(leased.attributes.len(), 2);
+            assert!(pool.try_lock().unwrap().resize(4));
+        }
+
+        assert!(pool.try_lock().unwrap().available_buffer.is_none());
+
+        let resized = CompositorBufferLease::acquire(&pool);
+        assert_eq!(resized.characters.len(), 4);
+        assert_eq!(resized.attributes.len(), 4);
     }
 
     #[test]
