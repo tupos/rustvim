@@ -991,24 +991,16 @@ impl Compositor {
     fn compose_line(
         &self,
         buffer: &mut CompositorBuffer,
-        layers: &CompositorLayerStack<'_>,
+        layers: &Layers<CompositorLayer<'_>>,
         message_grid: Option<&ScreenGrid>,
         request: &CompositorLineInput,
     ) -> CompositorResult<CompositorSubmission> {
         let message_separator = match self.message.separator_character_at(request.row) {
             Some(character) => {
                 let message_grid = message_grid.ok_or(CompositorError::InvalidLayerState)?;
-                let default_grid_id = layers
-                    .default_layer()
-                    .ok_or(CompositorError::InvalidLayerState)?
-                    .grid
-                    .id();
                 Some(MessageSeparator {
-                    layer: CompositorLayer::try_from_grid(
-                        message_grid,
-                        message_grid.id() == default_grid_id,
-                    )
-                    .ok_or(CompositorError::InvalidLayerState)?,
+                    layer: CompositorLayer::try_from_grid(message_grid)
+                        .ok_or(CompositorError::InvalidLayerState)?,
                     character,
                     attribute: request.settings.message_separator_attribute,
                 })
@@ -1402,12 +1394,11 @@ struct CompositorLayer<'grid> {
     layer_index: usize,
     blending: bool,
     disabled: bool,
-    is_default: bool,
 }
 
 impl<'grid> CompositorLayer<'grid> {
     /// Constructs a validated layer view from a Rust screen grid.
-    fn try_from_grid(grid: &'grid ScreenGrid, is_default: bool) -> Option<Self> {
+    fn try_from_grid(grid: &'grid ScreenGrid) -> Option<Self> {
         let (origin_row, origin_column) = grid.compositor_position();
         let (requested_width, requested_height) = grid.compositor_size();
         let allocated_size = GridSize::try_new(grid.rows, grid.cols)?;
@@ -1426,7 +1417,6 @@ impl<'grid> CompositorLayer<'grid> {
             layer_index: grid.compositor_index(),
             blending: grid.blends_with_background(),
             disabled: grid.is_compositor_disabled(),
-            is_default,
         })
     }
 
@@ -1628,8 +1618,8 @@ impl<'grid> CompositorLayer<'grid> {
     }
 
     /// Reports whether a line ending on this layer may retain its wrap flag.
-    fn allows_wrap(self, screen_columns: usize) -> bool {
-        self.is_default
+    fn allows_wrap(self, is_default: bool, screen_columns: usize) -> bool {
+        is_default
             || (self.origin.column == 0
                 && usize::try_from(self.grid.cols).ok() == Some(screen_columns))
     }
@@ -1712,7 +1702,7 @@ impl<T> Layers<T> {
     }
 
     /// Returns one layer by its complete stack index.
-    fn layer(&self, index: usize) -> Option<&T> {
+    fn get(&self, index: usize) -> Option<&T> {
         if index == 0 {
             Some(&self.default)
         } else {
@@ -1751,7 +1741,7 @@ impl Layers<GridId> {
 
     /// Returns one identity by its layer index.
     fn layer_id(&self, index: usize) -> Option<GridId> {
-        self.layer(index).copied()
+        self.get(index).copied()
     }
 
     /// Returns the layer index of one registered grid.
@@ -1825,7 +1815,7 @@ impl Layers<GridId> {
     fn layer_stack<'grid>(
         &self,
         grids: &'grid impl GridAccess,
-    ) -> CompositorResult<CompositorLayerStack<'grid>> {
+    ) -> CompositorResult<Layers<CompositorLayer<'grid>>> {
         self.layer_stack_prefix(grids, self.len())
     }
 
@@ -1834,7 +1824,7 @@ impl Layers<GridId> {
         &self,
         grids: &'grid impl GridAccess,
         layer_count: usize,
-    ) -> CompositorResult<CompositorLayerStack<'grid>> {
+    ) -> CompositorResult<Layers<CompositorLayer<'grid>>> {
         let layers = self.prefix(layer_count)?;
         let grids = layers
             .iter()
@@ -1844,7 +1834,8 @@ impl Layers<GridId> {
                     .ok_or(CompositorError::InvalidLayerState)
             })
             .collect::<CompositorResult<Vec<_>>>()?;
-        CompositorLayerStack::try_from_grids(&grids).ok_or(CompositorError::InvalidLayerState)
+        Layers::<CompositorLayer<'grid>>::try_from_grids(&grids)
+            .ok_or(CompositorError::InvalidLayerState)
     }
 
     /// Places the appended grid at its planned compositor-stack index.
@@ -1967,11 +1958,6 @@ impl CompositorLayerMove {
     }
 }
 
-/// Ordered borrowed grids used to compose one line.
-struct CompositorLayerStack<'grid> {
-    layers: Vec<CompositorLayer<'grid>>,
-}
-
 /// Validated inputs for checking coverage above one compositor layer.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct CompositorCoveredAboveQuery {
@@ -1981,14 +1967,16 @@ struct CompositorCoveredAboveQuery {
     message_was_scrolled: bool,
 }
 
-impl<'grid> CompositorLayerStack<'grid> {
-    /// Builds a layer stack from grids already owned by Rust guards.
+impl<'grid> Layers<CompositorLayer<'grid>> {
+    /// Resolves structurally ordered layers from grids owned by Rust guards.
     fn try_from_grids(grids: &[&'grid ScreenGrid]) -> Option<Self> {
-        let layers = grids
+        let (default_grid, overlay_grids) = grids.split_first()?;
+        let default = CompositorLayer::try_from_grid(default_grid)?;
+        let overlays = overlay_grids
             .iter()
-            .enumerate()
-            .map(|(index, grid)| CompositorLayer::try_from_grid(grid, index == 0))
+            .map(|grid| CompositorLayer::try_from_grid(grid))
             .collect::<Option<Vec<_>>>()?;
+        let layers = Self { default, overlays };
 
         if layers
             .iter()
@@ -1998,17 +1986,17 @@ impl<'grid> CompositorLayerStack<'grid> {
             return None;
         }
 
-        Some(Self { layers })
+        Some(layers)
     }
 
     /// Returns the default grid at the bottom of the stack.
-    fn default_layer(&self) -> Option<CompositorLayer<'grid>> {
-        self.layers.first().copied()
+    fn default_layer(&self) -> CompositorLayer<'grid> {
+        self.default
     }
 
     /// Returns one layer by its stack index.
     fn layer(&self, index: usize) -> Option<CompositorLayer<'grid>> {
-        self.layers.get(index).copied()
+        self.get(index).copied()
     }
 
     /// Selects the stable insertion index for one new layer.
@@ -2018,21 +2006,19 @@ impl<'grid> CompositorLayerStack<'grid> {
         current_window_layer: Option<usize>,
         on_top: bool,
     ) -> CompositorResult<usize> {
-        let mut insertion_index = self.layers.len();
-        while insertion_index > 0
+        if self.default.z_index > z_index {
+            return Err(CompositorError::InvalidLayerState);
+        }
+
+        let mut insertion_index = self.len();
+        while insertion_index > 1
             && self
-                .layers
-                .get(insertion_index - 1)
+                .layer(insertion_index - 1)
                 .ok_or(CompositorError::InvalidLayerState)?
                 .z_index
                 > z_index
         {
             insertion_index -= 1;
-        }
-
-        // The default grid must remain the first layer.
-        if insertion_index == 0 {
-            return Err(CompositorError::InvalidLayerState);
         }
 
         if !on_top && insertion_index > 1 {
@@ -2050,9 +2036,7 @@ impl<'grid> CompositorLayerStack<'grid> {
 
     /// Finds the compositor layer identified by one native grid identity.
     fn layer_index_with_id(&self, grid_id: GridId) -> Option<usize> {
-        self.layers
-            .iter()
-            .position(|layer| layer.grid.id() == grid_id)
+        self.iter().position(|layer| layer.grid.id() == grid_id)
     }
 
     /// Selects a grid and plans its composed-screen cursor update.
@@ -2060,10 +2044,7 @@ impl<'grid> CompositorLayerStack<'grid> {
         &self,
         request: CompositorCursorRequest,
     ) -> CompositorResult<CompositorCursorAction> {
-        let screen_size = self
-            .default_layer()
-            .ok_or(CompositorError::InvalidLayerState)?
-            .allocated_size();
+        let screen_size = self.default_layer().allocated_size();
         let Some(layer_index) = self.layer_index_with_id(request.grid_id) else {
             return Ok(CompositorCursorAction::Ignore);
         };
@@ -2076,11 +2057,10 @@ impl<'grid> CompositorLayerStack<'grid> {
             .checked_add_local(request.local_position)
             .ok_or(CompositorError::InvalidGeometry)?;
 
-        let raise_to = if layer.is_default {
+        let raise_to = if layer_index == 0 {
             None
         } else {
             let mut target_index = self
-                .layers
                 .len()
                 .checked_sub(1)
                 .ok_or(CompositorError::InvalidLayerState)?;
@@ -2108,8 +2088,7 @@ impl<'grid> CompositorLayerStack<'grid> {
 
     /// Finds the topmost non-default grid containing one screen cell.
     fn topmost_grid_at(&self, point: ComposedPosition, hit_test: LayerHitTest) -> Option<GridId> {
-        self.layers.get(1..)?.iter().rev().find_map(|layer| {
-            let layer = *layer;
+        self.overlays.iter().rev().copied().find_map(|layer| {
             layer
                 .positioned_grid()
                 .matches(point, hit_test)
@@ -2141,24 +2120,34 @@ impl<'grid> CompositorLayerStack<'grid> {
         layer_index: usize,
         adjustment: CompositorLayerAdjustment,
     ) -> CompositorResult<CompositorLayerMove> {
+        if layer_index == 0 {
+            return Err(CompositorError::DefaultLayerMutation);
+        }
         let layer = self
             .layer(layer_index)
             .ok_or(CompositorError::InvalidLayerState)?;
-        if layer.is_default {
-            return Err(CompositorError::DefaultLayerMutation);
-        }
 
         let mut target_index = layer_index;
         match adjustment {
             CompositorLayerAdjustment::Raise => {
-                while target_index + 1 < self.layers.len()
-                    && layer.z_index > self.layers[target_index + 1].z_index
+                while target_index + 1 < self.len()
+                    && layer.z_index
+                        > self
+                            .layer(target_index + 1)
+                            .ok_or(CompositorError::InvalidLayerState)?
+                            .z_index
                 {
                     target_index += 1;
                 }
             }
             CompositorLayerAdjustment::Lower => {
-                while target_index > 1 && layer.z_index < self.layers[target_index - 1].z_index {
+                while target_index > 1
+                    && layer.z_index
+                        < self
+                            .layer(target_index - 1)
+                            .ok_or(CompositorError::InvalidLayerState)?
+                            .z_index
+                {
                     target_index -= 1;
                 }
             }
@@ -2176,21 +2165,21 @@ impl<'grid> CompositorLayerStack<'grid> {
         layer_index: usize,
         target_index: usize,
     ) -> CompositorResult<CompositorLayerRaisePlan> {
+        if layer_index == 0 {
+            return Err(CompositorError::DefaultLayerMutation);
+        }
         let layer = self
             .layer(layer_index)
             .ok_or(CompositorError::InvalidLayerState)?;
-        if layer.is_default {
-            return Err(CompositorError::DefaultLayerMutation);
-        }
-        if target_index < layer_index || target_index >= self.layers.len() {
+        if target_index < layer_index || target_index >= self.len() {
             return Err(CompositorError::InvalidLayerState);
         }
 
         let recompose_areas = if target_index == layer_index {
             Vec::new()
         } else {
-            self.layers
-                .get(layer_index + 1..=target_index)
+            self.overlays
+                .get(layer_index..target_index)
                 .ok_or(CompositorError::InvalidLayerState)?
                 .iter()
                 .copied()
@@ -2209,13 +2198,11 @@ impl<'grid> CompositorLayerStack<'grid> {
 
     /// Reports whether any layer above the current layer intersects the query.
     fn is_covered_above(&self, query: CompositorCoveredAboveQuery) -> CompositorResult<bool> {
-        let first_layer_above = query
-            .current_layer_index
-            .checked_add(1)
+        self.layer(query.current_layer_index)
             .ok_or(CompositorError::InvalidLayerState)?;
         let layers_above = self
-            .layers
-            .get(first_layer_above..)
+            .overlays
+            .get(query.current_layer_index..)
             .ok_or(CompositorError::InvalidLayerState)?;
 
         for layer in layers_above {
@@ -2306,9 +2293,7 @@ impl<'grid> CompositorLayerStack<'grid> {
         let current_layer = self
             .layer(current_layer_index)
             .ok_or(CompositorError::InvalidLayerState)?;
-        let default_layer = self
-            .default_layer()
-            .ok_or(CompositorError::InvalidLayerState)?;
+        let default_layer = self.default_layer();
         let row = request
             .row
             .checked_add(current_layer.origin.row)
@@ -2327,7 +2312,7 @@ impl<'grid> CompositorLayerStack<'grid> {
             .clear_column
             .checked_add(current_layer.origin.column)
             .ok_or(CompositorError::InvalidGeometry)?;
-        let flags = if current_layer.is_default {
+        let flags = if current_layer_index == 0 {
             request.flags
         } else {
             request.flags.without(LineFlags::WRAP)
@@ -2387,7 +2372,7 @@ impl<'grid> CompositorLayerStack<'grid> {
         let mut selected = None;
         let mut segment_end = line_end;
 
-        for (index, layer) in self.layers.iter().copied().enumerate() {
+        for (index, layer) in self.iter().copied().enumerate() {
             if !layer.is_visible_on_row(row) {
                 continue;
             }
@@ -2590,11 +2575,12 @@ impl CompositorBuffer {
     fn try_compose_line(
         &mut self,
         request: CompositorLineRequest<'_>,
-        layers: &CompositorLayerStack<'_>,
+        layers: &Layers<CompositorLayer<'_>>,
     ) -> CompositorResult<CompositorSubmission> {
         let mut line =
             self.prepare_line(request.start_column, request.end_column, request.flags)?;
         let line_end = line.columns.end;
+        let default_grid_id = layers.default_layer().grid.id();
         let mut column = line.columns.start;
         let mut last_layer = None;
 
@@ -2613,7 +2599,6 @@ impl CompositorBuffer {
                 Some(
                     layers
                         .default_layer()
-                        .ok_or(CompositorError::InvalidLayerState)?
                         .screen_segment(request.row, output_columns.start..line_end)?,
                 )
             } else {
@@ -2643,9 +2628,11 @@ impl CompositorBuffer {
             last_layer = Some(composed_layer);
         }
 
-        let allow_wrap = last_layer
-            .ok_or(CompositorError::InvalidLineState)?
-            .allows_wrap(request.screen_columns);
+        let last_layer = last_layer.ok_or(CompositorError::InvalidLineState)?;
+        let allow_wrap = last_layer.allows_wrap(
+            last_layer.grid.id() == default_grid_id,
+            request.screen_columns,
+        );
         self.finish_line(line, request.flags, allow_wrap, request.abort_on_invalid)
     }
 
@@ -3229,8 +3216,14 @@ mod tests {
             layer_index,
             blending: false,
             disabled,
-            is_default: layer_index == 0,
         }
+    }
+
+    fn compositor_layers<'grid>(
+        default: CompositorLayer<'grid>,
+        overlays: Vec<CompositorLayer<'grid>>,
+    ) -> Layers<CompositorLayer<'grid>> {
+        Layers { default, overlays }
     }
 
     fn message_position_request(row: i32, scrolled: bool) -> CompositorMessagePositionRequest {
@@ -3578,14 +3571,10 @@ mod tests {
         lower_layer.z_index = 20;
         let mut equal_layer = compositor_layer(&equal_grid, 0, 1, 3, false);
         equal_layer.z_index = 30;
-        let layers = CompositorLayerStack {
-            layers: vec![
-                compositor_layer(&default_grid, 0, 1, 0, false),
-                moving_layer,
-                lower_layer,
-                equal_layer,
-            ],
-        };
+        let layers = compositor_layers(
+            compositor_layer(&default_grid, 0, 1, 0, false),
+            vec![moving_layer, lower_layer, equal_layer],
+        );
 
         assert_eq!(
             layers.plan_layer_adjustment(1, CompositorLayerAdjustment::Raise),
@@ -3777,13 +3766,10 @@ mod tests {
         current_layer.z_index = 10;
         let mut upper_layer = compositor_layer(&upper_grid, 0, 1, 2, false);
         upper_layer.z_index = 20;
-        let layers = CompositorLayerStack {
-            layers: vec![
-                compositor_layer(&default_grid, 0, 1, 0, false),
-                current_layer,
-                upper_layer,
-            ],
-        };
+        let layers = compositor_layers(
+            compositor_layer(&default_grid, 0, 1, 0, false),
+            vec![current_layer, upper_layer],
+        );
 
         assert_eq!(layers.plan_layer_insertion(10, Some(1), true), Ok(2));
         assert_eq!(layers.plan_layer_insertion(10, Some(1), false), Ok(1));
@@ -3805,13 +3791,10 @@ mod tests {
         selected_layer.z_index = 20;
         let mut upper_layer = compositor_layer(&upper_grid, 0, 2, 2, false);
         upper_layer.z_index = 10;
-        let layers = CompositorLayerStack {
-            layers: vec![
-                compositor_layer(&default_grid, 0, 12, 0, false),
-                selected_layer,
-                upper_layer,
-            ],
-        };
+        let layers = compositor_layers(
+            compositor_layer(&default_grid, 0, 12, 0, false),
+            vec![selected_layer, upper_layer],
+        );
 
         assert_eq!(
             layers.plan_cursor(CompositorCursorRequest {
@@ -3924,9 +3907,7 @@ mod tests {
     #[test]
     fn layer_insertion_never_displaces_default_layer() {
         let default_grid = grid_with_size(1, 1);
-        let layers = CompositorLayerStack {
-            layers: vec![compositor_layer(&default_grid, 0, 1, 0, false)],
-        };
+        let layers = compositor_layers(compositor_layer(&default_grid, 0, 1, 0, false), Vec::new());
 
         assert_eq!(layers.plan_layer_insertion(0, Some(0), false), Ok(1));
     }
@@ -4107,14 +4088,10 @@ mod tests {
         higher_layer.z_index = 20;
         let mut moving_layer = compositor_layer(&moving_grid, 0, 1, 3, false);
         moving_layer.z_index = 10;
-        let layers = CompositorLayerStack {
-            layers: vec![
-                compositor_layer(&default_grid, 0, 1, 0, false),
-                equal_layer,
-                higher_layer,
-                moving_layer,
-            ],
-        };
+        let layers = compositor_layers(
+            compositor_layer(&default_grid, 0, 1, 0, false),
+            vec![equal_layer, higher_layer, moving_layer],
+        );
 
         assert_eq!(
             layers.plan_layer_adjustment(3, CompositorLayerAdjustment::Lower),
@@ -4137,14 +4114,10 @@ mod tests {
         first_crossed_layer.origin.row = 2;
         let mut second_crossed_layer = compositor_layer(&second_crossed_grid, 3, 2, 3, false);
         second_crossed_layer.origin.row = 0;
-        let layers = CompositorLayerStack {
-            layers: vec![
-                compositor_layer(&default_grid, 0, 8, 0, false),
-                moving_layer,
-                first_crossed_layer,
-                second_crossed_layer,
-            ],
-        };
+        let layers = compositor_layers(
+            compositor_layer(&default_grid, 0, 8, 0, false),
+            vec![moving_layer, first_crossed_layer, second_crossed_layer],
+        );
 
         assert_eq!(
             layers.plan_layer_raise(1, 3),
@@ -4172,13 +4145,13 @@ mod tests {
         let default_grid = grid_with_size(1, 1);
         let first_grid = grid_with_size(1, 1);
         let second_grid = grid_with_size(1, 1);
-        let layers = CompositorLayerStack {
-            layers: vec![
-                compositor_layer(&default_grid, 0, 1, 0, false),
+        let layers = compositor_layers(
+            compositor_layer(&default_grid, 0, 1, 0, false),
+            vec![
                 compositor_layer(&first_grid, 0, 1, 1, false),
                 compositor_layer(&second_grid, 0, 1, 2, false),
             ],
-        };
+        );
 
         assert_eq!(
             layers.plan_layer_raise(0, 1),
@@ -4388,13 +4361,10 @@ mod tests {
         lower_layer.origin.row = 1;
         let mut upper_layer = compositor_layer(&upper_grid, 1, 1, 2, false);
         upper_layer.origin.row = 1;
-        let layers = CompositorLayerStack {
-            layers: vec![
-                compositor_layer(&default_grid, 0, 4, 0, false),
-                lower_layer,
-                upper_layer,
-            ],
-        };
+        let layers = compositor_layers(
+            compositor_layer(&default_grid, 0, 4, 0, false),
+            vec![lower_layer, upper_layer],
+        );
 
         assert_eq!(
             layers.topmost_grid_at(ComposedPosition::new(2, 2), LayerHitTest::Any,),
@@ -4441,9 +4411,7 @@ mod tests {
     #[test]
     fn hit_testing_excludes_the_default_layer() {
         let default_grid = grid_with_size(3, 3);
-        let layers = CompositorLayerStack {
-            layers: vec![compositor_layer(&default_grid, 0, 3, 0, false)],
-        };
+        let layers = compositor_layers(compositor_layer(&default_grid, 0, 3, 0, false), Vec::new());
 
         assert!(
             layers
@@ -4484,13 +4452,10 @@ mod tests {
         upper_grid.set_accepts_mouse_input(false);
         let lower_layer = compositor_layer(&lower_grid, 1, 2, 1, false);
         let upper_layer = compositor_layer(&upper_grid, 1, 2, 2, false);
-        let layers = CompositorLayerStack {
-            layers: vec![
-                compositor_layer(&default_grid, 0, 3, 0, false),
-                lower_layer,
-                upper_layer,
-            ],
-        };
+        let layers = compositor_layers(
+            compositor_layer(&default_grid, 0, 3, 0, false),
+            vec![lower_layer, upper_layer],
+        );
         let point = ComposedPosition::new(0, 1);
 
         assert_eq!(
@@ -4509,12 +4474,10 @@ mod tests {
         let overlay_grid = grid_with_size(1, 1);
         let mut overlay_layer = compositor_layer(&overlay_grid, 2, 1, 1, false);
         overlay_layer.origin.row = 2;
-        let layers = CompositorLayerStack {
-            layers: vec![
-                compositor_layer(&default_grid, 0, 3, 0, false),
-                overlay_layer,
-            ],
-        };
+        let layers = compositor_layers(
+            compositor_layer(&default_grid, 0, 3, 0, false),
+            vec![overlay_layer],
+        );
 
         assert!(
             layers
@@ -4528,12 +4491,10 @@ mod tests {
         let default_grid = grid_with_size(3, 3);
         let current_grid = grid_with_size(3, 3);
         let upper_grid = grid_with_size(2, 2);
-        let layers = CompositorLayerStack {
-            layers: vec![
-                compositor_layer(&default_grid, 0, 3, 0, false),
-                compositor_layer(&upper_grid, 1, 2, 1, false),
-            ],
-        };
+        let layers = compositor_layers(
+            compositor_layer(&default_grid, 0, 3, 0, false),
+            vec![compositor_layer(&upper_grid, 1, 2, 1, false)],
+        );
         let covered_point = ComposedPosition::new(0, 1);
 
         let current_cursor_grid = CompositorCursorGrid::from(&current_grid);
@@ -4739,9 +4700,10 @@ mod tests {
             height: 2,
             width: 3,
         };
-        let layers = CompositorLayerStack {
-            layers: vec![compositor_layer(&default_grid, 0, 1, 0, false), overlay],
-        };
+        let layers = compositor_layers(
+            compositor_layer(&default_grid, 0, 1, 0, false),
+            vec![overlay],
+        );
         let rectangle = CompositorRect::try_new(3, 3, 6, 6).unwrap();
 
         assert_eq!(
@@ -4774,9 +4736,10 @@ mod tests {
             height: 1,
             width: 2,
         };
-        let layers = CompositorLayerStack {
-            layers: vec![compositor_layer(&default_grid, 0, 1, 0, false), message],
-        };
+        let layers = compositor_layers(
+            compositor_layer(&default_grid, 0, 1, 0, false),
+            vec![message],
+        );
         let rectangle = CompositorRect::try_new(1, 1, 1, 1).unwrap();
         let query = CompositorCoveredAboveQuery {
             rectangle,
@@ -4801,12 +4764,10 @@ mod tests {
         let current_grid = grid_with_size(2, 5);
         let mut current_layer = compositor_layer(&current_grid, 3, 5, 1, false);
         current_layer.origin.row = 1;
-        let layers = CompositorLayerStack {
-            layers: vec![
-                compositor_layer(&default_grid, 0, 10, 0, false),
-                current_layer,
-            ],
-        };
+        let layers = compositor_layers(
+            compositor_layer(&default_grid, 0, 10, 0, false),
+            vec![current_layer],
+        );
 
         let plan = layers
             .plan_raw_line(
@@ -4847,9 +4808,10 @@ mod tests {
         let overlay_grid = grid_with_size(1, 1);
         let mut overlay = compositor_layer(&overlay_grid, 6, 1, 1, false);
         overlay.origin.row = 1;
-        let layers = CompositorLayerStack {
-            layers: vec![compositor_layer(&default_grid, 0, 8, 0, false), overlay],
-        };
+        let layers = compositor_layers(
+            compositor_layer(&default_grid, 0, 8, 0, false),
+            vec![overlay],
+        );
 
         let plan = layers
             .plan_raw_line(
@@ -4881,9 +4843,7 @@ mod tests {
     #[test]
     fn discards_raw_lines_outside_the_default_grid() {
         let default_grid = grid_with_size(5, 8);
-        let layers = CompositorLayerStack {
-            layers: vec![compositor_layer(&default_grid, 0, 8, 0, false)],
-        };
+        let layers = compositor_layers(compositor_layer(&default_grid, 0, 8, 0, false), Vec::new());
 
         let row_plan = layers
             .plan_raw_line(
@@ -4923,9 +4883,7 @@ mod tests {
         let grid = grid_with_row(&[schar_from_ascii('a')], &[1]);
         let mut layer = compositor_layer(&grid, 4, 1, 0, false);
         layer.origin.row = 3;
-        let layers = CompositorLayerStack {
-            layers: vec![layer],
-        };
+        let layers = compositor_layers(layer, Vec::new());
 
         let plan = layers
             .plan_scroll(
@@ -4966,9 +4924,7 @@ mod tests {
             height: 1,
             width: 1,
         };
-        let layers = CompositorLayerStack {
-            layers: vec![default_layer, overlay],
-        };
+        let layers = compositor_layers(default_layer, vec![overlay]);
 
         let plan = layers
             .plan_scroll(
@@ -4999,9 +4955,7 @@ mod tests {
         let mut layer = compositor_layer(&default_grid, 4, 1, 0, false);
         layer.origin.row = 3;
         layer.blending = true;
-        let layers = CompositorLayerStack {
-            layers: vec![layer],
-        };
+        let layers = compositor_layers(layer, Vec::new());
 
         let plan = layers
             .plan_scroll(
@@ -5230,13 +5184,13 @@ mod tests {
             &[7, 8, 9],
         );
         let disabled = grid_with_row(&[schar_from_ascii('Q')], &[10]);
-        let layers = CompositorLayerStack {
-            layers: vec![
-                compositor_layer(&default_grid, 0, 6, 0, false),
+        let layers = compositor_layers(
+            compositor_layer(&default_grid, 0, 6, 0, false),
+            vec![
                 compositor_layer(&overlay, 2, 2, 1, false),
                 compositor_layer(&disabled, 0, 1, 2, true),
             ],
-        };
+        );
         let mut compositor = CompositorBuffer::new();
 
         compositor.resize(6);
@@ -5282,9 +5236,7 @@ mod tests {
             &[1, 2, 3],
         );
         let message_grid = grid_with_row(&[schar_from_ascii('m'), schar_from_ascii('m')], &[4, 4]);
-        let layers = CompositorLayerStack {
-            layers: vec![compositor_layer(&default_grid, 0, 3, 0, false)],
-        };
+        let layers = compositor_layers(compositor_layer(&default_grid, 0, 3, 0, false), Vec::new());
         let mut compositor = CompositorBuffer::new();
 
         compositor.resize(3);
