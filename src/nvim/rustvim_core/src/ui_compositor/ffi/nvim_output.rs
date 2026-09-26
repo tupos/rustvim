@@ -2,10 +2,9 @@ use std::ffi::CString;
 
 use crate::{
     defines::Integer,
-    grid::{VimSAttrT, VimSCharT},
+    grid::{ComposedGridSpace, VimSAttrT, VimSCharT},
+    ui::output::{UiCommand, UiOutput},
 };
-
-use super::super::output::{CompositorOutput, UiCommand};
 
 unsafe extern "C" {
     fn log_debug_message(message: *const libc::c_char);
@@ -38,8 +37,8 @@ unsafe extern "C" {
 /// Emits safe compositor commands through Neovim's C UI interface.
 pub(in crate::ui_compositor) struct NvimOutput;
 
-impl CompositorOutput for NvimOutput {
-    fn emit(&mut self, command: UiCommand<'_>) {
+impl UiOutput<ComposedGridSpace> for NvimOutput {
+    fn emit(&mut self, command: UiCommand<'_, ComposedGridSpace>) {
         match command {
             UiCommand::GridResize(size) => {
                 // SAFETY: The validated dimensions are converted at the C

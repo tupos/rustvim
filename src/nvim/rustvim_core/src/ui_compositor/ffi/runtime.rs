@@ -2,14 +2,18 @@
 
 use std::sync::{Mutex, MutexGuard};
 
-use crate::{defines::OptInt, globals, grid::VimSAttrT};
+use crate::{
+    defines::OptInt,
+    globals,
+    grid::{ComposedGridSpace, VimSAttrT},
+    ui::output::{UiCommand, UiOutput},
+};
 
 use super::super::{
     CompositorDebugHighlights, CompositorRecomposeArea, CompositorRuntime,
     emit_compositor_debug_line, lock_compositor,
 };
 use super::grid_store::LegacyGridStore;
-use crate::ui_compositor::output::{CompositorOutput, UiCommand};
 
 unsafe extern "C" {
     static mut p_wd: OptInt;
@@ -79,7 +83,7 @@ impl CompositorRuntime {
         requested_area: &CompositorRecomposeArea,
         highlight_id: i32,
         delay: bool,
-        output: &mut impl CompositorOutput,
+        output: &mut impl UiOutput<ComposedGridSpace>,
     ) {
         if !self.debug_enabled || requested_area.columns.start >= requested_area.columns.end {
             return;
@@ -110,7 +114,11 @@ impl CompositorRuntime {
     }
 
     /// Flushes composed output and applies the configured per-operation delay.
-    pub(in crate::ui_compositor) fn delay(self, lines: i32, output: &mut impl CompositorOutput) {
+    pub(in crate::ui_compositor) fn delay(
+        self,
+        lines: i32,
+        output: &mut impl UiOutput<ComposedGridSpace>,
+    ) {
         let factor = lines.clamp(1, 5) as u64;
         output.emit(UiCommand::Flush);
         output.emit(UiCommand::Delay(factor.wrapping_mul(self.write_delay_ms)));

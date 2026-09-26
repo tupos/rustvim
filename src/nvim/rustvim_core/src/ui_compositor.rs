@@ -1,5 +1,4 @@
 mod ffi;
-mod output;
 
 use std::{
     ops::Range,
@@ -9,23 +8,24 @@ use std::{
 #[cfg(test)]
 use std::ptr::NonNull;
 
+use crate::{
+    generated::enums::RdbFlags,
+    grid::{
+        ComposedGridSpace, ComposedPosition, ComposedRegion, GridDelta, GridId, GridPosition,
+        GridRegion, GridRow, GridRowSegment, GridSize, Highlight, ScreenGrid, VimSAttrT, VimSCharT,
+        schar_from_ascii, schar_from_char,
+    },
+    ui::{
+        LineFlags,
+        output::{RawLineCommand, UiCommand, UiOutput},
+    },
+};
 #[cfg(test)]
 use ffi::{
     adjust_registered_layer_order, apply_cursor_update_to_registered_grids,
     cursor_is_covered_by_registered_layers,
     grid_store::{LegacyGridStore, lock_compositor_grid_bindings},
     place_grid_in_registered_layers, remove_registered_layer, ui_comp_find_grid_at_coord,
-};
-use output::{CompositorOutput, RawLineCommand, UiCommand};
-
-use crate::{
-    generated::enums::RdbFlags,
-    grid::{
-        ComposedPosition, ComposedRegion, GridDelta, GridId, GridPosition, GridRegion, GridRow,
-        GridRowSegment, GridSize, Highlight, ScreenGrid, VimSAttrT, VimSCharT, schar_from_ascii,
-        schar_from_char,
-    },
-    ui::LineFlags,
 };
 
 #[cfg(test)]
@@ -2493,7 +2493,7 @@ impl CompositorRuntime {
 fn log_raw_line_diagnostic(
     diagnostic: RawLineDiagnostic,
     grid_id: GridId,
-    output: &mut impl CompositorOutput,
+    output: &mut impl UiOutput<ComposedGridSpace>,
 ) {
     let message = match diagnostic {
         RawLineDiagnostic::InvalidRow(row) => {
@@ -3035,7 +3035,7 @@ fn emit_compositor_debug_line(
     row: i32,
     columns: Range<i32>,
     attribute: VimSAttrT,
-    output: &mut impl CompositorOutput,
+    output: &mut impl UiOutput<ComposedGridSpace>,
 ) -> CompositorResult<()> {
     let start_column =
         usize::try_from(columns.start).map_err(|_| CompositorError::InvalidGeometry)?;

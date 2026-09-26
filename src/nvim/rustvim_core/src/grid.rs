@@ -26,7 +26,8 @@ use std::{
 
 use cell::GridCell;
 pub(crate) use coordinates::{
-    ComposedPosition, ComposedRegion, GridDelta, GridPosition, GridRegion, GridSize,
+    ComposedGridSpace, ComposedPosition, ComposedRegion, GridDelta, GridPosition, GridRegion,
+    GridSize, Position, Region,
 };
 use fold_column::{FoldColumn, FoldColumnInfo, FoldColumnSymbols};
 pub use line_buffer::LineBuffer;

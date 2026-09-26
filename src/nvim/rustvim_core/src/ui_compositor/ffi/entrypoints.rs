@@ -117,7 +117,7 @@ unsafe fn update_message_position(
     default_grid: *mut CScreenGrid,
     request: CompositorMessagePositionRequest,
     runtime: CompositorRuntime,
-    output: &mut impl CompositorOutput,
+    output: &mut impl UiOutput<ComposedGridSpace>,
 ) -> CompositorResult<()> {
     if message_grid.is_null() || default_grid.is_null() || message_grid == default_grid {
         return Err(CompositorError::InvalidLayerState);
@@ -372,7 +372,7 @@ pub(in crate::ui_compositor) fn apply_cursor_update_to_registered_grids(
 unsafe fn process_grid_cursor_goto(
     message_grid: *mut CScreenGrid,
     request: CompositorCursorRequest,
-    output: &mut impl CompositorOutput,
+    output: &mut impl UiOutput<ComposedGridSpace>,
 ) -> CompositorResult<()> {
     let update = apply_cursor_update_to_registered_grids(request)?;
     let CompositorCursorUpdate::Apply {
@@ -662,7 +662,7 @@ pub unsafe extern "C" fn ui_comp_cursor_is_covered_by_higher_layer(
 unsafe fn compose_line_from_registered_grids(
     message_grid: *mut CScreenGrid,
     request: CompositorLineInput,
-    output: &mut impl CompositorOutput,
+    output: &mut impl UiOutput<ComposedGridSpace>,
 ) -> CompositorResult<()> {
     let separator_active = lock_compositor()
         .message_separator_character_at(request.row)
@@ -741,7 +741,7 @@ unsafe fn compose_line_from_registered_grids(
 unsafe fn compose_area_from_registered_grids(
     message_grid: *mut CScreenGrid,
     request: CompositorAreaRequest,
-    output: &mut impl CompositorOutput,
+    output: &mut impl UiOutput<ComposedGridSpace>,
 ) -> CompositorResult<()> {
     let plan = {
         let grid_store =
@@ -770,7 +770,7 @@ unsafe fn recompose_area_from_registered_grids(
     message_grid: *mut CScreenGrid,
     area: CompositorRecomposeArea,
     runtime: CompositorRuntime,
-    output: &mut impl CompositorOutput,
+    output: &mut impl UiOutput<ComposedGridSpace>,
 ) -> CompositorResult<()> {
     runtime.visualize(&area, runtime.debug_highlights.recomposed, true, output);
 
@@ -806,7 +806,7 @@ unsafe fn process_raw_line(
     clear_attribute: VimSAttrT,
     characters: *const VimSCharT,
     attributes: *const VimSAttrT,
-    output: &mut impl CompositorOutput,
+    output: &mut impl UiOutput<ComposedGridSpace>,
 ) -> CompositorResult<()> {
     let operation = {
         let grid_store =
@@ -989,7 +989,7 @@ unsafe fn process_scroll(
     message_grid: *mut CScreenGrid,
     grid_id: GridId,
     request: CompositorScrollRequest,
-    output: &mut impl CompositorOutput,
+    output: &mut impl UiOutput<ComposedGridSpace>,
 ) -> CompositorResult<()> {
     let operation = {
         let grid_store =

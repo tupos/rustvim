@@ -1,3 +1,5 @@
+pub(crate) mod output;
+
 use crate::{
     defines::{Integer, OptInt},
     generated::enums::RdbFlags,
