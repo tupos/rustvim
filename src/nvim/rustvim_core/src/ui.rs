@@ -1,10 +1,17 @@
 pub(crate) mod output;
 
+use std::ffi::CString;
+
 use crate::{
     defines::{Integer, OptInt},
     generated::enums::RdbFlags,
-    grid::{CScreenGrid, ScreenGrid, ScreenGridGuard, VimHandleT, VimSAttrT, VimSCharT},
+    grid::{
+        CScreenGrid, GridId, LocalGridSpace, ScreenGrid, ScreenGridGuard, VimHandleT, VimSAttrT,
+        VimSCharT,
+    },
 };
+
+use output::{RawLineCommand, UiCommand, UiOutput};
 
 // TODO: move to highlight
 pub type RgbValue = i32;
@@ -30,6 +37,7 @@ unsafe extern "C" {
         cterm_fg: Integer,
         cterm_bg: Integer,
     );
+    fn ui_call_grid_resize(grid: Integer, width: Integer, height: Integer);
     fn ui_call_raw_line(
         grid: Integer,
         row: Integer,
@@ -44,6 +52,7 @@ unsafe extern "C" {
     fn ui_call_grid_cursor_goto(grid: Integer, row: Integer, col: Integer);
     fn ui_call_flush();
     pub fn ui_grid_cursor_goto(grid_handle: VimHandleT, new_row: libc::c_int, new_col: libc::c_int);
+    fn log_debug_message(message: *const libc::c_char);
     fn os_sleep(ms: u64);
     pub fn ui_call_grid_scroll(
         grid: Integer,
@@ -54,6 +63,125 @@ unsafe extern "C" {
         rows: Integer,
         cols: Integer,
     );
+}
+
+/// Identifies a normal grid and the width needed by redraw diagnostics.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct GridOutputTarget {
+    grid: GridId,
+    width: i32,
+}
+
+impl GridOutputTarget {
+    /// Creates an output target for a grid with a nonnegative width.
+    pub(crate) fn new(grid: GridId, width: i32) -> Self {
+        assert!(width >= 0, "grid output width must be nonnegative");
+        Self { grid, width }
+    }
+
+    /// Emits a command after the operation's grid borrow has ended.
+    pub(crate) fn emit(self, command: UiCommand<'_, LocalGridSpace>) {
+        NvimGridOutput { target: self }.emit(command);
+    }
+}
+
+/// Emits normal-grid commands through Neovim's C UI interface.
+struct NvimGridOutput {
+    target: GridOutputTarget,
+}
+
+impl UiOutput<LocalGridSpace> for NvimGridOutput {
+    fn emit(&mut self, command: UiCommand<'_, LocalGridSpace>) {
+        let grid = Integer::from(self.target.grid.as_native_handle());
+        match command {
+            UiCommand::GridResize(size) => {
+                // SAFETY: The dimensions and grid identity were validated in
+                // safe Rust and are converted at the final C boundary.
+                unsafe {
+                    ui_call_grid_resize(
+                        grid,
+                        Integer::from(size.width),
+                        Integer::from(size.height),
+                    );
+                }
+            }
+            UiCommand::GridCursorGoto(position) => {
+                // SAFETY: The grid identity and coordinates are converted at
+                // the final C boundary.
+                unsafe {
+                    ui_grid_cursor_goto(
+                        self.target.grid.as_native_handle(),
+                        position.row,
+                        position.column,
+                    );
+                }
+            }
+            UiCommand::GridScroll { region, delta } => {
+                // SAFETY: The ordered region and its delta remain valid for
+                // this synchronous callback.
+                unsafe {
+                    ui_call_grid_scroll(
+                        grid,
+                        Integer::from(region.rows.start),
+                        Integer::from(region.rows.end),
+                        Integer::from(region.columns.start),
+                        Integer::from(region.columns.end),
+                        Integer::from(delta.rows),
+                        Integer::from(delta.columns),
+                    );
+                }
+            }
+            UiCommand::RawLine(line) => {
+                // SAFETY: `RawLineCommand` guarantees equally sized readable
+                // payloads matching the changed range. They remain alive for
+                // this synchronous callback.
+                unsafe {
+                    ui_may_set_default_colors();
+                    ui_call_raw_line(
+                        grid,
+                        Integer::from(line.row),
+                        Integer::from(line.columns.start),
+                        Integer::from(line.columns.end),
+                        Integer::from(line.clear_column),
+                        Integer::from(line.clear_attribute),
+                        line.flags.raw(),
+                        line.characters.as_ptr(),
+                        line.attributes.as_ptr(),
+                    );
+
+                    if p_wd != 0 && (rdb_flags & RdbFlags::Line as u32) != 0 {
+                        ui_call_grid_cursor_goto(
+                            grid,
+                            Integer::from(line.row),
+                            Integer::from(std::cmp::min(line.clear_column, self.target.width - 1)),
+                        );
+                        ui_call_flush();
+                        os_sleep(p_wd.unsigned_abs());
+                        pending_cursor_update = true;
+                    }
+                }
+            }
+            UiCommand::Log(message) => {
+                let message = CString::new(message).expect("UI diagnostic contains no NUL");
+                // SAFETY: `CString` remains alive for this synchronous call.
+                unsafe {
+                    log_debug_message(message.as_ptr());
+                }
+            }
+            UiCommand::Flush => {
+                // SAFETY: UI output is flushed on Neovim's main thread.
+                unsafe {
+                    ui_call_flush();
+                }
+            }
+            UiCommand::Delay(milliseconds) => {
+                // SAFETY: Sleeping is performed on Neovim's main thread.
+                unsafe {
+                    os_sleep(milliseconds);
+                }
+            }
+        }
+    }
 }
 
 /// Flags controlling one raw-line UI update.
@@ -171,35 +299,18 @@ pub fn ui_line_r(
         flags.insert(LineFlags::INVALID);
     }
 
-    unsafe {
-        // set default colors now so that that text won't have to be repainted later
-        ui_may_set_default_colors();
-
-        let offset = grid.line_offset[row as usize] + start_col as usize;
-        ui_call_raw_line(
-            grid.handle as i64,
-            row as i64,
-            start_col as i64,
-            end_col as i64,
-            clear_col as i64,
-            clear_attr as i64,
-            flags.raw(),
-            grid.chars.as_ptr().add(offset),
-            grid.attrs.as_ptr().add(offset),
-        );
-
-        if p_wd != 0 && (rdb_flags & RdbFlags::Line as u32) != 0 {
-            // If 'writedelay' is active, set the cursor to indicate what was drawn.
-            ui_call_grid_cursor_goto(
-                grid.handle as Integer,
-                row as Integer,
-                std::cmp::min(clear_col, grid.cols - 1) as Integer,
-            );
-            ui_call_flush();
-            let wd = p_wd.unsigned_abs();
-            os_sleep(wd);
-            // restore the cursor later
-            pending_cursor_update = true;
-        }
-    }
+    let offset = grid.line_offset[row as usize] + start_col as usize;
+    let payload_len = usize::try_from(end_col - start_col).expect("ordered line columns");
+    let payload_end = offset + payload_len;
+    let command = RawLineCommand::try_new(
+        row,
+        start_col..end_col,
+        clear_col,
+        clear_attr,
+        flags,
+        &grid.chars[offset..payload_end],
+        &grid.attrs[offset..payload_end],
+    )
+    .expect("valid grid line output");
+    GridOutputTarget::new(grid.id(), grid.cols).emit(UiCommand::RawLine(command));
 }

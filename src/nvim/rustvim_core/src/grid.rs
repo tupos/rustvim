@@ -11,7 +11,8 @@ mod virtual_text;
 use crate::{
     defines::OptInt,
     generated::enums::{RdbFlags, Slf},
-    globals, mbyte, ui,
+    globals, mbyte,
+    ui::{self, GridOutputTarget, output::UiCommand},
 };
 use std::{
     borrow::Cow,
@@ -27,7 +28,7 @@ use std::{
 use cell::GridCell;
 pub(crate) use coordinates::{
     ComposedGridSpace, ComposedPosition, ComposedRegion, GridDelta, GridPosition, GridRegion,
-    GridSize, Position, Region,
+    GridSize, LocalGridSpace, Position, Region,
 };
 use fold_column::{FoldColumn, FoldColumnInfo, FoldColumnSymbols};
 pub use line_buffer::LineBuffer;
@@ -54,6 +55,11 @@ impl GridId {
     /// Creates an identity from a validated native grid handle.
     pub(crate) const fn new(handle: i32) -> Self {
         Self(handle)
+    }
+
+    /// Returns the native handle at the final UI boundary.
+    pub(crate) const fn as_native_handle(self) -> VimHandleT {
+        self.0
     }
 }
 
@@ -932,9 +938,35 @@ impl ScreenGrid {
     /// 'col' is the column from with we start inserting.
     ///
     /// 'row', 'col' and 'end' are relative to the start of the region.
-    fn ins_lines(&mut self, row: i32, line_count: i32, end: i32, col: i32, width: i32) {
+    fn scroll_command(
+        &self,
+        row: i32,
+        end: i32,
+        col: i32,
+        width: i32,
+        row_delta: i32,
+    ) -> Option<UiCommand<'static, LocalGridSpace>> {
+        if self.throttled {
+            return None;
+        }
+        let right = col.checked_add(width)?;
+        let region = GridRegion::try_new(row..end, col..right)?;
+        Some(UiCommand::GridScroll {
+            region,
+            delta: GridDelta::new(row_delta, 0),
+        })
+    }
+
+    fn ins_lines(
+        &mut self,
+        row: i32,
+        line_count: i32,
+        end: i32,
+        col: i32,
+        width: i32,
+    ) -> Option<UiCommand<'static, LocalGridSpace>> {
         if line_count <= 0 {
-            return;
+            return None;
         }
 
         let mut j;
@@ -975,28 +1007,23 @@ impl ScreenGrid {
                 self.clear_line(temp, self.cols as usize, false);
             }
         }
-        if !self.throttled {
-            unsafe {
-                ui::ui_call_grid_scroll(
-                    self.handle as i64,
-                    row as i64,
-                    end as i64,
-                    col as i64,
-                    (col + width) as i64,
-                    -line_count as i64,
-                    0,
-                );
-            }
-        }
+        self.scroll_command(row, end, col, width, -line_count)
     }
 
     /// delete lines on the screen and move lines up.
     /// 'end' is the line after the scrolled part. Normally it is Rows.
     /// When scrolling region used 'off' is the offset from the top for the region.
     /// 'row' and 'end' are relative to the start of the region.
-    fn del_lines(&mut self, row: i32, line_count: i32, end: i32, col: i32, width: i32) {
+    fn del_lines(
+        &mut self,
+        row: i32,
+        line_count: i32,
+        end: i32,
+        col: i32,
+        width: i32,
+    ) -> Option<UiCommand<'static, LocalGridSpace>> {
         if line_count <= 0 {
-            return;
+            return None;
         }
 
         let mut j;
@@ -1039,19 +1066,7 @@ impl ScreenGrid {
                 self.clear_line(temp, self.cols as usize, false);
             }
         }
-        if !self.throttled {
-            unsafe {
-                ui::ui_call_grid_scroll(
-                    self.handle as i64,
-                    row as i64,
-                    end as i64,
-                    col as i64,
-                    (col + width) as i64,
-                    line_count as i64,
-                    0,
-                );
-            }
-        }
+        self.scroll_command(row, end, col, width, line_count)
     }
 } // impl
 
@@ -1698,13 +1713,14 @@ impl CLineGrid {
             .set_clear_range(start_col, end_col, bg_attr, clear_attr);
     }
 
-    /// Moves the cursor within the currently rendered line.
-    fn move_cursor(&self, col: i32) {
+    /// Plans a cursor move within the currently rendered line.
+    fn cursor_update(&self, col: i32) -> (GridOutputTarget, UiCommand<'static, LocalGridSpace>) {
         let target = self.target();
-        // SAFETY: The active target remains valid until the matching flush.
-        unsafe {
-            ui::ui_grid_cursor_goto(target.as_ref().handle, self.state.row, col);
-        }
+        // SAFETY: An active operation uniquely owns the target grid buffers.
+        let grid = unsafe { ScreenGridGuard::take(target.as_ptr()) };
+        let output_target = GridOutputTarget::new(grid.id(), grid.cols);
+        let command = UiCommand::GridCursorGoto(GridPosition::new(self.state.row, col));
+        (output_target, command)
     }
 
     /// Mirrors pending cells for right-to-left rendering.
@@ -1913,9 +1929,8 @@ pub extern "C" fn grid_line_clear_end(
 /// move the cursor to a position in a currently rendered line.
 #[unsafe(no_mangle)]
 pub extern "C" fn grid_line_cursor_goto(col: libc::c_int) {
-    with_line_grid(|line_grid| {
-        line_grid.move_cursor(col);
-    });
+    let (target, command) = with_line_grid(|line_grid| line_grid.cursor_update(col));
+    target.emit(command);
 }
 
 #[unsafe(no_mangle)]
@@ -4240,10 +4255,17 @@ pub unsafe extern "C" fn grid_ins_lines(
     col: libc::c_int,
     width: libc::c_int,
 ) {
-    // SAFETY: The caller transfers exclusive ownership of the grid buffers to
-    // the guard.
-    let mut grid = unsafe { ScreenGridGuard::take(grid) };
-    grid.ins_lines(row, line_count, end, col, width);
+    let (target, command) = {
+        // SAFETY: The caller transfers exclusive ownership of the grid buffers
+        // to the guard.
+        let mut grid = unsafe { ScreenGridGuard::take(grid) };
+        let target = GridOutputTarget::new(grid.id(), grid.cols);
+        let command = grid.ins_lines(row, line_count, end, col, width);
+        (target, command)
+    };
+    if let Some(command) = command {
+        target.emit(command);
+    }
 }
 
 /// # Safety
@@ -4259,10 +4281,17 @@ pub unsafe extern "C" fn grid_del_lines(
     col: libc::c_int,
     width: libc::c_int,
 ) {
-    // SAFETY: The caller transfers exclusive ownership of the grid buffers to
-    // the guard.
-    let mut grid = unsafe { ScreenGridGuard::take(grid) };
-    grid.del_lines(row, line_count, end, col, width);
+    let (target, command) = {
+        // SAFETY: The caller transfers exclusive ownership of the grid buffers
+        // to the guard.
+        let mut grid = unsafe { ScreenGridGuard::take(grid) };
+        let target = GridOutputTarget::new(grid.id(), grid.cols);
+        let command = grid.del_lines(row, line_count, end, col, width);
+        (target, command)
+    };
+    if let Some(command) = command {
+        target.emit(command);
+    }
 }
 
 #[cfg(test)]
@@ -4326,6 +4355,44 @@ mod tests {
 
         assert_eq!(first, DEFAULT_GRID_HANDLE + 1);
         assert_eq!(second, DEFAULT_GRID_HANDLE + 2);
+    }
+
+    #[test]
+    fn inserting_lines_returns_upward_scroll_command() {
+        let mut line_buffer = LineBuffer::new(3);
+        let mut grid = ScreenGrid::new(2, 3, true, &mut line_buffer);
+
+        let command = grid.ins_lines(0, 1, 2, 0, 3).unwrap();
+        let UiCommand::GridScroll { region, delta } = command else {
+            panic!("line insertion must return a scroll command");
+        };
+
+        assert_eq!(region, GridRegion::try_new(0..2, 0..3).unwrap());
+        assert_eq!(delta, GridDelta::new(-1, 0));
+    }
+
+    #[test]
+    fn deleting_lines_returns_downward_scroll_command() {
+        let mut line_buffer = LineBuffer::new(3);
+        let mut grid = ScreenGrid::new(2, 3, true, &mut line_buffer);
+
+        let command = grid.del_lines(0, 1, 2, 0, 3).unwrap();
+        let UiCommand::GridScroll { region, delta } = command else {
+            panic!("line deletion must return a scroll command");
+        };
+
+        assert_eq!(region, GridRegion::try_new(0..2, 0..3).unwrap());
+        assert_eq!(delta, GridDelta::new(1, 0));
+    }
+
+    #[test]
+    fn throttled_line_changes_do_not_return_scroll_commands() {
+        let mut line_buffer = LineBuffer::new(3);
+        let mut grid = ScreenGrid::new(2, 3, true, &mut line_buffer);
+        grid.throttled = true;
+
+        assert!(grid.ins_lines(0, 1, 2, 0, 3).is_none());
+        assert!(grid.del_lines(0, 1, 2, 0, 3).is_none());
     }
 
     #[test]
