@@ -356,18 +356,20 @@ pub unsafe extern "C" fn ui_comp_put_grid(
 /// Applies one cursor update and publishes any resulting layer movement.
 pub(in crate::ui_compositor) fn apply_cursor_update_to_registered_grids(
     request: CompositorCursorRequest,
-) -> Option<CompositorCursorUpdate> {
-    let mut grid_store = LegacyGridStore::try_take_registered()?;
+) -> CompositorResult<CompositorCursorUpdate> {
+    let mut grid_store =
+        LegacyGridStore::try_take_registered().ok_or(CompositorError::InvalidLayerState)?;
     let previous_registry = grid_store.registry.clone();
     let mut registry = previous_registry.clone();
     let update = lock_compositor().move_cursor(&mut registry, &mut grid_store, request)?;
 
     if registry != previous_registry {
-        replace_compositor_layer_registry(&previous_registry, registry.clone())?;
+        replace_compositor_layer_registry(&previous_registry, registry.clone())
+            .ok_or(CompositorError::InvalidLayerState)?;
         grid_store.registry = registry;
     }
 
-    Some(update)
+    Ok(update)
 }
 
 /// Applies one cursor update to the compositor layer stack.
@@ -385,7 +387,7 @@ unsafe fn process_grid_cursor_goto(
     request: CompositorCursorRequest,
     output: &mut impl CompositorOutput,
 ) -> bool {
-    let Some(update) = apply_cursor_update_to_registered_grids(request) else {
+    let Ok(update) = apply_cursor_update_to_registered_grids(request) else {
         return false;
     };
     let CompositorCursorUpdate::Apply {
@@ -849,7 +851,7 @@ unsafe fn process_raw_line(
             return false;
         };
         let message_layer_index = grid_store.index_of(message_grid);
-        let Some(operation) = lock_compositor().process_raw_line(
+        let Ok(operation) = lock_compositor().process_raw_line(
             &grid_store.registry,
             &grid_store,
             grid_id,
@@ -1036,7 +1038,7 @@ unsafe fn process_scroll(
             return false;
         };
         let message_layer_index = grid_store.index_of(message_grid);
-        let Some(operation) = lock_compositor().scroll(
+        let Ok(operation) = lock_compositor().scroll(
             &grid_store.registry,
             &grid_store,
             grid_id,

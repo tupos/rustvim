@@ -924,27 +924,37 @@ impl Compositor {
         registry: &mut CompositorLayerRegistry,
         grids: &mut impl GridAccess,
         request: CompositorCursorRequest,
-    ) -> Option<CompositorCursorUpdate> {
+    ) -> CompositorResult<CompositorCursorUpdate> {
         let action = {
-            let layers = registry.layer_stack(grids)?;
-            layers.plan_cursor(request)?
+            let layers = registry
+                .layer_stack(grids)
+                .ok_or(CompositorError::InvalidLayerState)?;
+            layers
+                .plan_cursor(request)
+                .ok_or(CompositorError::InvalidLayerState)?
         };
         let CompositorCursorAction::Update(plan) = action else {
-            return Some(CompositorCursorUpdate::Ignore);
+            return Ok(CompositorCursorUpdate::Ignore);
         };
 
         let recompose_areas = if let Some(target_index) = plan.raise_to {
             let raise_plan = {
-                let layers = registry.layer_stack(grids)?;
-                layers.plan_layer_raise(plan.layer_index, target_index)?
+                let layers = registry
+                    .layer_stack(grids)
+                    .ok_or(CompositorError::InvalidLayerState)?;
+                layers
+                    .plan_layer_raise(plan.layer_index, target_index)
+                    .ok_or(CompositorError::InvalidLayerState)?
             };
-            registry.move_layer(grids, raise_plan.movement)?;
+            registry
+                .move_layer(grids, raise_plan.movement)
+                .ok_or(CompositorError::InvalidLayerState)?;
             raise_plan.recompose_areas
         } else {
             Vec::new()
         };
 
-        Some(CompositorCursorUpdate::Apply {
+        Ok(CompositorCursorUpdate::Apply {
             plan,
             recompose_areas,
         })
@@ -958,23 +968,27 @@ impl Compositor {
         grid_id: GridId,
         message_layer_index: Option<usize>,
         request: CompositorRawLineRequest,
-    ) -> Option<CompositorRawLineOperation> {
+    ) -> CompositorResult<CompositorRawLineOperation> {
         if !self.should_draw() {
-            return Some(CompositorRawLineOperation::Ignore);
+            return Ok(CompositorRawLineOperation::Ignore);
         }
 
-        let layers = registry.layer_stack(grids)?;
+        let layers = registry
+            .layer_stack(grids)
+            .ok_or(CompositorError::InvalidLayerState)?;
         let Some(current_layer_index) = layers.layer_index_with_id(grid_id) else {
-            return Some(CompositorRawLineOperation::Ignore);
+            return Ok(CompositorRawLineOperation::Ignore);
         };
-        let plan = layers.plan_raw_line(
-            current_layer_index,
-            message_layer_index,
-            self.message.was_scrolled,
-            request,
-        )?;
+        let plan = layers
+            .plan_raw_line(
+                current_layer_index,
+                message_layer_index,
+                self.message.was_scrolled,
+                request,
+            )
+            .ok_or(CompositorError::InvalidLayerState)?;
 
-        Some(CompositorRawLineOperation::Process(plan))
+        Ok(CompositorRawLineOperation::Process(plan))
     }
 
     /// Selects and prepares the complete safe operation for one grid scroll.
@@ -985,24 +999,31 @@ impl Compositor {
         grid_id: GridId,
         message_layer_index: Option<usize>,
         request: CompositorScrollRequest,
-    ) -> Option<CompositorScrollOperation> {
+    ) -> CompositorResult<CompositorScrollOperation> {
         if !self.should_draw() {
-            return Some(CompositorScrollOperation::Ignore);
+            return Ok(CompositorScrollOperation::Ignore);
         }
 
-        let layers = registry.layer_stack(grids)?;
+        let layers = registry
+            .layer_stack(grids)
+            .ok_or(CompositorError::InvalidLayerState)?;
         let Some(current_layer_index) = layers.layer_index_with_id(grid_id) else {
-            return Some(CompositorScrollOperation::Ignore);
+            return Ok(CompositorScrollOperation::Ignore);
         };
-        let plan = layers.plan_scroll(
-            current_layer_index,
-            message_layer_index,
-            self.message.was_scrolled,
-            request,
-        )?;
-        let current_grid = layers.layer(current_layer_index)?.grid;
+        let plan = layers
+            .plan_scroll(
+                current_layer_index,
+                message_layer_index,
+                self.message.was_scrolled,
+                request,
+            )
+            .ok_or(CompositorError::InvalidLayerState)?;
+        let current_grid = layers
+            .layer(current_layer_index)
+            .ok_or(CompositorError::InvalidLayerState)?
+            .grid;
 
-        Some(plan.prepare(current_grid))
+        Ok(plan.prepare(current_grid))
     }
 
     /// Composes one complete output line from safely borrowed grids.
@@ -3589,7 +3610,7 @@ mod tests {
                 grid_id: GridId::new(99),
                 local_position: CompositorPoint { row: 0, column: 0 },
             }),
-            Some(CompositorCursorUpdate::Ignore)
+            Ok(CompositorCursorUpdate::Ignore)
         );
         assert_eq!(cgrids, [default_pointer, selected_pointer, upper_pointer]);
 
@@ -3600,7 +3621,7 @@ mod tests {
                 grid_id: GridId::new(7),
                 local_position: CompositorPoint { row: 10, column: 0 },
             }),
-            Some(CompositorCursorUpdate::Apply {
+            Ok(CompositorCursorUpdate::Apply {
                 plan: CompositorCursorPlan {
                     layer_index: 1,
                     screen_position: CompositorPoint { row: 12, column: 3 },
