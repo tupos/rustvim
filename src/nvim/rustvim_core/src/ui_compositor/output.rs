@@ -2,9 +2,9 @@
 
 use std::ops::Range;
 
-use crate::grid::{VimSAttrT, VimSCharT};
+use crate::grid::{ComposedPosition, VimSAttrT, VimSCharT};
 
-use super::{CompositorPoint, CompositorRegion, CompositorSize};
+use super::{CompositorRegion, CompositorSize};
 
 /// Receives validated output commands produced by the safe compositor.
 pub(super) trait CompositorOutput {
@@ -19,7 +19,7 @@ pub(super) enum UiCommand<'cells> {
     GridResize(CompositorSize),
 
     /// Move the cursor on the composed output grid.
-    GridCursorGoto(CompositorPoint),
+    GridCursorGoto(ComposedPosition),
 
     /// Scroll a region of the composed output grid.
     GridScroll {

@@ -413,7 +413,7 @@ pub extern "C" fn ui_comp_grid_cursor_goto(grid_handle: Integer, row: Integer, c
     };
     let request = CompositorCursorRequest {
         grid_id: GridId::new(grid_handle),
-        local_position: CompositorPoint { row, column },
+        local_position: GridPosition::new(row, column),
     };
     let mut output = NvimOutput;
 
@@ -543,7 +543,7 @@ pub extern "C" fn ui_comp_find_grid_at_coord(
     let Ok(grid_id) = lock_compositor().grid_at(
         &grid_store.registry,
         &grid_store,
-        CompositorPoint { row, column },
+        ComposedPosition::new(row, column),
         hit_test,
     ) else {
         return std::ptr::null_mut();
@@ -577,7 +577,7 @@ pub unsafe extern "C" fn ui_comp_grid_contains_at(
     // into the guard for the duration of this operation.
     let grid = unsafe { ScreenGridGuard::take(grid) };
     PositionedGrid::try_from_compositor_position(&grid)
-        .is_some_and(|grid| grid.contains(CompositorPoint { row, column }))
+        .is_some_and(|grid| grid.contains(ComposedPosition::new(row, column)))
 }
 
 /// Reports whether one window grid accepts mouse input at a screen coordinate.
@@ -604,14 +604,14 @@ pub unsafe extern "C" fn ui_comp_grid_accepts_mouse_at(
     // SAFETY: The caller transfers exclusive ownership of the grid buffers
     // into the guard for the duration of this operation.
     let grid = unsafe { ScreenGridGuard::take(grid) };
-    PositionedGrid::try_new(
-        &grid,
-        CompositorPoint {
-            row: origin_row,
-            column: origin_column,
+    PositionedGrid::try_new(&grid, ComposedPosition::new(origin_row, origin_column)).is_some_and(
+        |grid| {
+            grid.matches(
+                ComposedPosition::new(row, column),
+                LayerHitTest::MouseEnabled,
+            )
         },
     )
-    .is_some_and(|grid| grid.matches(CompositorPoint { row, column }, LayerHitTest::MouseEnabled))
 }
 
 /// Checks cursor coverage after acquiring the registered legacy grids.
@@ -627,7 +627,7 @@ pub(in crate::ui_compositor) fn cursor_is_covered_by_registered_layers(
         &grid_store.registry,
         &grid_store,
         current_grid,
-        CompositorPoint { row, column },
+        ComposedPosition::new(row, column),
         minimum_z_index_gap,
     )
 }

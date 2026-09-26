@@ -21,8 +21,8 @@ use output::{CompositorOutput, RawLineCommand, UiCommand};
 use crate::{
     generated::enums::RdbFlags,
     grid::{
-        GridId, GridRow, GridRowSegment, Highlight, ScreenGrid, VimSAttrT, VimSCharT,
-        schar_from_ascii, schar_from_char,
+        ComposedPosition, GridId, GridPosition, GridRow, GridRowSegment, Highlight, ScreenGrid,
+        VimSAttrT, VimSCharT, schar_from_ascii, schar_from_char,
     },
 };
 
@@ -43,13 +43,6 @@ impl SegmentComposition {
     pub(crate) fn is_followed_by_continuation(self) -> bool {
         self.followed_by_continuation
     }
-}
-
-/// One cell in composed-screen coordinates.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct CompositorPoint {
-    row: i32,
-    column: i32,
 }
 
 /// Identity and stacking position of the grid whose cursor is being tested.
@@ -74,23 +67,23 @@ impl From<&ScreenGrid> for CompositorCursorGrid {
 #[derive(Clone, Copy, Debug)]
 struct PositionedGrid<'grid> {
     grid: &'grid ScreenGrid,
-    origin: CompositorPoint,
+    origin: ComposedPosition,
 }
 
 impl<'grid> PositionedGrid<'grid> {
     /// Constructs a positioned view of a grid with valid dimensions.
-    fn try_new(grid: &'grid ScreenGrid, origin: CompositorPoint) -> Option<Self> {
+    fn try_new(grid: &'grid ScreenGrid, origin: ComposedPosition) -> Option<Self> {
         (grid.rows >= 0 && grid.cols >= 0).then_some(Self { grid, origin })
     }
 
     /// Positions a grid at its stored compositor origin.
     fn try_from_compositor_position(grid: &'grid ScreenGrid) -> Option<Self> {
         let (row, column) = grid.compositor_position();
-        Self::try_new(grid, CompositorPoint { row, column })
+        Self::try_new(grid, ComposedPosition::new(row, column))
     }
 
     /// Reports whether the allocated grid contains one screen cell.
-    fn contains(self, point: CompositorPoint) -> bool {
+    fn contains(self, point: ComposedPosition) -> bool {
         point.row >= self.origin.row
             && self
                 .origin
@@ -106,7 +99,7 @@ impl<'grid> PositionedGrid<'grid> {
     }
 
     /// Applies one compositor hit-test policy to this grid.
-    fn matches(self, point: CompositorPoint, hit_test: LayerHitTest) -> bool {
+    fn matches(self, point: ComposedPosition, hit_test: LayerHitTest) -> bool {
         self.contains(point) && hit_test.accepts(self)
     }
 }
@@ -236,14 +229,14 @@ pub(crate) type CompositorResult<T> = Result<T, CompositorError>;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct CompositorCursorRequest {
     grid_id: GridId,
-    local_position: CompositorPoint,
+    local_position: GridPosition,
 }
 
 /// Selected layer and composed-screen cursor action.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct CompositorCursorPlan {
     layer_index: usize,
-    screen_position: CompositorPoint,
+    screen_position: ComposedPosition,
     raise_to: Option<usize>,
     emit: bool,
 }
@@ -268,7 +261,7 @@ enum CompositorCursorUpdate {
 /// Requested position and size of one compositor grid.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct CompositorGridPlacement {
-    origin: CompositorPoint,
+    origin: ComposedPosition,
     size: CompositorSize,
 }
 
@@ -302,7 +295,7 @@ impl CompositorGridPlacement {
     /// Constructs a placement with nonnegative dimensions.
     fn try_new(row: i32, column: i32, height: i32, width: i32) -> Option<Self> {
         Some(Self {
-            origin: CompositorPoint { row, column },
+            origin: ComposedPosition::new(row, column),
             size: CompositorSize::try_new(height, width)?,
         })
     }
@@ -935,7 +928,7 @@ impl Compositor {
         &self,
         registry: &CompositorLayerRegistry,
         grids: &impl GridAccess,
-        point: CompositorPoint,
+        point: ComposedPosition,
         hit_test: LayerHitTest,
     ) -> CompositorResult<Option<GridId>> {
         let layers = registry.layer_stack(grids)?;
@@ -948,7 +941,7 @@ impl Compositor {
         registry: &CompositorLayerRegistry,
         grids: &impl GridAccess,
         current_grid: CompositorCursorGrid,
-        point: CompositorPoint,
+        point: ComposedPosition,
         minimum_z_index_gap: u32,
     ) -> CompositorResult<bool> {
         if !self.should_draw() {
@@ -1664,10 +1657,7 @@ impl<'grid> CompositorLayer<'grid> {
     fn positioned_grid(self) -> PositionedGrid<'grid> {
         PositionedGrid {
             grid: self.grid,
-            origin: CompositorPoint {
-                row: self.origin_row,
-                column: self.origin_column,
-            },
+            origin: ComposedPosition::new(self.origin_row, self.origin_column),
         }
     }
 
@@ -2091,16 +2081,9 @@ impl<'grid> CompositorLayerStack<'grid> {
         let layer = self
             .layer(layer_index)
             .ok_or(CompositorError::InvalidLayerState)?;
-        let screen_position = CompositorPoint {
-            row: layer
-                .origin_row
-                .checked_add(request.local_position.row)
-                .ok_or(CompositorError::InvalidGeometry)?,
-            column: layer
-                .origin_column
-                .checked_add(request.local_position.column)
-                .ok_or(CompositorError::InvalidGeometry)?,
-        };
+        let screen_position = ComposedPosition::new(layer.origin_row, layer.origin_column)
+            .checked_add_local(request.local_position)
+            .ok_or(CompositorError::InvalidGeometry)?;
 
         let raise_to = if layer.is_default {
             None
@@ -2133,7 +2116,7 @@ impl<'grid> CompositorLayerStack<'grid> {
     }
 
     /// Finds the topmost non-default grid containing one screen cell.
-    fn topmost_grid_at(&self, point: CompositorPoint, hit_test: LayerHitTest) -> Option<GridId> {
+    fn topmost_grid_at(&self, point: ComposedPosition, hit_test: LayerHitTest) -> Option<GridId> {
         self.layers.get(1..)?.iter().rev().find_map(|layer| {
             let layer = *layer;
             layer
@@ -2146,7 +2129,7 @@ impl<'grid> CompositorLayerStack<'grid> {
     /// Reports whether a sufficiently higher layer covers `current_grid`'s cursor.
     fn is_cursor_covered_by_higher_layer(
         &self,
-        point: CompositorPoint,
+        point: ComposedPosition,
         current_grid: CompositorCursorGrid,
         minimum_z_index_gap: u32,
     ) -> bool {
@@ -3813,11 +3796,11 @@ mod tests {
         assert_eq!(
             layers.plan_cursor(CompositorCursorRequest {
                 grid_id: GridId::new(7),
-                local_position: CompositorPoint { row: 1, column: 2 },
+                local_position: GridPosition::new(1, 2),
             }),
             Ok(CompositorCursorAction::Update(CompositorCursorPlan {
                 layer_index: 1,
-                screen_position: CompositorPoint { row: 3, column: 5 },
+                screen_position: ComposedPosition::new(3, 5),
                 raise_to: Some(2),
                 emit: true,
             }))
@@ -3825,11 +3808,11 @@ mod tests {
         assert_eq!(
             layers.plan_cursor(CompositorCursorRequest {
                 grid_id: GridId::new(7),
-                local_position: CompositorPoint { row: 10, column: 2 },
+                local_position: GridPosition::new(10, 2),
             }),
             Ok(CompositorCursorAction::Update(CompositorCursorPlan {
                 layer_index: 1,
-                screen_position: CompositorPoint { row: 12, column: 5 },
+                screen_position: ComposedPosition::new(12, 5),
                 raise_to: Some(2),
                 emit: false,
             }))
@@ -3837,7 +3820,7 @@ mod tests {
         assert_eq!(
             layers.plan_cursor(CompositorCursorRequest {
                 grid_id: GridId::new(99),
-                local_position: CompositorPoint { row: 0, column: 0 },
+                local_position: GridPosition::new(0, 0),
             }),
             Ok(CompositorCursorAction::Ignore)
         );
@@ -3877,7 +3860,7 @@ mod tests {
         assert_eq!(
             apply_cursor_update_to_registered_grids(CompositorCursorRequest {
                 grid_id: GridId::new(99),
-                local_position: CompositorPoint { row: 0, column: 0 },
+                local_position: GridPosition::new(0, 0),
             }),
             Ok(CompositorCursorUpdate::Ignore)
         );
@@ -3888,12 +3871,12 @@ mod tests {
         assert_eq!(
             apply_cursor_update_to_registered_grids(CompositorCursorRequest {
                 grid_id: GridId::new(7),
-                local_position: CompositorPoint { row: 10, column: 0 },
+                local_position: GridPosition::new(10, 0),
             }),
             Ok(CompositorCursorUpdate::Apply {
                 plan: CompositorCursorPlan {
                     layer_index: 1,
-                    screen_position: CompositorPoint { row: 12, column: 3 },
+                    screen_position: ComposedPosition::new(12, 3),
                     raise_to: Some(2),
                     emit: false,
                 },
@@ -4384,7 +4367,7 @@ mod tests {
         };
 
         assert_eq!(
-            layers.topmost_grid_at(CompositorPoint { row: 2, column: 2 }, LayerHitTest::Any,),
+            layers.topmost_grid_at(ComposedPosition::new(2, 2), LayerHitTest::Any,),
             Some(upper_grid.id())
         );
     }
@@ -4434,7 +4417,7 @@ mod tests {
 
         assert!(
             layers
-                .topmost_grid_at(CompositorPoint { row: 1, column: 1 }, LayerHitTest::Any,)
+                .topmost_grid_at(ComposedPosition::new(1, 1), LayerHitTest::Any,)
                 .is_none()
         );
     }
@@ -4445,35 +4428,22 @@ mod tests {
         grid.set_compositor_position(4, 5);
         let positioned = PositionedGrid::try_from_compositor_position(&grid).unwrap();
 
-        assert!(positioned.contains(CompositorPoint { row: 4, column: 5 }));
-        assert!(positioned.contains(CompositorPoint { row: 5, column: 7 }));
-        assert!(!positioned.contains(CompositorPoint { row: 3, column: 5 }));
-        assert!(!positioned.contains(CompositorPoint { row: 6, column: 5 }));
-        assert!(!positioned.contains(CompositorPoint { row: 5, column: 8 }));
+        assert!(positioned.contains(ComposedPosition::new(4, 5)));
+        assert!(positioned.contains(ComposedPosition::new(5, 7)));
+        assert!(!positioned.contains(ComposedPosition::new(3, 5)));
+        assert!(!positioned.contains(ComposedPosition::new(6, 5)));
+        assert!(!positioned.contains(ComposedPosition::new(5, 8)));
     }
 
     #[test]
     fn positioned_grid_hit_testing_uses_external_half_open_bounds() {
         let grid = grid_with_size(2, 3);
-        let positioned =
-            PositionedGrid::try_new(&grid, CompositorPoint { row: 4, column: 5 }).unwrap();
+        let positioned = PositionedGrid::try_new(&grid, ComposedPosition::new(4, 5)).unwrap();
 
-        assert!(positioned.matches(
-            CompositorPoint { row: 4, column: 5 },
-            LayerHitTest::MouseEnabled,
-        ));
-        assert!(positioned.matches(
-            CompositorPoint { row: 5, column: 7 },
-            LayerHitTest::MouseEnabled,
-        ));
-        assert!(!positioned.matches(
-            CompositorPoint { row: 6, column: 5 },
-            LayerHitTest::MouseEnabled,
-        ));
-        assert!(!positioned.matches(
-            CompositorPoint { row: 5, column: 8 },
-            LayerHitTest::MouseEnabled,
-        ));
+        assert!(positioned.matches(ComposedPosition::new(4, 5), LayerHitTest::MouseEnabled,));
+        assert!(positioned.matches(ComposedPosition::new(5, 7), LayerHitTest::MouseEnabled,));
+        assert!(!positioned.matches(ComposedPosition::new(6, 5), LayerHitTest::MouseEnabled,));
+        assert!(!positioned.matches(ComposedPosition::new(5, 8), LayerHitTest::MouseEnabled,));
     }
 
     #[test]
@@ -4491,7 +4461,7 @@ mod tests {
                 upper_layer,
             ],
         };
-        let point = CompositorPoint { row: 0, column: 1 };
+        let point = ComposedPosition::new(0, 1);
 
         assert_eq!(
             layers.topmost_grid_at(point, LayerHitTest::Any),
@@ -4518,7 +4488,7 @@ mod tests {
 
         assert!(
             layers
-                .topmost_grid_at(CompositorPoint { row: 0, column: 0 }, LayerHitTest::Any,)
+                .topmost_grid_at(ComposedPosition::new(0, 0), LayerHitTest::Any,)
                 .is_none()
         );
     }
@@ -4534,7 +4504,7 @@ mod tests {
                 compositor_layer(&upper_grid, 1, 2, 1, false),
             ],
         };
-        let covered_point = CompositorPoint { row: 0, column: 1 };
+        let covered_point = ComposedPosition::new(0, 1);
 
         let current_cursor_grid = CompositorCursorGrid::from(&current_grid);
         let upper_cursor_grid = CompositorCursorGrid::from(&upper_grid);
@@ -4543,7 +4513,7 @@ mod tests {
         assert!(!layers.is_cursor_covered_by_higher_layer(covered_point, current_cursor_grid, 1));
         assert!(!layers.is_cursor_covered_by_higher_layer(covered_point, upper_cursor_grid, 0));
         assert!(!layers.is_cursor_covered_by_higher_layer(
-            CompositorPoint { row: 2, column: 2 },
+            ComposedPosition::new(2, 2),
             current_cursor_grid,
             0,
         ));

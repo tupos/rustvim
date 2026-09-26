@@ -1,5 +1,6 @@
 // vim: sw=4
 mod cell;
+mod coordinates;
 mod fold_column;
 mod line_buffer;
 mod line_submission;
@@ -24,6 +25,7 @@ use std::{
 };
 
 use cell::GridCell;
+pub(crate) use coordinates::{ComposedPosition, GridPosition};
 use fold_column::{FoldColumn, FoldColumnInfo, FoldColumnSymbols};
 pub use line_buffer::LineBuffer;
 use line_buffer::{LineTextRenderOptions, LineTextVirtualColumns};
