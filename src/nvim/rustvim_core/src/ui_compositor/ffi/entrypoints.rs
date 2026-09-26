@@ -25,15 +25,15 @@ use super::{
 pub extern "C" fn ui_comp_init() {
     // SAFETY: Initialization runs on Neovim's main thread before compositor
     // operations begin, and the default grid remains process-global.
-    let initialized = unsafe { initialize_layer_registry(&raw mut c_default_grid) };
-    assert!(initialized);
+    unsafe { initialize_layer_registry(&raw mut c_default_grid) }
+        .expect("compositor layer registry must initialize exactly once");
 }
 
 /// Releases all Rust-owned compositor state during process teardown.
 #[unsafe(no_mangle)]
 pub extern "C" fn ui_comp_free_all_mem() {
-    assert!(clear_layer_registry());
-    assert!(lock_compositor_buffer_pool().release());
+    clear_layer_registry().expect("compositor layer registry must be initialized");
+    lock_compositor_buffer_pool().release();
 }
 
 /// Initializes compositor debug highlights.
@@ -55,7 +55,7 @@ pub extern "C" fn ui_comp_detach() {
         .detach()
         .expect("cannot unregister a composed UI when none are attached");
     if detached_last {
-        assert!(lock_compositor_buffer_pool().release());
+        lock_compositor_buffer_pool().release();
     }
 }
 
@@ -89,7 +89,7 @@ pub extern "C" fn ui_comp_grid_resize(grid: Integer, width: Integer, height: Int
     let mut output = NvimOutput;
     output.emit(UiCommand::GridResize(plan.size));
 
-    assert!(lock_compositor_buffer_pool().resize(plan.buffer_width));
+    lock_compositor_buffer_pool().resize(plan.buffer_width);
 }
 
 /// Hides the message separator after the composed screen is invalidated.
@@ -118,9 +118,9 @@ unsafe fn update_message_position(
     request: CompositorMessagePositionRequest,
     runtime: CompositorRuntime,
     output: &mut impl CompositorOutput,
-) -> bool {
+) -> CompositorResult<()> {
     if message_grid.is_null() || default_grid.is_null() || message_grid == default_grid {
-        return false;
+        return Err(CompositorError::InvalidLayerState);
     }
     let plan = {
         // SAFETY: The caller transfers exclusive ownership of both grids'
@@ -128,10 +128,7 @@ unsafe fn update_message_position(
         let mut message_grid = unsafe { ScreenGridGuard::take(message_grid) };
         let default_grid = unsafe { ScreenGridGuard::take(default_grid) };
         lock_compositor().set_message_position(&mut message_grid, &default_grid, request)
-    };
-    let Some(plan) = plan else {
-        return false;
-    };
+    }?;
 
     if let Some(scroll) = plan.scroll {
         output.emit(UiCommand::GridScroll {
@@ -143,11 +140,10 @@ unsafe fn update_message_position(
     if let Some(area) = plan.recompose {
         // SAFETY: The caller satisfies the helper's message-grid requirements.
         // The earlier guards were dropped above.
-        if !unsafe { recompose_area_from_registered_grids(message_grid, area, runtime, output) } {
-            return false;
-        }
+        unsafe { recompose_area_from_registered_grids(message_grid, area, runtime, output) }
+            .map_err(|_| CompositorError::RecompositionFailed)?;
     }
-    true
+    Ok(())
 }
 
 /// Handles one generated message-grid position event.
@@ -179,7 +175,7 @@ pub unsafe extern "C" fn ui_comp_msg_set_pos(
 
     // SAFETY: Neovim's global default and message grids are distinct and are
     // exclusively accessed on the main thread during this generated event.
-    let updated = unsafe {
+    unsafe {
         update_message_position(
             &raw mut c_msg_grid,
             &raw mut c_default_grid,
@@ -187,15 +183,16 @@ pub unsafe extern "C" fn ui_comp_msg_set_pos(
             runtime,
             &mut output,
         )
-    };
-    assert!(updated);
+    }
+    .expect("message-grid position update must preserve compositor invariants");
 }
 
 /// Returns the screen area occupied by one registered grid.
 pub(in crate::ui_compositor) fn recompose_area_for_registered_grid(
     grid_id: GridId,
-) -> Option<CompositorRecomposeArea> {
-    let grid_store = LegacyGridStore::try_take_registered()?;
+) -> CompositorResult<CompositorRecomposeArea> {
+    let grid_store =
+        LegacyGridStore::try_take_registered().ok_or(CompositorError::InvalidLayerState)?;
     lock_compositor().recompose_area_for_grid(&grid_store.registry, &grid_store, grid_id)
 }
 
@@ -224,9 +221,10 @@ pub unsafe extern "C" fn ui_comp_compose_grid(grid: *mut CScreenGrid) {
 
     // SAFETY: The grid guard was dropped above. The process-global message
     // grid is exclusively accessed on Neovim's main thread.
-    assert!(unsafe {
+    unsafe {
         recompose_area_from_registered_grids(&raw mut c_msg_grid, area, runtime, &mut output)
-    });
+    }
+    .expect("grid recomposition must preserve compositor invariants");
 }
 
 /// Places a new or existing grid in the registered compositor layers.
@@ -261,8 +259,7 @@ pub(in crate::ui_compositor) fn place_grid_in_registered_layers(
             let replacement_state = grid_store
                 .ffi_state()
                 .ok_or(CompositorError::InvalidLayerState)?;
-            replace_compositor_layer_state(&previous_registry, replacement_state)
-                .ok_or(CompositorError::InvalidLayerState)?;
+            replace_compositor_layer_state(&previous_registry, replacement_state)?;
         }
         preparation
     };
@@ -335,12 +332,10 @@ pub unsafe extern "C" fn ui_comp_put_grid(
     let recompose_area = |area| {
         // SAFETY: Every grid guard is dropped before this closure. The
         // process-global message grid is accessed on Neovim's main thread.
-        let recomposed = unsafe {
+        unsafe {
             recompose_area_from_registered_grids(&raw mut c_msg_grid, area, runtime, &mut output)
-        };
-        recomposed
-            .then_some(())
-            .ok_or(CompositorError::RecompositionFailed)
+        }
+        .map_err(|_| CompositorError::RecompositionFailed)
     };
     place_grid_in_registered_layers(
         grid_store,
@@ -364,8 +359,7 @@ pub(in crate::ui_compositor) fn apply_cursor_update_to_registered_grids(
     let update = lock_compositor().move_cursor(&mut registry, &mut grid_store, request)?;
 
     if registry != previous_registry {
-        replace_compositor_layer_registry(&previous_registry, registry.clone())
-            .ok_or(CompositorError::InvalidLayerState)?;
+        replace_compositor_layer_registry(&previous_registry, registry.clone())?;
         grid_store.registry = registry;
     }
 
@@ -386,34 +380,28 @@ unsafe fn process_grid_cursor_goto(
     message_grid: *mut CScreenGrid,
     request: CompositorCursorRequest,
     output: &mut impl CompositorOutput,
-) -> bool {
-    let Ok(update) = apply_cursor_update_to_registered_grids(request) else {
-        return false;
-    };
+) -> CompositorResult<()> {
+    let update = apply_cursor_update_to_registered_grids(request)?;
     let CompositorCursorUpdate::Apply {
         plan,
         recompose_areas,
     } = update
     else {
-        return true;
+        return Ok(());
     };
 
-    let Some(runtime) = compositor_runtime_snapshot() else {
-        return false;
-    };
+    let runtime = compositor_runtime_snapshot().ok_or(CompositorError::InvalidGeometry)?;
     for area in recompose_areas {
         // SAFETY: The caller satisfies the helper's message-grid requirements.
         // The cursor-update guards were dropped.
-        if !unsafe { recompose_area_from_registered_grids(message_grid, area, runtime, output) } {
-            return false;
-        }
+        unsafe { recompose_area_from_registered_grids(message_grid, area, runtime, output) }?;
     }
 
     if plan.emit {
         output.emit(UiCommand::GridCursorGoto(plan.screen_position));
     }
 
-    true
+    Ok(())
 }
 
 /// Handles one generated grid-cursor event.
@@ -434,8 +422,8 @@ pub extern "C" fn ui_comp_grid_cursor_goto(grid_handle: Integer, row: Integer, c
 
     // SAFETY: Neovim's message grid is exclusively accessed on the main
     // thread during this generated event.
-    let updated = unsafe { process_grid_cursor_goto(&raw mut c_msg_grid, request, &mut output) };
-    assert!(updated);
+    unsafe { process_grid_cursor_goto(&raw mut c_msg_grid, request, &mut output) }
+        .expect("cursor update must preserve compositor invariants");
 }
 
 /// Adjusts a registered grid's layer order and publishes the new registry.
@@ -452,8 +440,7 @@ pub(in crate::ui_compositor) fn adjust_registered_layer_order(
         return Ok(());
     }
 
-    replace_compositor_layer_registry(&previous_registry, registry)
-        .ok_or(CompositorError::InvalidLayerState)?;
+    replace_compositor_layer_registry(&previous_registry, registry)?;
     Ok(())
 }
 
@@ -494,8 +481,7 @@ pub(in crate::ui_compositor) fn remove_registered_layer(
     let remaining_state = grid_store
         .ffi_state()
         .ok_or(CompositorError::InvalidLayerState)?;
-    replace_compositor_layer_state(&previous_registry, remaining_state)
-        .ok_or(CompositorError::InvalidLayerState)?;
+    replace_compositor_layer_state(&previous_registry, remaining_state)?;
     Ok(removal)
 }
 
@@ -530,9 +516,10 @@ pub unsafe extern "C" fn ui_comp_remove_grid(grid: *mut CScreenGrid) {
         let mut output = NvimOutput;
         // SAFETY: The reduced registry has been published, and the caller
         // accesses the process-global message grid on Neovim's main thread.
-        assert!(unsafe {
+        unsafe {
             recompose_area_from_registered_grids(&raw mut c_msg_grid, area, runtime, &mut output)
-        });
+        }
+        .expect("removed layer area must be recomposed");
     }
 }
 
@@ -690,17 +677,18 @@ unsafe fn compose_line_from_registered_grids(
     message_grid: *mut CScreenGrid,
     request: CompositorLineInput,
     output: &mut impl CompositorOutput,
-) -> bool {
+) -> CompositorResult<()> {
     let separator_active = lock_compositor()
         .message_separator_character_at(request.row)
         .is_some();
     if separator_active && message_grid.is_null() {
-        return false;
+        return Err(CompositorError::InvalidLayerState);
     }
 
     let mut line_buffer = acquire_compositor_buffer();
-    let submission = (|| {
-        let grid_store = LegacyGridStore::try_take_registered()?;
+    let submission = (|| -> CompositorResult<CompositorSubmission> {
+        let grid_store =
+            LegacyGridStore::try_take_registered().ok_or(CompositorError::InvalidLayerState)?;
         let message_grid_index = separator_active
             .then(|| grid_store.index_of(message_grid))
             .flatten();
@@ -715,36 +703,43 @@ unsafe fn compose_line_from_registered_grids(
         let message_grid = if separator_active {
             Some(match message_grid_index {
                 Some(index) => {
-                    let grid_id = grid_store.registry.layer_id(index)?;
-                    grid_store.grid(grid_id)?
+                    let grid_id = grid_store
+                        .registry
+                        .layer_id(index)
+                        .ok_or(CompositorError::InvalidLayerState)?;
+                    grid_store
+                        .grid(grid_id)
+                        .ok_or(CompositorError::InvalidLayerState)?
                 }
-                None => message_grid_guard.as_deref()?,
+                None => message_grid_guard
+                    .as_deref()
+                    .ok_or(CompositorError::InvalidLayerState)?,
             })
         } else {
             None
         };
 
-        let layers = grid_store.registry.layer_stack(&grid_store)?;
+        let layers = grid_store
+            .registry
+            .layer_stack(&grid_store)
+            .ok_or(CompositorError::InvalidLayerState)?;
         lock_compositor().compose_line(&mut line_buffer, &layers, message_grid, &request)
-    })();
+    })()?;
 
-    let Some(submission) = submission else {
-        return false;
-    };
     let output_range = submission.start_col..submission.end_col;
-    let Some(characters) = line_buffer.characters.get(output_range.clone()) else {
-        return false;
-    };
-    let Some(attributes) = line_buffer.attributes.get(output_range) else {
-        return false;
-    };
-    let (Ok(start_column), Ok(end_column)) = (
-        i32::try_from(submission.start_col),
-        i32::try_from(submission.end_col),
-    ) else {
-        return false;
-    };
-    let Some(command) = RawLineCommand::try_new(
+    let characters = line_buffer
+        .characters
+        .get(output_range.clone())
+        .ok_or(CompositorError::InvalidLineState)?;
+    let attributes = line_buffer
+        .attributes
+        .get(output_range)
+        .ok_or(CompositorError::InvalidLineState)?;
+    let start_column =
+        i32::try_from(submission.start_col).map_err(|_| CompositorError::InvalidGeometry)?;
+    let end_column =
+        i32::try_from(submission.end_col).map_err(|_| CompositorError::InvalidGeometry)?;
+    let command = RawLineCommand::try_new(
         request.row,
         start_column..end_column,
         end_column,
@@ -752,11 +747,10 @@ unsafe fn compose_line_from_registered_grids(
         submission.flags,
         characters,
         attributes,
-    ) else {
-        return false;
-    };
+    )
+    .ok_or(CompositorError::InvalidLineState)?;
     output.emit(UiCommand::RawLine(command));
-    true
+    Ok(())
 }
 
 /// Composes and submits a clipped screen area from registered compositor grids.
@@ -772,28 +766,20 @@ unsafe fn compose_area_from_registered_grids(
     message_grid: *mut CScreenGrid,
     request: CompositorAreaRequest,
     output: &mut impl CompositorOutput,
-) -> bool {
+) -> CompositorResult<()> {
     let plan = {
-        let Some(grid_store) = LegacyGridStore::try_take_registered() else {
-            return false;
-        };
-        let Some(plan) =
-            lock_compositor().plan_recompose_area(&grid_store.registry, &grid_store, request)
-        else {
-            return false;
-        };
-        plan
+        let grid_store =
+            LegacyGridStore::try_take_registered().ok_or(CompositorError::InvalidLayerState)?;
+        lock_compositor().plan_recompose_area(&grid_store.registry, &grid_store, request)?
     };
 
     for line in plan.into_line_inputs() {
         // SAFETY: The caller satisfies the documented message-grid
         // requirements. The temporary clipping guards and every preceding
         // line's guards were dropped before this helper takes ownership.
-        if !unsafe { compose_line_from_registered_grids(message_grid, line, output) } {
-            return false;
-        }
+        unsafe { compose_line_from_registered_grids(message_grid, line, output) }?;
     }
-    true
+    Ok(())
 }
 
 /// Visualizes and composes one screen area from registered grids.
@@ -809,7 +795,7 @@ unsafe fn recompose_area_from_registered_grids(
     area: CompositorRecomposeArea,
     runtime: CompositorRuntime,
     output: &mut impl CompositorOutput,
-) -> bool {
+) -> CompositorResult<()> {
     runtime.visualize(&area, runtime.debug_highlights.recomposed, true, output);
 
     // SAFETY: The caller satisfies the helper's message-grid requirements.
@@ -845,29 +831,23 @@ unsafe fn process_raw_line(
     characters: *const VimSCharT,
     attributes: *const VimSAttrT,
     output: &mut impl CompositorOutput,
-) -> bool {
+) -> CompositorResult<()> {
     let operation = {
-        let Some(grid_store) = LegacyGridStore::try_take_registered() else {
-            return false;
-        };
+        let grid_store =
+            LegacyGridStore::try_take_registered().ok_or(CompositorError::InvalidLayerState)?;
         let message_layer_index = grid_store.index_of(message_grid);
-        let Ok(operation) = lock_compositor().process_raw_line(
+        lock_compositor().process_raw_line(
             &grid_store.registry,
             &grid_store,
             grid_id,
             message_layer_index,
             request,
-        ) else {
-            return false;
-        };
-        operation
+        )?
     };
     let CompositorRawLineOperation::Process(plan) = operation else {
-        return true;
+        return Ok(());
     };
-    let Some(runtime) = compositor_runtime_snapshot() else {
-        return false;
-    };
+    let runtime = compositor_runtime_snapshot().ok_or(CompositorError::InvalidGeometry)?;
 
     if plan.clear_column != plan.requested_clear_column {
         log_raw_line_diagnostic(
@@ -880,9 +860,9 @@ unsafe fn process_raw_line(
     match plan.action {
         CompositorRawLineAction::DiscardRow => {
             log_raw_line_diagnostic(RawLineDiagnostic::InvalidRow(plan.row), grid_id, output);
-            true
+            Ok(())
         }
-        CompositorRawLineAction::DiscardColumns => true,
+        CompositorRawLineAction::DiscardColumns => Ok(()),
         CompositorRawLineAction::Recompose => {
             runtime.visualize(
                 &CompositorRecomposeArea {
@@ -910,16 +890,14 @@ unsafe fn process_raw_line(
             }
         }
         CompositorRawLineAction::Forward => {
-            let Some(payload_len) = plan
+            let payload_len = plan
                 .columns
                 .end
                 .checked_sub(plan.columns.start)
                 .and_then(|length| usize::try_from(length).ok())
-            else {
-                return false;
-            };
+                .ok_or(CompositorError::InvalidGeometry)?;
             if payload_len != 0 && (characters.is_null() || attributes.is_null()) {
-                return false;
+                return Err(CompositorError::InvalidLineState);
             }
 
             let (characters, attributes): (&[VimSCharT], &[VimSAttrT]) = if payload_len == 0 {
@@ -955,7 +933,7 @@ unsafe fn process_raw_line(
             );
             debug_assert!(attributes.iter().all(|attribute| *attribute >= 0));
 
-            let Some(command) = RawLineCommand::try_new(
+            let command = RawLineCommand::try_new(
                 plan.row,
                 plan.columns,
                 plan.clear_column,
@@ -963,11 +941,10 @@ unsafe fn process_raw_line(
                 plan.flags,
                 characters,
                 attributes,
-            ) else {
-                return false;
-            };
+            )
+            .ok_or(CompositorError::InvalidLineState)?;
             output.emit(UiCommand::RawLine(command));
-            true
+            Ok(())
         }
     }
 }
@@ -1006,7 +983,7 @@ pub unsafe extern "C" fn ui_comp_raw_line(
 
     // SAFETY: The generated caller supplies the documented cell arrays, and
     // Neovim's message grid is exclusively accessed on the main thread.
-    let processed = unsafe {
+    unsafe {
         process_raw_line(
             &raw mut c_msg_grid,
             GridId::new(grid),
@@ -1016,8 +993,8 @@ pub unsafe extern "C" fn ui_comp_raw_line(
             attributes,
             &mut output,
         )
-    };
-    assert!(processed);
+    }
+    .expect("raw-line processing must preserve compositor invariants");
 }
 
 /// Processes one complete grid scroll against registered compositor grids.
@@ -1032,34 +1009,28 @@ unsafe fn process_scroll(
     grid_id: GridId,
     request: CompositorScrollRequest,
     output: &mut impl CompositorOutput,
-) -> bool {
+) -> CompositorResult<()> {
     let operation = {
-        let Some(grid_store) = LegacyGridStore::try_take_registered() else {
-            return false;
-        };
+        let grid_store =
+            LegacyGridStore::try_take_registered().ok_or(CompositorError::InvalidLayerState)?;
         let message_layer_index = grid_store.index_of(message_grid);
-        let Ok(operation) = lock_compositor().scroll(
+        lock_compositor().scroll(
             &grid_store.registry,
             &grid_store,
             grid_id,
             message_layer_index,
             request,
-        ) else {
-            return false;
-        };
-        operation
+        )?
     };
 
     match operation {
-        CompositorScrollOperation::Ignore => return true,
+        CompositorScrollOperation::Ignore => return Ok(()),
         CompositorScrollOperation::Forward {
             region,
             row_delta,
             column_delta,
         } => {
-            let Some(runtime) = compositor_runtime_snapshot() else {
-                return false;
-            };
+            let runtime = compositor_runtime_snapshot().ok_or(CompositorError::InvalidGeometry)?;
             output.emit(UiCommand::GridScroll {
                 region,
                 row_delta,
@@ -1070,9 +1041,7 @@ unsafe fn process_scroll(
             }
         }
         CompositorScrollOperation::Recompose { region, rows } => {
-            let Some(runtime) = compositor_runtime_snapshot() else {
-                return false;
-            };
+            let runtime = compositor_runtime_snapshot().ok_or(CompositorError::InvalidGeometry)?;
             runtime.visualize(
                 &CompositorRecomposeArea {
                     rows: region.rows.clone(),
@@ -1086,7 +1055,7 @@ unsafe fn process_scroll(
                 // SAFETY: The caller satisfies the documented message-grid
                 // requirements. The planning guards were dropped before this
                 // helper takes ownership again.
-                if !unsafe {
+                unsafe {
                     compose_line_from_registered_grids(
                         message_grid,
                         CompositorLineInput {
@@ -1097,13 +1066,11 @@ unsafe fn process_scroll(
                         },
                         output,
                     )
-                } {
-                    return false;
-                }
+                }?;
             }
         }
     }
-    true
+    Ok(())
 }
 
 /// Handles one generated grid-scroll event.
@@ -1134,7 +1101,6 @@ pub extern "C" fn ui_comp_grid_scroll(
 
     // SAFETY: Neovim's message grid is exclusively accessed on the main
     // thread during this generated event.
-    let processed =
-        unsafe { process_scroll(&raw mut c_msg_grid, GridId::new(grid), request, &mut output) };
-    assert!(processed);
+    unsafe { process_scroll(&raw mut c_msg_grid, GridId::new(grid), request, &mut output) }
+        .expect("grid-scroll processing must preserve compositor invariants");
 }

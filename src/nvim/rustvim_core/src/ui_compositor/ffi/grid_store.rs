@@ -9,7 +9,10 @@ use std::{
 
 use crate::grid::{CScreenGrid, GridId, ScreenGrid, ScreenGridGuard};
 
-use super::super::{CompositorGridPlacementTarget, CompositorLayerRegistry, GridAccess};
+use super::super::{
+    CompositorError, CompositorGridPlacementTarget, CompositorLayerRegistry, CompositorResult,
+    GridAccess,
+};
 
 /// One temporary pointer connecting a native grid identity to C storage.
 ///
@@ -180,7 +183,7 @@ impl LegacyGridStore {
         }
 
         let layer_index = grid_store.registry.len();
-        grid_store.registry.try_append(grid_id)?;
+        grid_store.registry.try_append(grid_id).ok()?;
         grid_store
             .bindings
             .insert(
@@ -369,15 +372,17 @@ pub(in crate::ui_compositor) fn compositor_layer_registry() -> Option<Compositor
 pub(in crate::ui_compositor) fn replace_compositor_layer_registry(
     expected: &CompositorLayerRegistry,
     replacement: CompositorLayerRegistry,
-) -> Option<()> {
+) -> CompositorResult<()> {
     let mut current_state = lock_compositor_layer_state();
-    let state = current_state.as_mut()?;
+    let state = current_state
+        .as_mut()
+        .ok_or(CompositorError::InvalidLayerState)?;
     if &state.registry != expected || !state.c_grids.matches_registry(&replacement) {
-        return None;
+        return Err(CompositorError::InvalidLayerState);
     }
 
     state.registry = replacement;
-    Some(())
+    Ok(())
 }
 
 /// Replaces the complete boundary state if its registry snapshot still
@@ -385,14 +390,18 @@ pub(in crate::ui_compositor) fn replace_compositor_layer_registry(
 pub(in crate::ui_compositor) fn replace_compositor_layer_state(
     expected: &CompositorLayerRegistry,
     replacement: CompositorLayerFfiState,
-) -> Option<()> {
+) -> CompositorResult<()> {
     let mut current_state = lock_compositor_layer_state();
-    if &current_state.as_ref()?.registry != expected {
-        return None;
+    let current_registry = &current_state
+        .as_ref()
+        .ok_or(CompositorError::InvalidLayerState)?
+        .registry;
+    if current_registry != expected {
+        return Err(CompositorError::InvalidLayerState);
     }
 
     *current_state = Some(replacement);
-    Some(())
+    Ok(())
 }
 
 /// Initializes compositor layer ownership and its default-grid binding.
@@ -403,40 +412,38 @@ pub(in crate::ui_compositor) fn replace_compositor_layer_state(
 /// buffers satisfy the ownership and layout requirements of `ScreenGrid`.
 pub(in crate::ui_compositor) unsafe fn initialize_layer_registry(
     default_grid: *mut CScreenGrid,
-) -> bool {
-    let Some(default_cgrid) = NonNull::new(default_grid) else {
-        return false;
-    };
+) -> CompositorResult<()> {
+    let default_cgrid = NonNull::new(default_grid).ok_or(CompositorError::InvalidLayerState)?;
 
     let default_grid_id = {
         // SAFETY: The caller transfers exclusive ownership for this scope.
         let default_grid = unsafe { ScreenGridGuard::take(default_grid) };
         default_grid.id()
     };
-    let Some(registry) = CompositorLayerRegistry::try_new(vec![default_grid_id]) else {
-        return false;
-    };
-    let Some(c_grids) = CCompositorGridBindings::try_new(HashMap::from([(
+    let registry = CompositorLayerRegistry::try_new(vec![default_grid_id])
+        .ok_or(CompositorError::InvalidLayerState)?;
+    let c_grids = CCompositorGridBindings::try_new(HashMap::from([(
         default_grid_id,
         CCompositorGridBinding {
             cgrid: default_cgrid,
         },
-    )])) else {
-        return false;
-    };
-    let Some(state) = CompositorLayerFfiState::try_new(registry, c_grids) else {
-        return false;
-    };
+    )]))
+    .ok_or(CompositorError::InvalidLayerState)?;
+    let state = CompositorLayerFfiState::try_new(registry, c_grids)
+        .ok_or(CompositorError::InvalidLayerState)?;
 
     let mut current_state = lock_compositor_layer_state();
     if current_state.is_some() {
-        return false;
+        return Err(CompositorError::InvalidLayerState);
     }
     *current_state = Some(state);
-    true
+    Ok(())
 }
 
 /// Clears compositor layer order and temporary C bindings during teardown.
-pub(in crate::ui_compositor) fn clear_layer_registry() -> bool {
-    lock_compositor_layer_state().take().is_some()
+pub(in crate::ui_compositor) fn clear_layer_registry() -> CompositorResult<()> {
+    lock_compositor_layer_state()
+        .take()
+        .map(drop)
+        .ok_or(CompositorError::InvalidLayerState)
 }

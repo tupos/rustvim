@@ -200,7 +200,7 @@ struct CompositorResizePlan {
 
 /// Failures produced by safe compositor operations.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
-enum CompositorError {
+pub(crate) enum CompositorError {
     /// No composed UI is available to detach.
     #[error("cannot detach a composed UI when none is attached")]
     NoAttachedUi,
@@ -208,6 +208,14 @@ enum CompositorError {
     /// The screen width cannot be represented by native buffer indices.
     #[error("screen width cannot address native buffer storage")]
     ScreenWidthOutOfRange,
+
+    /// Compositor coordinates or ranges cannot represent the requested work.
+    #[error("compositor geometry is invalid")]
+    InvalidGeometry,
+
+    /// Compositor line storage and the requested operation disagree.
+    #[error("compositor line state is inconsistent")]
+    InvalidLineState,
 
     /// The layer registry and its corresponding grids disagree.
     #[error("compositor layer state is inconsistent")]
@@ -222,7 +230,7 @@ enum CompositorError {
     RecompositionFailed,
 }
 
-type CompositorResult<T> = Result<T, CompositorError>;
+pub(crate) type CompositorResult<T> = Result<T, CompositorError>;
 
 /// Validated native inputs for positioning the composed cursor.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -549,17 +557,17 @@ impl MessageCompositorState {
         message_grid: &ScreenGrid,
         default_grid: &ScreenGrid,
         should_draw: bool,
-    ) -> Option<CompositorMessagePositionPlan> {
+    ) -> CompositorResult<CompositorMessagePositionPlan> {
         if default_grid.cols < 0 {
-            return None;
+            return Err(CompositorError::InvalidGeometry);
         }
 
         if !should_draw {
-            return Some(CompositorMessagePositionPlan::default());
+            return Ok(CompositorMessagePositionPlan::default());
         }
 
         if request.row > self.current_row {
-            return Some(CompositorMessagePositionPlan {
+            return Ok(CompositorMessagePositionPlan {
                 scroll: None,
                 recompose: Some(CompositorRecomposeArea {
                     rows: self.current_row.saturating_sub(1).max(0)..request.row,
@@ -572,17 +580,24 @@ impl MessageCompositorState {
             || !(self.current_row < request.screen_size.height
                 || (request.scrolled && !self.was_scrolled))
         {
-            return Some(CompositorMessagePositionPlan::default());
+            return Ok(CompositorMessagePositionPlan::default());
         }
 
-        let row_delta = self.current_row.checked_sub(request.row)?;
+        let row_delta = self
+            .current_row
+            .checked_sub(request.row)
+            .ok_or(CompositorError::InvalidGeometry)?;
         if message_grid.blends_with_background() {
             let separator_offset = if request.scrolled { 1 } else { 0 };
-            return Some(CompositorMessagePositionPlan {
+            return Ok(CompositorMessagePositionPlan {
                 scroll: None,
                 recompose: Some(CompositorRecomposeArea {
                     rows: request.row.saturating_sub(separator_offset).max(0)
-                        ..request.screen_size.height.checked_sub(row_delta)?,
+                        ..request
+                            .screen_size
+                            .height
+                            .checked_sub(row_delta)
+                            .ok_or(CompositorError::InvalidGeometry)?,
                     columns: 0..request.screen_size.width,
                 }),
             });
@@ -594,19 +609,23 @@ impl MessageCompositorState {
                 request.row.saturating_sub(previous_separator_offset).max(0)
                     ..request.screen_size.height,
                 0..request.screen_size.width,
-            )?,
+            )
+            .ok_or(CompositorError::InvalidGeometry)?,
             row_delta,
         };
         let recompose = if request.scrolled && !self.was_scrolled && request.row > 0 {
             Some(CompositorRecomposeArea {
-                rows: request.row.checked_sub(1)?..request.row,
+                rows: request
+                    .row
+                    .checked_sub(1)
+                    .ok_or(CompositorError::InvalidGeometry)?..request.row,
                 columns: 0..request.screen_size.width,
             })
         } else {
             None
         };
 
-        Some(CompositorMessagePositionPlan {
+        Ok(CompositorMessagePositionPlan {
             scroll: Some(scroll),
             recompose,
         })
@@ -619,9 +638,14 @@ impl MessageCompositorState {
         default_grid: &ScreenGrid,
         request: CompositorMessagePositionRequest,
         should_draw: bool,
-    ) -> Option<CompositorMessagePositionPlan> {
+    ) -> CompositorResult<CompositorMessagePositionPlan> {
         let separator_row = if request.scrolled && request.row > 0 {
-            Some(request.row.checked_sub(1)?)
+            Some(
+                request
+                    .row
+                    .checked_sub(1)
+                    .ok_or(CompositorError::InvalidGeometry)?,
+            )
         } else {
             None
         };
@@ -640,7 +664,7 @@ impl MessageCompositorState {
         self.current_row = request.row;
         self.was_scrolled = request.scrolled;
 
-        Some(plan)
+        Ok(plan)
     }
 
     /// Returns the active separator character for `row`.
@@ -719,7 +743,7 @@ impl Compositor {
         message_grid: &mut ScreenGrid,
         default_grid: &ScreenGrid,
         request: CompositorMessagePositionRequest,
-    ) -> Option<CompositorMessagePositionPlan> {
+    ) -> CompositorResult<CompositorMessagePositionPlan> {
         let should_draw = self.should_draw();
         self.message
             .update_position(message_grid, default_grid, request, should_draw)
@@ -800,9 +824,7 @@ impl Compositor {
             (insertion_index, plan)
         };
 
-        registry
-            .place_appended_layer(grids, insertion_index, request.placement)
-            .ok_or(CompositorError::InvalidLayerState)?;
+        registry.place_appended_layer(grids, insertion_index, request.placement)?;
         Ok(CompositorGridPlacementPreparation {
             plan,
             deferred_completion: None,
@@ -847,9 +869,7 @@ impl Compositor {
                 .ok_or(CompositorError::InvalidLayerState)?
         };
 
-        registry
-            .move_layer(grids, movement)
-            .ok_or(CompositorError::InvalidLayerState)
+        registry.move_layer(grids, movement)
     }
 
     /// Removes one non-default grid from the compositor layer stack.
@@ -878,9 +898,7 @@ impl Compositor {
             None
         };
 
-        registry
-            .remove_layer(grids, layer_index)
-            .ok_or(CompositorError::InvalidLayerState)?;
+        registry.remove_layer(grids, layer_index)?;
 
         Ok(CompositorLayerRemoval { recompose_area })
     }
@@ -929,9 +947,7 @@ impl Compositor {
             let layers = registry
                 .layer_stack(grids)
                 .ok_or(CompositorError::InvalidLayerState)?;
-            layers
-                .plan_cursor(request)
-                .ok_or(CompositorError::InvalidLayerState)?
+            layers.plan_cursor(request)?
         };
         let CompositorCursorAction::Update(plan) = action else {
             return Ok(CompositorCursorUpdate::Ignore);
@@ -946,9 +962,7 @@ impl Compositor {
                     .plan_layer_raise(plan.layer_index, target_index)
                     .ok_or(CompositorError::InvalidLayerState)?
             };
-            registry
-                .move_layer(grids, raise_plan.movement)
-                .ok_or(CompositorError::InvalidLayerState)?;
+            registry.move_layer(grids, raise_plan.movement)?;
             raise_plan.recompose_areas
         } else {
             Vec::new()
@@ -979,14 +993,12 @@ impl Compositor {
         let Some(current_layer_index) = layers.layer_index_with_id(grid_id) else {
             return Ok(CompositorRawLineOperation::Ignore);
         };
-        let plan = layers
-            .plan_raw_line(
-                current_layer_index,
-                message_layer_index,
-                self.message.was_scrolled,
-                request,
-            )
-            .ok_or(CompositorError::InvalidLayerState)?;
+        let plan = layers.plan_raw_line(
+            current_layer_index,
+            message_layer_index,
+            self.message.was_scrolled,
+            request,
+        )?;
 
         Ok(CompositorRawLineOperation::Process(plan))
     }
@@ -1010,14 +1022,12 @@ impl Compositor {
         let Some(current_layer_index) = layers.layer_index_with_id(grid_id) else {
             return Ok(CompositorScrollOperation::Ignore);
         };
-        let plan = layers
-            .plan_scroll(
-                current_layer_index,
-                message_layer_index,
-                self.message.was_scrolled,
-                request,
-            )
-            .ok_or(CompositorError::InvalidLayerState)?;
+        let plan = layers.plan_scroll(
+            current_layer_index,
+            message_layer_index,
+            self.message.was_scrolled,
+            request,
+        )?;
         let current_grid = layers
             .layer(current_layer_index)
             .ok_or(CompositorError::InvalidLayerState)?
@@ -1033,16 +1043,21 @@ impl Compositor {
         layers: &CompositorLayerStack<'_>,
         message_grid: Option<&ScreenGrid>,
         request: &CompositorLineInput,
-    ) -> Option<CompositorSubmission> {
+    ) -> CompositorResult<CompositorSubmission> {
         let message_separator = match self.message.separator_character_at(request.row) {
             Some(character) => {
-                let message_grid = message_grid?;
-                let default_grid_id = layers.default_layer()?.grid.id();
+                let message_grid = message_grid.ok_or(CompositorError::InvalidLayerState)?;
+                let default_grid_id = layers
+                    .default_layer()
+                    .ok_or(CompositorError::InvalidLayerState)?
+                    .grid
+                    .id();
                 Some(MessageSeparator {
                     layer: CompositorLayer::try_from_grid(
                         message_grid,
                         message_grid.id() == default_grid_id,
-                    )?,
+                    )
+                    .ok_or(CompositorError::InvalidLayerState)?,
                     character,
                     attribute: request.settings.message_separator_attribute,
                 })
@@ -1070,8 +1085,15 @@ impl Compositor {
         registry: &CompositorLayerRegistry,
         grids: &impl GridAccess,
         area: CompositorRecomposeArea,
-    ) -> Option<CompositorRecomposeArea> {
-        area.with_ends_clamped_to_grid(grids.grid(registry.layer_id(0)?)?)
+    ) -> CompositorResult<CompositorRecomposeArea> {
+        let default_grid_id = registry
+            .layer_id(0)
+            .ok_or(CompositorError::InvalidLayerState)?;
+        let default_grid = grids
+            .grid(default_grid_id)
+            .ok_or(CompositorError::InvalidLayerState)?;
+        area.with_ends_clamped_to_grid(default_grid)
+            .ok_or(CompositorError::InvalidGeometry)
     }
 
     /// Returns the screen area occupied by one registered grid.
@@ -1080,9 +1102,14 @@ impl Compositor {
         registry: &CompositorLayerRegistry,
         grids: &impl GridAccess,
         grid_id: GridId,
-    ) -> Option<CompositorRecomposeArea> {
-        registry.index_of(grid_id)?;
-        CompositorRecomposeArea::try_from_grid(grids.grid(grid_id)?)
+    ) -> CompositorResult<CompositorRecomposeArea> {
+        registry
+            .index_of(grid_id)
+            .ok_or(CompositorError::InvalidLayerState)?;
+        let grid = grids
+            .grid(grid_id)
+            .ok_or(CompositorError::InvalidLayerState)?;
+        CompositorRecomposeArea::try_from_grid(grid).ok_or(CompositorError::InvalidGeometry)
     }
 
     /// Plans the line requests required to recompose one clipped screen area.
@@ -1091,8 +1118,8 @@ impl Compositor {
         registry: &CompositorLayerRegistry,
         grids: &impl GridAccess,
         request: CompositorAreaRequest,
-    ) -> Option<CompositorRecomposePlan> {
-        Some(CompositorRecomposePlan {
+    ) -> CompositorResult<CompositorRecomposePlan> {
+        Ok(CompositorRecomposePlan {
             area: self.clip_recompose_area(registry, grids, request.area)?,
             settings: request.settings,
         })
@@ -1308,15 +1335,15 @@ impl<'output> CompositorSegment<'output> {
     pub(crate) fn try_copy(
         &mut self,
         foreground: GridRowSegment<'_>,
-    ) -> Option<SegmentComposition> {
+    ) -> CompositorResult<SegmentComposition> {
         if foreground.len() != self.characters.len() {
-            return None;
+            return Err(CompositorError::InvalidLineState);
         }
 
         self.characters.copy_from_slice(foreground.characters());
         self.attributes.copy_from_slice(foreground.attributes());
 
-        Some(SegmentComposition {
+        Ok(SegmentComposition {
             followed_by_continuation: foreground.is_followed_by_continuation(),
         })
     }
@@ -1331,12 +1358,12 @@ impl<'output> CompositorSegment<'output> {
         background: GridRowSegment<'_>,
         foreground: GridRowSegment<'_>,
         blending: bool,
-    ) -> Option<SegmentComposition> {
+    ) -> CompositorResult<SegmentComposition> {
         let composition = self.try_copy(foreground)?;
         if blending {
             self.try_blend_prefix_over(background, self.characters.len())?;
         }
-        Some(composition)
+        Ok(composition)
     }
 
     /// Blends a prefix of this output over a background grid segment.
@@ -1348,7 +1375,7 @@ impl<'output> CompositorSegment<'output> {
         &mut self,
         background: GridRowSegment<'_>,
         blend_len: usize,
-    ) -> Option<()> {
+    ) -> CompositorResult<()> {
         self.try_blend_prefix_over_with(background, blend_len, |background, foreground, through| {
             let (attribute, through) =
                 Highlight::new(background).blend(Highlight::new(foreground), through);
@@ -1365,10 +1392,10 @@ impl<'output> CompositorSegment<'output> {
         background: GridRowSegment<'_>,
         blend_len: usize,
         mut blend_attributes: impl FnMut(VimSAttrT, VimSAttrT, bool) -> (VimSAttrT, bool),
-    ) -> Option<()> {
+    ) -> CompositorResult<()> {
         let len = self.characters.len();
         if background.len() != len || blend_len > len {
-            return None;
+            return Err(CompositorError::InvalidLineState);
         }
 
         let background_characters = background.characters();
@@ -1414,7 +1441,7 @@ impl<'output> CompositorSegment<'output> {
             index += width;
         }
 
-        Some(())
+        Ok(())
     }
 }
 
@@ -1718,26 +1745,29 @@ impl CompositorLayerRegistry {
     }
 
     /// Appends one previously unregistered grid identity.
-    fn try_append(&mut self, grid_id: GridId) -> Option<()> {
+    fn try_append(&mut self, grid_id: GridId) -> CompositorResult<()> {
         if self.index_of(grid_id).is_some() {
-            return None;
+            return Err(CompositorError::InvalidLayerState);
         }
 
         self.layer_ids.push(grid_id);
-        Some(())
+        Ok(())
     }
 
     /// Removes one non-default grid identity.
-    fn remove_non_default(&mut self, layer_index: usize) -> Option<GridId> {
-        if layer_index == 0 || layer_index >= self.layer_ids.len() {
-            return None;
+    fn remove_non_default(&mut self, layer_index: usize) -> CompositorResult<GridId> {
+        if layer_index == 0 {
+            return Err(CompositorError::DefaultLayerMutation);
+        }
+        if layer_index >= self.layer_ids.len() {
+            return Err(CompositorError::InvalidLayerState);
         }
 
-        Some(self.layer_ids.remove(layer_index))
+        Ok(self.layer_ids.remove(layer_index))
     }
 
     /// Applies one validated layer relocation.
-    fn apply_layer_move(&mut self, movement: CompositorLayerMove) -> Option<()> {
+    fn apply_layer_move(&mut self, movement: CompositorLayerMove) -> CompositorResult<()> {
         movement.apply_to(&mut self.layer_ids)
     }
 
@@ -1775,10 +1805,13 @@ impl CompositorLayerRegistry {
         grids: &mut impl GridAccess,
         insertion_index: usize,
         placement: CompositorGridPlacement,
-    ) -> Option<()> {
-        let appended_index = self.len().checked_sub(1)?;
+    ) -> CompositorResult<()> {
+        let appended_index = self
+            .len()
+            .checked_sub(1)
+            .ok_or(CompositorError::InvalidLayerState)?;
         if insertion_index == 0 || insertion_index > appended_index {
-            return None;
+            return Err(CompositorError::InvalidLayerState);
         }
 
         self.move_layer(
@@ -1788,8 +1821,14 @@ impl CompositorLayerRegistry {
                 target_index: insertion_index,
             },
         )?;
-        placement.apply_to(grids.grid_mut(self.layer_id(insertion_index)?)?);
-        Some(())
+        let grid_id = self
+            .layer_id(insertion_index)
+            .ok_or(CompositorError::InvalidLayerState)?;
+        let grid = grids
+            .grid_mut(grid_id)
+            .ok_or(CompositorError::InvalidLayerState)?;
+        placement.apply_to(grid);
+        Ok(())
     }
 
     /// Applies a relocation and synchronizes affected grid metadata.
@@ -1797,30 +1836,45 @@ impl CompositorLayerRegistry {
         &mut self,
         grids: &mut impl GridAccess,
         movement: CompositorLayerMove,
-    ) -> Option<()> {
+    ) -> CompositorResult<()> {
         self.apply_layer_move(movement)?;
 
         let affected_indices = movement.affected_indices();
         let first_index = *affected_indices.start();
         for (offset, index) in affected_indices.enumerate() {
-            grids
-                .grid_mut(self.layer_id(index)?)?
-                .set_compositor_index(first_index + offset);
+            let grid_id = self
+                .layer_id(index)
+                .ok_or(CompositorError::InvalidLayerState)?;
+            let grid = grids
+                .grid_mut(grid_id)
+                .ok_or(CompositorError::InvalidLayerState)?;
+            grid.set_compositor_index(first_index + offset);
         }
-        Some(())
+        Ok(())
     }
 
     /// Removes one non-default layer and synchronizes shifted grid indices.
-    fn remove_layer(&mut self, grids: &mut impl GridAccess, layer_index: usize) -> Option<()> {
+    fn remove_layer(
+        &mut self,
+        grids: &mut impl GridAccess,
+        layer_index: usize,
+    ) -> CompositorResult<()> {
         let removed_grid_id = self.remove_non_default(layer_index)?;
-        grids.grid_mut(removed_grid_id)?.set_compositor_index(0);
+        grids
+            .grid_mut(removed_grid_id)
+            .ok_or(CompositorError::InvalidLayerState)?
+            .set_compositor_index(0);
 
         for new_index in layer_index..self.len() {
-            grids
-                .grid_mut(self.layer_id(new_index)?)?
-                .set_compositor_index(new_index);
+            let grid_id = self
+                .layer_id(new_index)
+                .ok_or(CompositorError::InvalidLayerState)?;
+            let grid = grids
+                .grid_mut(grid_id)
+                .ok_or(CompositorError::InvalidLayerState)?;
+            grid.set_compositor_index(new_index);
         }
-        Some(())
+        Ok(())
     }
 }
 
@@ -1839,20 +1893,24 @@ struct CompositorLayerRaisePlan {
 
 impl CompositorLayerMove {
     /// Applies this relocation to any layer representation.
-    fn apply_to<T>(self, layers: &mut [T]) -> Option<()> {
+    fn apply_to<T>(self, layers: &mut [T]) -> CompositorResult<()> {
         if self.source_index < self.target_index {
             layers
-                .get_mut(self.source_index..=self.target_index)?
+                .get_mut(self.source_index..=self.target_index)
+                .ok_or(CompositorError::InvalidLayerState)?
                 .rotate_left(1);
         } else if self.source_index > self.target_index {
             layers
-                .get_mut(self.target_index..=self.source_index)?
+                .get_mut(self.target_index..=self.source_index)
+                .ok_or(CompositorError::InvalidLayerState)?
                 .rotate_right(1);
         } else {
-            layers.get(self.source_index)?;
+            layers
+                .get(self.source_index)
+                .ok_or(CompositorError::InvalidLayerState)?;
         }
 
-        Some(())
+        Ok(())
     }
 
     /// Returns the inclusive range whose compositor indices changed.
@@ -1941,25 +1999,47 @@ impl<'grid> CompositorLayerStack<'grid> {
     }
 
     /// Selects a grid and plans its composed-screen cursor update.
-    fn plan_cursor(&self, request: CompositorCursorRequest) -> Option<CompositorCursorAction> {
-        let screen_size = self.default_layer()?.allocated_size();
+    fn plan_cursor(
+        &self,
+        request: CompositorCursorRequest,
+    ) -> CompositorResult<CompositorCursorAction> {
+        let screen_size = self
+            .default_layer()
+            .ok_or(CompositorError::InvalidLayerState)?
+            .allocated_size();
         let Some(layer_index) = self.layer_index_with_id(request.grid_id) else {
-            return Some(CompositorCursorAction::Ignore);
+            return Ok(CompositorCursorAction::Ignore);
         };
 
-        let layer = self.layer(layer_index)?;
+        let layer = self
+            .layer(layer_index)
+            .ok_or(CompositorError::InvalidLayerState)?;
         let screen_position = CompositorPoint {
-            row: layer.origin_row.checked_add(request.local_position.row)?,
+            row: layer
+                .origin_row
+                .checked_add(request.local_position.row)
+                .ok_or(CompositorError::InvalidGeometry)?,
             column: layer
                 .origin_column
-                .checked_add(request.local_position.column)?,
+                .checked_add(request.local_position.column)
+                .ok_or(CompositorError::InvalidGeometry)?,
         };
 
         let raise_to = if layer.is_default {
             None
         } else {
-            let mut target_index = self.layers.len().checked_sub(1)?;
-            while target_index > 1 && self.layer(target_index)?.z_index > layer.z_index {
+            let mut target_index = self
+                .layers
+                .len()
+                .checked_sub(1)
+                .ok_or(CompositorError::InvalidLayerState)?;
+            while target_index > 1
+                && self
+                    .layer(target_index)
+                    .ok_or(CompositorError::InvalidLayerState)?
+                    .z_index
+                    > layer.z_index
+            {
                 target_index -= 1;
             }
             (layer_index < target_index).then_some(target_index)
@@ -1967,7 +2047,7 @@ impl<'grid> CompositorLayerStack<'grid> {
         let emit =
             screen_position.column < screen_size.width && screen_position.row < screen_size.height;
 
-        Some(CompositorCursorAction::Update(CompositorCursorPlan {
+        Ok(CompositorCursorAction::Update(CompositorCursorPlan {
             layer_index,
             screen_position,
             raise_to,
@@ -2069,11 +2149,17 @@ impl<'grid> CompositorLayerStack<'grid> {
     }
 
     /// Reports whether any layer above the current layer intersects the query.
-    fn is_covered_above(&self, query: CompositorCoveredAboveQuery) -> Option<bool> {
-        let first_layer_above = query.current_layer_index.checked_add(1)?;
-        let layers_above = self.layers.get(first_layer_above..)?;
+    fn is_covered_above(&self, query: CompositorCoveredAboveQuery) -> CompositorResult<bool> {
+        let first_layer_above = query
+            .current_layer_index
+            .checked_add(1)
+            .ok_or(CompositorError::InvalidLayerState)?;
+        let layers_above = self
+            .layers
+            .get(first_layer_above..)
+            .ok_or(CompositorError::InvalidLayerState)?;
 
-        Some(layers_above.iter().any(|layer| {
+        Ok(layers_above.iter().any(|layer| {
             let include_row_above =
                 query.message_was_scrolled && query.message_layer_index == Some(layer.layer_index);
             layer
@@ -2089,21 +2175,26 @@ impl<'grid> CompositorLayerStack<'grid> {
         message_layer_index: Option<usize>,
         message_was_scrolled: bool,
         request: CompositorScrollRequest,
-    ) -> Option<CompositorScrollPlan> {
-        let current_layer = self.layer(current_layer_index)?;
+    ) -> CompositorResult<CompositorScrollPlan> {
+        let current_layer = self
+            .layer(current_layer_index)
+            .ok_or(CompositorError::InvalidLayerState)?;
         let row_delta = request.row_delta;
         let region = request
             .region
-            .translated(current_layer.origin_row, current_layer.origin_column)?;
+            .translated(current_layer.origin_row, current_layer.origin_column)
+            .ok_or(CompositorError::InvalidGeometry)?;
         let covered = self.is_covered_above(CompositorCoveredAboveQuery {
-            rectangle: region.coverage_rect()?,
+            rectangle: region
+                .coverage_rect()
+                .ok_or(CompositorError::InvalidGeometry)?,
             current_layer_index,
             message_layer_index,
             message_was_scrolled,
         })?;
 
         if !covered && !current_layer.blending {
-            return Some(CompositorScrollPlan::Forward {
+            return Ok(CompositorScrollPlan::Forward {
                 region,
                 row_delta,
                 column_delta: request.column_delta,
@@ -2112,17 +2203,31 @@ impl<'grid> CompositorLayerStack<'grid> {
 
         // TODO(bfredl): calculate non-overlapping subareas that can still be
         // forwarded instead of recomposing the complete covered rectangle.
-        let skipped_top = row_delta.checked_neg()?.max(0);
+        let skipped_top = row_delta
+            .checked_neg()
+            .ok_or(CompositorError::InvalidGeometry)?
+            .max(0);
         let skipped_bottom = row_delta.max(0);
-        let first_recompose_row = region.rows.start.checked_add(skipped_top)?;
-        let recompose_end_row = region.rows.end.checked_sub(skipped_bottom)?;
-        let first_grid_row = first_recompose_row.checked_sub(current_layer.origin_row)?;
+        let first_recompose_row = region
+            .rows
+            .start
+            .checked_add(skipped_top)
+            .ok_or(CompositorError::InvalidGeometry)?;
+        let recompose_end_row = region
+            .rows
+            .end
+            .checked_sub(skipped_bottom)
+            .ok_or(CompositorError::InvalidGeometry)?;
+        let first_grid_row = first_recompose_row
+            .checked_sub(current_layer.origin_row)
+            .ok_or(CompositorError::InvalidGeometry)?;
         let grid_start_column = region
             .columns
             .start
-            .checked_sub(current_layer.origin_column)?;
+            .checked_sub(current_layer.origin_column)
+            .ok_or(CompositorError::InvalidGeometry)?;
 
-        Some(CompositorScrollPlan::Recompose {
+        Ok(CompositorScrollPlan::Recompose {
             region,
             screen_rows: first_recompose_row..recompose_end_row,
             first_grid_row,
@@ -2137,21 +2242,31 @@ impl<'grid> CompositorLayerStack<'grid> {
         message_layer_index: Option<usize>,
         message_was_scrolled: bool,
         request: CompositorRawLineRequest,
-    ) -> Option<CompositorRawLinePlan> {
-        let current_layer = self.layer(current_layer_index)?;
-        let default_layer = self.default_layer()?;
-        let row = request.row.checked_add(current_layer.origin_row)?;
+    ) -> CompositorResult<CompositorRawLinePlan> {
+        let current_layer = self
+            .layer(current_layer_index)
+            .ok_or(CompositorError::InvalidLayerState)?;
+        let default_layer = self
+            .default_layer()
+            .ok_or(CompositorError::InvalidLayerState)?;
+        let row = request
+            .row
+            .checked_add(current_layer.origin_row)
+            .ok_or(CompositorError::InvalidGeometry)?;
         let start_column = request
             .columns
             .start
-            .checked_add(current_layer.origin_column)?;
+            .checked_add(current_layer.origin_column)
+            .ok_or(CompositorError::InvalidGeometry)?;
         let end_column = request
             .columns
             .end
-            .checked_add(current_layer.origin_column)?;
+            .checked_add(current_layer.origin_column)
+            .ok_or(CompositorError::InvalidGeometry)?;
         let requested_clear_column = request
             .clear_column
-            .checked_add(current_layer.origin_column)?;
+            .checked_add(current_layer.origin_column)
+            .ok_or(CompositorError::InvalidGeometry)?;
         let flags = if current_layer.is_default {
             request.flags
         } else {
@@ -2168,7 +2283,7 @@ impl<'grid> CompositorLayerStack<'grid> {
 
         if row >= default_layer.grid.rows {
             plan.action = CompositorRawLineAction::DiscardRow;
-            return Some(plan);
+            return Ok(plan);
         }
 
         let screen_columns = default_layer.grid.cols;
@@ -2176,7 +2291,7 @@ impl<'grid> CompositorLayerStack<'grid> {
             plan.clear_column = screen_columns;
             if plan.columns.start >= screen_columns {
                 plan.action = CompositorRawLineAction::DiscardColumns;
-                return Some(plan);
+                return Ok(plan);
             }
             plan.columns.end = plan.columns.end.min(screen_columns);
         }
@@ -2187,7 +2302,8 @@ impl<'grid> CompositorLayerStack<'grid> {
                 plan.row,
                 plan.columns.start,
                 plan.clear_column,
-            )?,
+            )
+            .ok_or(CompositorError::InvalidGeometry)?,
             current_layer_index,
             message_layer_index,
             message_was_scrolled,
@@ -2196,7 +2312,7 @@ impl<'grid> CompositorLayerStack<'grid> {
             plan.action = CompositorRawLineAction::Recompose;
         }
 
-        Some(plan)
+        Ok(plan)
     }
 
     /// Selects the topmost layer and its uninterrupted output range.
@@ -2393,19 +2509,17 @@ impl CompositorBuffer {
     }
 
     /// Reallocates the buffer for a screen of `width` columns.
-    fn resize(&mut self, width: usize) -> bool {
+    fn resize(&mut self, width: usize) {
         if self.characters.len() != width {
             self.characters = vec![schar_from_ascii(' '); width];
             self.attributes = vec![0; width];
         }
-        true
     }
 
     /// Releases all compositor storage.
-    fn release(&mut self) -> bool {
+    fn release(&mut self) {
         self.characters = Vec::new();
         self.attributes = Vec::new();
-        true
     }
 
     /// Selects and composes every layer segment for one complete line.
@@ -2413,7 +2527,7 @@ impl CompositorBuffer {
         &mut self,
         request: CompositorLineRequest<'_>,
         layers: &CompositorLayerStack<'_>,
-    ) -> Option<CompositorSubmission> {
+    ) -> CompositorResult<CompositorSubmission> {
         let mut line =
             self.prepare_line(request.start_column, request.end_column, request.flags)?;
         let line_end = line.columns.end;
@@ -2421,8 +2535,12 @@ impl CompositorBuffer {
         let mut last_layer = None;
 
         while column < line_end {
-            let selection = layers.select_segment(request.row, column, line_end)?;
-            let selected_layer = layers.layer(selection.layer_index)?;
+            let selection = layers
+                .select_segment(request.row, column, line_end)
+                .ok_or(CompositorError::InvalidLineState)?;
+            let selected_layer = layers
+                .layer(selection.layer_index)
+                .ok_or(CompositorError::InvalidLayerState)?;
             let separator = request
                 .message_separator
                 .filter(|separator| selected_layer.layer_index <= separator.layer.layer_index);
@@ -2432,8 +2550,10 @@ impl CompositorBuffer {
             let background = if composed_layer.blending {
                 Some(
                     layers
-                        .default_layer()?
-                        .screen_segment(request.row, output_columns.start..line_end)?,
+                        .default_layer()
+                        .ok_or(CompositorError::InvalidLayerState)?
+                        .screen_segment(request.row, output_columns.start..line_end)
+                        .ok_or(CompositorError::InvalidLineState)?,
                 )
             } else {
                 None
@@ -2448,8 +2568,9 @@ impl CompositorBuffer {
                     background,
                 )?;
             } else {
-                let foreground =
-                    selected_layer.screen_segment(request.row, output_columns.clone())?;
+                let foreground = selected_layer
+                    .screen_segment(request.row, output_columns.clone())
+                    .ok_or(CompositorError::InvalidLineState)?;
                 self.try_compose_grid_segment(
                     &mut line,
                     output_columns.clone(),
@@ -2462,13 +2583,21 @@ impl CompositorBuffer {
             last_layer = Some(composed_layer);
         }
 
-        let allow_wrap = last_layer?.allows_wrap(request.screen_columns);
+        let allow_wrap = last_layer
+            .ok_or(CompositorError::InvalidLineState)?
+            .allows_wrap(request.screen_columns);
         self.finish_line(line, request.flags, allow_wrap, request.abort_on_invalid)
     }
 
     /// Prepares one line and applies invalid-line edge expansion.
-    fn prepare_line(&self, start_col: i32, end_col: i32, flags: i32) -> Option<CompositorLine> {
-        let width = i32::try_from(self.characters.len()).ok()?;
+    fn prepare_line(
+        &self,
+        start_col: i32,
+        end_col: i32,
+        flags: i32,
+    ) -> CompositorResult<CompositorLine> {
+        let width =
+            i32::try_from(self.characters.len()).map_err(|_| CompositorError::InvalidLineState)?;
         let mut start_col = start_col.max(0);
         let mut end_col = end_col;
         let mut skip_start = 0;
@@ -2485,13 +2614,14 @@ impl CompositorBuffer {
             }
         }
 
-        let start_col = usize::try_from(start_col).ok()?;
-        let end_col = usize::try_from(end_col).ok()?;
+        let start_col =
+            usize::try_from(start_col).map_err(|_| CompositorError::InvalidLineState)?;
+        let end_col = usize::try_from(end_col).map_err(|_| CompositorError::InvalidLineState)?;
         if start_col >= end_col || end_col > self.characters.len() {
-            return None;
+            return Err(CompositorError::InvalidLineState);
         }
 
-        Some(CompositorLine {
+        Ok(CompositorLine {
             columns: start_col..end_col,
             skip_start,
             skip_end,
@@ -2505,16 +2635,19 @@ impl CompositorBuffer {
         output_columns: Range<usize>,
         foreground: GridRowSegment<'_>,
         background: Option<GridRowSegment<'_>>,
-    ) -> Option<()> {
-        let source_len = output_columns.end.checked_sub(output_columns.start)?;
+    ) -> CompositorResult<()> {
+        let source_len = output_columns
+            .end
+            .checked_sub(output_columns.start)
+            .ok_or(CompositorError::InvalidLineState)?;
         if source_len == 0 || foreground.len() != source_len {
-            return None;
+            return Err(CompositorError::InvalidLineState);
         }
 
         let line_start = line.columns.start;
         let line_end = line.columns.end;
         if output_columns.start < line_start || output_columns.end > line_end {
-            return None;
+            return Err(CompositorError::InvalidLineState);
         }
 
         let composition = self
@@ -2522,7 +2655,10 @@ impl CompositorBuffer {
             .try_copy(foreground)?;
 
         if composition.is_followed_by_continuation() {
-            *self.characters.get_mut(output_columns.end - 1)? = schar_from_ascii(' ');
+            *self
+                .characters
+                .get_mut(output_columns.end - 1)
+                .ok_or(CompositorError::InvalidLineState)? = schar_from_ascii(' ');
         }
 
         if let Some(background) = background {
@@ -2545,16 +2681,19 @@ impl CompositorBuffer {
         character: VimSCharT,
         attribute: VimSAttrT,
         background: Option<GridRowSegment<'_>>,
-    ) -> Option<()> {
-        let source_len = output_columns.end.checked_sub(output_columns.start)?;
+    ) -> CompositorResult<()> {
+        let source_len = output_columns
+            .end
+            .checked_sub(output_columns.start)
+            .ok_or(CompositorError::InvalidLineState)?;
         if source_len == 0 {
-            return None;
+            return Err(CompositorError::InvalidLineState);
         }
 
         let line_start = line.columns.start;
         let line_end = line.columns.end;
         if output_columns.start < line_start || output_columns.end > line_end {
-            return None;
+            return Err(CompositorError::InvalidLineState);
         }
 
         self.try_segment_mut(output_columns.clone())?
@@ -2575,17 +2714,35 @@ impl CompositorBuffer {
         mut flags: i32,
         allow_wrap: bool,
         abort_on_invalid: bool,
-    ) -> Option<CompositorSubmission> {
-        if self.characters.get(line.columns.end - 1) == Some(&0) {
+    ) -> CompositorResult<CompositorSubmission> {
+        if self.characters.get(
+            line.columns
+                .end
+                .checked_sub(1)
+                .ok_or(CompositorError::InvalidLineState)?,
+        ) == Some(&0)
+        {
             line.skip_end = 0;
         }
         if !allow_wrap {
             flags &= !LINE_FLAG_WRAP;
         }
 
-        let start_col = line.columns.start.checked_add(line.skip_start)?;
-        let end_col = line.columns.end.checked_sub(line.skip_end)?;
-        for attribute in self.attributes.get_mut(start_col..end_col)? {
+        let start_col = line
+            .columns
+            .start
+            .checked_add(line.skip_start)
+            .ok_or(CompositorError::InvalidLineState)?;
+        let end_col = line
+            .columns
+            .end
+            .checked_sub(line.skip_end)
+            .ok_or(CompositorError::InvalidLineState)?;
+        for attribute in self
+            .attributes
+            .get_mut(start_col..end_col)
+            .ok_or(CompositorError::InvalidLineState)?
+        {
             if *attribute < 0 {
                 if abort_on_invalid {
                     std::process::abort();
@@ -2594,7 +2751,7 @@ impl CompositorBuffer {
             }
         }
 
-        Some(CompositorSubmission {
+        Ok(CompositorSubmission {
             start_col,
             end_col,
             flags,
@@ -2602,10 +2759,20 @@ impl CompositorBuffer {
     }
 
     /// Borrows one output segment through the existing compositor abstraction.
-    fn try_segment_mut(&mut self, columns: Range<usize>) -> Option<CompositorSegment<'_>> {
-        let characters = self.characters.get_mut(columns.clone())?;
-        let attributes = self.attributes.get_mut(columns)?;
+    fn try_segment_mut(
+        &mut self,
+        columns: Range<usize>,
+    ) -> CompositorResult<CompositorSegment<'_>> {
+        let characters = self
+            .characters
+            .get_mut(columns.clone())
+            .ok_or(CompositorError::InvalidLineState)?;
+        let attributes = self
+            .attributes
+            .get_mut(columns)
+            .ok_or(CompositorError::InvalidLineState)?;
         CompositorSegment::try_from_slices(characters, attributes)
+            .ok_or(CompositorError::InvalidLineState)
     }
 
     /// Resolves wide-cell clipping at one selected segment boundary.
@@ -2614,21 +2781,36 @@ impl CompositorBuffer {
         line: &mut CompositorLine,
         output_columns: Range<usize>,
         followed_by_continuation: bool,
-    ) -> Option<()> {
-        let source_len = output_columns.end.checked_sub(output_columns.start)?;
+    ) -> CompositorResult<()> {
+        let source_len = output_columns
+            .end
+            .checked_sub(output_columns.start)
+            .ok_or(CompositorError::InvalidLineState)?;
         let line_start = line.columns.start;
         let line_end = line.columns.end;
         let mut include_start =
             followed_by_continuation && output_columns.start == line_start && source_len == 1;
         let mut include_end = false;
 
-        let first_character = self.characters.get_mut(output_columns.start)?;
+        let first_character = self
+            .characters
+            .get_mut(output_columns.start)
+            .ok_or(CompositorError::InvalidLineState)?;
         if *first_character == 0 {
             *first_character = schar_from_ascii(' ');
-            include_end = output_columns.start + 1 == line_end;
+            include_end = output_columns
+                .start
+                .checked_add(1)
+                .ok_or(CompositorError::InvalidLineState)?
+                == line_end;
         } else if output_columns.start == line_start
             && source_len > 1
-            && self.characters.get(output_columns.start + 1) == Some(&0)
+            && self.characters.get(
+                output_columns
+                    .start
+                    .checked_add(1)
+                    .ok_or(CompositorError::InvalidLineState)?,
+            ) == Some(&0)
         {
             include_start = true;
         }
@@ -2639,7 +2821,7 @@ impl CompositorBuffer {
         if include_end {
             line.skip_end = 0;
         }
-        Some(())
+        Ok(())
     }
 }
 
@@ -2668,19 +2850,17 @@ impl CompositorBufferPool {
     }
 
     /// Reconfigures available storage for a new composed-screen width.
-    fn resize(&mut self, width: usize) -> bool {
+    fn resize(&mut self, width: usize) {
         self.width = width;
         if let Some(buffer) = self.available_buffer.as_mut() {
-            return buffer.resize(width);
+            buffer.resize(width);
         }
-        true
     }
 
     /// Releases all retained compositor storage.
-    fn release(&mut self) -> bool {
+    fn release(&mut self) {
         self.width = 0;
         self.available_buffer = Some(CompositorBuffer::new());
-        true
     }
 
     /// Checks out reusable storage or allocates storage for reentrant work.
@@ -2689,7 +2869,7 @@ impl CompositorBufferPool {
             .available_buffer
             .take()
             .unwrap_or_else(CompositorBuffer::new);
-        assert!(buffer.resize(self.width));
+        buffer.resize(self.width);
         buffer
     }
 
@@ -2788,19 +2968,17 @@ fn emit_compositor_debug_line(
     columns: Range<i32>,
     attribute: VimSAttrT,
     output: &mut impl CompositorOutput,
-) -> bool {
-    let (Ok(start_column), Ok(end_column)) =
-        (usize::try_from(columns.start), usize::try_from(columns.end))
-    else {
-        return false;
-    };
+) -> CompositorResult<()> {
+    let start_column =
+        usize::try_from(columns.start).map_err(|_| CompositorError::InvalidGeometry)?;
+    let end_column = usize::try_from(columns.end).map_err(|_| CompositorError::InvalidGeometry)?;
 
     let buffer_width = lock_compositor_buffer_pool().width();
     if start_column > end_column || end_column > buffer_width {
-        return false;
+        return Err(CompositorError::InvalidLineState);
     }
 
-    let Some(command) = RawLineCommand::try_new(
+    let command = RawLineCommand::try_new(
         row,
         columns.start..columns.start,
         columns.end,
@@ -2808,11 +2986,10 @@ fn emit_compositor_debug_line(
         0,
         &[],
         &[],
-    ) else {
-        return false;
-    };
+    )
+    .ok_or(CompositorError::InvalidLineState)?;
     output.emit(UiCommand::RawLine(command));
-    true
+    Ok(())
 }
 
 /// Reports whether a screen character participates in negative-space blending.
@@ -2938,8 +3115,11 @@ mod tests {
             })
             .unwrap();
         assert_eq!(registry.layer_ids(), &[first, third, second]);
-        assert_eq!(registry.remove_non_default(0), None);
-        assert_eq!(registry.remove_non_default(1), Some(third));
+        assert_eq!(
+            registry.remove_non_default(0),
+            Err(CompositorError::DefaultLayerMutation)
+        );
+        assert_eq!(registry.remove_non_default(1), Ok(third));
         assert_eq!(registry.layer_ids(), &[first, second]);
     }
 
@@ -3061,7 +3241,7 @@ mod tests {
                 &default_grid,
                 message_position_request(5, false),
             ),
-            Some(CompositorMessagePositionPlan::default())
+            Ok(CompositorMessagePositionPlan::default())
         );
 
         compositor.attach();
@@ -3228,7 +3408,7 @@ mod tests {
                     &grid_store,
                     grid_id,
                 ),
-                Some(CompositorRecomposeArea {
+                Ok(CompositorRecomposeArea {
                     rows: 2..5,
                     columns: 5..9,
                 })
@@ -3242,7 +3422,7 @@ mod tests {
                         columns: 2..6,
                     },
                 ),
-                Some(CompositorRecomposeArea {
+                Ok(CompositorRecomposeArea {
                     rows: 1..3,
                     columns: 2..4,
                 })
@@ -3546,7 +3726,7 @@ mod tests {
                 grid_id: GridId::new(7),
                 local_position: CompositorPoint { row: 1, column: 2 },
             }),
-            Some(CompositorCursorAction::Update(CompositorCursorPlan {
+            Ok(CompositorCursorAction::Update(CompositorCursorPlan {
                 layer_index: 1,
                 screen_position: CompositorPoint { row: 3, column: 5 },
                 raise_to: Some(2),
@@ -3558,7 +3738,7 @@ mod tests {
                 grid_id: GridId::new(7),
                 local_position: CompositorPoint { row: 10, column: 2 },
             }),
-            Some(CompositorCursorAction::Update(CompositorCursorPlan {
+            Ok(CompositorCursorAction::Update(CompositorCursorPlan {
                 layer_index: 1,
                 screen_position: CompositorPoint { row: 12, column: 5 },
                 raise_to: Some(2),
@@ -3570,7 +3750,7 @@ mod tests {
                 grid_id: GridId::new(99),
                 local_position: CompositorPoint { row: 0, column: 0 },
             }),
-            Some(CompositorCursorAction::Ignore)
+            Ok(CompositorCursorAction::Ignore)
         );
     }
 
@@ -3994,8 +4174,11 @@ mod tests {
             }
             .unwrap();
             let mut registry = grid_store.registry.clone();
-            assert_eq!(registry.remove_layer(&mut grid_store, 0), None);
-            assert_eq!(registry.remove_layer(&mut grid_store, 1), Some(()));
+            assert_eq!(
+                registry.remove_layer(&mut grid_store, 0),
+                Err(CompositorError::DefaultLayerMutation)
+            );
+            assert_eq!(registry.remove_layer(&mut grid_store, 1), Ok(()));
             assert_eq!(registry.layer_ids(), &expected_registry);
         }
 
@@ -4357,15 +4540,14 @@ mod tests {
         let mut short_output =
             CompositorSegment::try_from_slices(&mut short_characters, &mut short_attributes)
                 .unwrap();
-        assert!(
-            short_output
-                .try_copy(
-                    GridRow::try_from_grid(&foreground, 0)
-                        .unwrap()
-                        .segment(0..2)
-                        .unwrap()
-                )
-                .is_none()
+        assert_eq!(
+            short_output.try_copy(
+                GridRow::try_from_grid(&foreground, 0)
+                    .unwrap()
+                    .segment(0..2)
+                    .unwrap()
+            ),
+            Err(CompositorError::InvalidLineState)
         );
     }
 
@@ -4469,7 +4651,7 @@ mod tests {
                 message_layer_index: None,
                 message_was_scrolled: false,
             }),
-            Some(true)
+            Ok(true)
         );
         assert_eq!(
             layers.is_covered_above(CompositorCoveredAboveQuery {
@@ -4478,7 +4660,7 @@ mod tests {
                 message_layer_index: None,
                 message_was_scrolled: false,
             }),
-            Some(false)
+            Ok(false)
         );
     }
 
@@ -4501,13 +4683,13 @@ mod tests {
             message_was_scrolled: false,
         };
 
-        assert_eq!(layers.is_covered_above(query), Some(false));
+        assert_eq!(layers.is_covered_above(query), Ok(false));
         assert_eq!(
             layers.is_covered_above(CompositorCoveredAboveQuery {
                 message_was_scrolled: true,
                 ..query
             }),
-            Some(true)
+            Ok(true)
         );
     }
 
@@ -4835,27 +5017,26 @@ mod tests {
         let mut output =
             CompositorSegment::try_from_slices(&mut characters, &mut attributes).unwrap();
 
-        assert!(
-            output
-                .try_compose(
-                    GridRow::try_from_grid(&background, 0)
-                        .unwrap()
-                        .segment(0..2)
-                        .unwrap(),
-                    GridRow::try_from_grid(&foreground, 0)
-                        .unwrap()
-                        .segment(0..1)
-                        .unwrap(),
-                    false,
-                )
-                .is_none()
+        assert_eq!(
+            output.try_compose(
+                GridRow::try_from_grid(&background, 0)
+                    .unwrap()
+                    .segment(0..2)
+                    .unwrap(),
+                GridRow::try_from_grid(&foreground, 0)
+                    .unwrap()
+                    .segment(0..1)
+                    .unwrap(),
+                false,
+            ),
+            Err(CompositorError::InvalidLineState)
         );
     }
 
     #[test]
     fn compositor_buffer_pool_allows_reentrant_leases() {
         let pool = Mutex::new(CompositorBufferPool::new());
-        assert!(pool.try_lock().unwrap().resize(3));
+        pool.try_lock().unwrap().resize(3);
 
         {
             let first = CompositorBufferLease::acquire(&pool);
@@ -4877,13 +5058,13 @@ mod tests {
     #[test]
     fn compositor_buffer_pool_discards_old_width_storage() {
         let pool = Mutex::new(CompositorBufferPool::new());
-        assert!(pool.try_lock().unwrap().resize(2));
+        pool.try_lock().unwrap().resize(2);
 
         {
             let leased = CompositorBufferLease::acquire(&pool);
             assert_eq!(leased.characters.len(), 2);
             assert_eq!(leased.attributes.len(), 2);
-            assert!(pool.try_lock().unwrap().resize(4));
+            pool.try_lock().unwrap().resize(4);
         }
 
         assert!(pool.try_lock().unwrap().available_buffer.is_none());
@@ -4902,7 +5083,7 @@ mod tests {
             .unwrap();
         let mut compositor = CompositorBuffer::new();
 
-        assert!(compositor.resize(2));
+        compositor.resize(2);
         let mut line = compositor.prepare_line(0, 2, 0).unwrap();
         assert_eq!(line.columns, 0..2);
         compositor
@@ -4956,7 +5137,7 @@ mod tests {
         };
         let mut compositor = CompositorBuffer::new();
 
-        assert!(compositor.resize(6));
+        compositor.resize(6);
         let submission = compositor
             .try_compose_line(
                 CompositorLineRequest {
@@ -5004,7 +5185,7 @@ mod tests {
         };
         let mut compositor = CompositorBuffer::new();
 
-        assert!(compositor.resize(3));
+        compositor.resize(3);
         let submission = compositor
             .try_compose_line(
                 CompositorLineRequest {
@@ -5034,7 +5215,7 @@ mod tests {
         );
         assert_eq!(compositor.attributes, [7, 7, 7]);
         assert_eq!(submission.flags, 0);
-        assert!(compositor.release());
+        compositor.release();
         assert!(compositor.characters.is_empty());
         assert!(compositor.attributes.is_empty());
     }

@@ -94,7 +94,7 @@ impl CompositorRuntime {
                 requested_area.clone(),
             )
         };
-        let Some(area) = area else {
+        let Ok(area) = area else {
             return;
         };
 
@@ -105,12 +105,8 @@ impl CompositorRuntime {
             self.delay(area.rows.end - area.rows.start, output);
         }
         for row in area.rows.clone() {
-            assert!(emit_compositor_debug_line(
-                row,
-                area.columns.clone(),
-                attribute,
-                output,
-            ));
+            emit_compositor_debug_line(row, area.columns.clone(), attribute, output)
+                .expect("debug line must fit compositor storage");
         }
         if delay {
             self.delay(area.rows.end - area.rows.start, output);
