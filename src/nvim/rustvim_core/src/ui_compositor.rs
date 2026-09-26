@@ -920,6 +920,44 @@ impl Compositor {
         Some(plan.prepare(current_grid))
     }
 
+    /// Composes one complete output line from safely borrowed grids.
+    fn compose_line(
+        &self,
+        buffer: &mut CompositorBuffer,
+        layers: &CompositorLayerStack<'_>,
+        message_grid: Option<&ScreenGrid>,
+        request: &CompositorLineInput,
+    ) -> Option<CompositorSubmission> {
+        let message_separator = match self.message.separator_character_at(request.row) {
+            Some(character) => {
+                let message_grid = message_grid?;
+                let default_grid_id = layers.default_layer()?.grid.id();
+                Some(MessageSeparator {
+                    layer: CompositorLayer::try_from_grid(
+                        message_grid,
+                        message_grid.id() == default_grid_id,
+                    )?,
+                    character,
+                    attribute: request.settings.message_separator_attribute,
+                })
+            }
+            None => None,
+        };
+
+        buffer.try_compose_line(
+            CompositorLineRequest {
+                row: request.row,
+                start_column: request.columns.start,
+                end_column: request.columns.end,
+                flags: request.flags,
+                message_separator,
+                screen_columns: request.settings.screen_columns,
+                abort_on_invalid: request.settings.abort_on_invalid,
+            },
+            layers,
+        )
+    }
+
     /// Returns the active message-separator character for one screen row.
     fn message_separator_character_at(&self, row: i32) -> Option<VimSCharT> {
         self.message.separator_character_at(row)

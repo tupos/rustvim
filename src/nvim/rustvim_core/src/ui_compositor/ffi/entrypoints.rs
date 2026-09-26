@@ -676,13 +676,14 @@ unsafe fn compose_line_from_registered_grids(
     request: CompositorLineInput,
     output: &mut impl CompositorOutput,
 ) -> bool {
-    let separator_character = lock_compositor().message_separator_character_at(request.row);
-    let separator_active = separator_character.is_some();
+    let separator_active = lock_compositor()
+        .message_separator_character_at(request.row)
+        .is_some();
     if separator_active && message_grid.is_null() {
         return false;
     }
 
-    let mut compositor = acquire_compositor_buffer();
+    let mut line_buffer = acquire_compositor_buffer();
     let submission = (|| {
         let grid_store = LegacyGridStore::try_take_registered()?;
         let message_grid_index = separator_active
@@ -696,50 +697,30 @@ unsafe fn compose_line_from_registered_grids(
             unsafe { ScreenGridGuard::take(message_grid) }
         });
 
-        let layers = grid_store.registry.layer_stack(&grid_store)?;
-        let message_separator = if separator_active {
-            let message_grid = match message_grid_index {
+        let message_grid = if separator_active {
+            Some(match message_grid_index {
                 Some(index) => {
                     let grid_id = grid_store.registry.layer_id(index)?;
                     grid_store.grid(grid_id)?
                 }
                 None => message_grid_guard.as_deref()?,
-            };
-            let default_grid_id = grid_store.registry.layer_id(0)?;
-            Some(MessageSeparator {
-                layer: CompositorLayer::try_from_grid(
-                    message_grid,
-                    message_grid.id() == default_grid_id,
-                )?,
-                character: separator_character?,
-                attribute: request.settings.message_separator_attribute,
             })
         } else {
             None
         };
 
-        compositor.try_compose_line(
-            CompositorLineRequest {
-                row: request.row,
-                start_column: request.columns.start,
-                end_column: request.columns.end,
-                flags: request.flags,
-                message_separator,
-                screen_columns: request.settings.screen_columns,
-                abort_on_invalid: request.settings.abort_on_invalid,
-            },
-            &layers,
-        )
+        let layers = grid_store.registry.layer_stack(&grid_store)?;
+        lock_compositor().compose_line(&mut line_buffer, &layers, message_grid, &request)
     })();
 
     let Some(submission) = submission else {
         return false;
     };
     let output_range = submission.start_col..submission.end_col;
-    let Some(characters) = compositor.characters.get(output_range.clone()) else {
+    let Some(characters) = line_buffer.characters.get(output_range.clone()) else {
         return false;
     };
-    let Some(attributes) = compositor.attributes.get(output_range) else {
+    let Some(attributes) = line_buffer.attributes.get(output_range) else {
         return false;
     };
     let (Ok(start_column), Ok(end_column)) = (
