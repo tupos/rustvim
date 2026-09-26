@@ -239,20 +239,18 @@ pub(in crate::ui_compositor) fn place_grid_in_registered_layers(
     target: CompositorGridPlacementTarget,
     current_window_layer: Option<usize>,
     request: CompositorGridPlacementRequest,
-    should_draw: bool,
     mut recompose_area: impl FnMut(CompositorRecomposeArea) -> bool,
 ) -> Option<bool> {
-    let plan = {
+    let preparation = {
         let mut grid_store = grid_store;
         let previous_registry = grid_store.registry.prefix(target.layer_index)?;
         let mut registry = grid_store.registry.clone();
-        let plan = prepare_grid_placement(
+        let preparation = lock_compositor().prepare_grid_placement(
             &mut registry,
             &mut grid_store,
             target,
             current_window_layer,
             request,
-            should_draw,
         )?;
 
         if !target.was_registered {
@@ -260,32 +258,32 @@ pub(in crate::ui_compositor) fn place_grid_in_registered_layers(
             let replacement_state = grid_store.ffi_state()?;
             replace_compositor_layer_state(&previous_registry, replacement_state)?;
         }
-        plan
+        preparation
     };
 
     let mut exposed_areas_composed = true;
-    for area in plan.exposed_areas.iter().cloned() {
+    for area in preparation.plan.exposed_areas.iter().cloned() {
         if !recompose_area(area) {
             exposed_areas_composed = false;
             break;
         }
     }
 
-    if should_draw && target.was_registered {
+    if let Some(completion) = preparation.deferred_completion {
         let mut grid_store = LegacyGridStore::try_take_registered()?;
-        finish_grid_placement(&mut grid_store, target.grid_id, plan.placement)?;
+        lock_compositor().finish_grid_placement(&mut grid_store, completion)?;
     }
 
     if !exposed_areas_composed {
         return None;
     }
-    if let Some(area) = plan.redraw_area
+    if let Some(area) = preparation.plan.redraw_area
         && !recompose_area(area)
     {
         return None;
     }
 
-    Some(plan.moved)
+    Some(preparation.plan.moved)
 }
 
 /// Places a new or existing grid in the registered compositor layer stack.
@@ -321,7 +319,6 @@ pub unsafe extern "C" fn ui_comp_put_grid(
         Ok(handle) => Some(GridId::new(handle)),
         Err(_) => panic!("current-window grid handle must fit GridId"),
     };
-    let should_draw = lock_compositor().should_draw();
 
     // SAFETY: The caller satisfies the candidate ownership requirements.
     let Some((grid_store, target)) =
@@ -344,7 +341,6 @@ pub unsafe extern "C" fn ui_comp_put_grid(
         target,
         current_window_layer,
         request,
-        should_draw,
         recompose_area,
     )
     .expect("grid placement must preserve compositor invariants")
@@ -443,7 +439,7 @@ pub(in crate::ui_compositor) fn adjust_registered_layer_order(
     };
     let previous_registry = grid_store.registry.clone();
     let mut registry = previous_registry.clone();
-    if !adjust_layer_order(&mut registry, &mut grid_store, grid_id, adjustment) {
+    if !lock_compositor().adjust_layer_order(&mut registry, &mut grid_store, grid_id, adjustment) {
         return false;
     }
     if registry == previous_registry {
@@ -480,11 +476,10 @@ pub unsafe extern "C" fn ui_comp_layers_adjust(grid: *mut CScreenGrid, raise: bo
 pub(in crate::ui_compositor) fn remove_registered_layer(
     mut grid_store: LegacyGridStore,
     layer_index: usize,
-    should_draw: bool,
 ) -> Option<CompositorLayerRemoval> {
     let previous_registry = grid_store.registry.clone();
     let mut registry = previous_registry.clone();
-    let removal = remove_layer(&mut registry, &mut grid_store, layer_index, should_draw)?;
+    let removal = lock_compositor().remove_layer(&mut registry, &mut grid_store, layer_index)?;
 
     grid_store.registry = registry;
     let remaining_state = grid_store.ffi_state()?;
@@ -510,13 +505,12 @@ pub unsafe extern "C" fn ui_comp_remove_grid(grid: *mut CScreenGrid) {
         grid.id()
     };
 
-    let should_draw = lock_compositor().should_draw();
     let grid_store =
         LegacyGridStore::try_take_registered().expect("compositor registry must be valid");
     let Some(layer_index) = grid_store.registry.index_of(grid_id) else {
         return;
     };
-    let removal = remove_registered_layer(grid_store, layer_index, should_draw)
+    let removal = remove_registered_layer(grid_store, layer_index)
         .expect("registered layer removal must preserve compositor invariants");
 
     if let Some(area) = removal.recompose_area {
@@ -550,12 +544,12 @@ pub extern "C" fn ui_comp_find_grid_at_coord(
     let Some(grid_store) = LegacyGridStore::try_take_registered() else {
         return std::ptr::null_mut();
     };
-    let grid_id = {
-        let Some(layers) = grid_store.registry.layer_stack(&grid_store) else {
-            return std::ptr::null_mut();
-        };
-        layers.topmost_grid_at(CompositorPoint { row, column }, hit_test)
-    };
+    let grid_id = lock_compositor().grid_at(
+        &grid_store.registry,
+        &grid_store,
+        CompositorPoint { row, column },
+        hit_test,
+    );
     let Some(cgrid) = grid_id.and_then(|grid_id| grid_store.cgrid_by_id(grid_id)) else {
         return std::ptr::null_mut();
     };
@@ -630,12 +624,11 @@ pub(in crate::ui_compositor) fn cursor_is_covered_by_registered_layers(
     minimum_z_index_gap: u32,
 ) -> Option<bool> {
     let grid_store = LegacyGridStore::try_take_registered()?;
-    cursor_is_covered(
+    lock_compositor().is_cursor_covered(
         &grid_store.registry,
         &grid_store,
         current_grid,
-        row,
-        column,
+        CompositorPoint { row, column },
         minimum_z_index_gap,
     )
 }
@@ -654,9 +647,6 @@ pub unsafe extern "C" fn ui_comp_cursor_is_covered_by_higher_layer(
     column: libc::c_int,
     minimum_z_index_gap: libc::c_int,
 ) -> bool {
-    if !lock_compositor().should_draw() {
-        return false;
-    }
     let Some(current_grid) = NonNull::new(current_grid) else {
         return false;
     };

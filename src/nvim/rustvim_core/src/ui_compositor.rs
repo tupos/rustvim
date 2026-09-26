@@ -307,6 +307,20 @@ struct CompositorGridPlacementPlan {
     redraw_area: Option<CompositorRecomposeArea>,
 }
 
+/// Placement work prepared while the compositor and grids are borrowed.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CompositorGridPlacementPreparation {
+    plan: CompositorGridPlacementPlan,
+    deferred_completion: Option<CompositorGridPlacementCompletion>,
+}
+
+/// An existing-grid placement deferred until exposed areas are recomposed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CompositorGridPlacementCompletion {
+    grid_id: GridId,
+    placement: CompositorGridPlacement,
+}
+
 /// One placement target temporarily owned with the registered grids.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct CompositorGridPlacementTarget {
@@ -657,6 +671,166 @@ impl Compositor {
         let should_draw = self.should_draw();
         self.message
             .update_position(message_grid, default_grid, request, should_draw)
+    }
+
+    /// Prepares a new or existing grid placement without publishing external
+    /// state.
+    fn prepare_grid_placement(
+        &self,
+        registry: &mut CompositorLayerRegistry,
+        grids: &mut impl GridAccess,
+        target: CompositorGridPlacementTarget,
+        current_window_layer: Option<usize>,
+        request: CompositorGridPlacementRequest,
+    ) -> Option<CompositorGridPlacementPreparation> {
+        let should_draw = self.should_draw();
+        if target.was_registered {
+            if target.layer_index == 0 {
+                return None;
+            }
+            let plan = {
+                let layers = registry.layer_stack(grids)?;
+                let layer = layers.layer(target.layer_index)?;
+                layer.try_plan_placement(request.placement, request.valid, should_draw)?
+            };
+
+            let grid = grids.grid_mut(target.grid_id)?;
+            grid.mark_compositor_index_for_update();
+            let deferred_completion = if should_draw {
+                grid.set_compositor_disabled(true);
+                Some(CompositorGridPlacementCompletion {
+                    grid_id: target.grid_id,
+                    placement: request.placement,
+                })
+            } else {
+                request.placement.apply_to(grid);
+                None
+            };
+            return Some(CompositorGridPlacementPreparation {
+                plan,
+                deferred_completion,
+            });
+        }
+
+        if target.layer_index.checked_add(1)? != registry.len() {
+            return None;
+        }
+        let (insertion_index, plan) = {
+            let grid = grids.grid(target.grid_id)?;
+            let layers = registry.layer_stack_prefix(grids, target.layer_index)?;
+            let insertion_index = layers.plan_layer_insertion(
+                grid.z_index(),
+                current_window_layer,
+                request.on_top,
+            )?;
+            let plan = CompositorGridPlacementPlan::try_for_new_grid(
+                grid,
+                request.placement,
+                request.valid,
+                should_draw,
+            )?;
+            (insertion_index, plan)
+        };
+
+        registry.place_appended_layer(grids, insertion_index, request.placement)?;
+        Some(CompositorGridPlacementPreparation {
+            plan,
+            deferred_completion: None,
+        })
+    }
+
+    /// Completes an existing-grid placement after exposed areas were
+    /// recomposed.
+    fn finish_grid_placement(
+        &self,
+        grids: &mut impl GridAccess,
+        completion: CompositorGridPlacementCompletion,
+    ) -> Option<()> {
+        let grid = grids.grid_mut(completion.grid_id)?;
+        grid.set_compositor_disabled(false);
+        completion.placement.apply_to(grid);
+        Some(())
+    }
+
+    /// Adjusts a grid's layer position after its z-index changes.
+    ///
+    /// A grid that is not currently registered is accepted as a no-op,
+    /// matching the previous C-side `comp_index == 0` check.
+    fn adjust_layer_order(
+        &self,
+        registry: &mut CompositorLayerRegistry,
+        grids: &mut impl GridAccess,
+        grid_id: GridId,
+        adjustment: CompositorLayerAdjustment,
+    ) -> bool {
+        let Some(layer_index) = registry.index_of(grid_id) else {
+            return true;
+        };
+        let movement = {
+            let Some(layers) = registry.layer_stack(grids) else {
+                return false;
+            };
+            let Some(movement) = layers.plan_layer_adjustment(layer_index, adjustment) else {
+                return false;
+            };
+            movement
+        };
+
+        registry.move_layer(grids, movement).is_some()
+    }
+
+    /// Removes one non-default grid from the compositor layer stack.
+    fn remove_layer(
+        &self,
+        registry: &mut CompositorLayerRegistry,
+        grids: &mut impl GridAccess,
+        layer_index: usize,
+    ) -> Option<CompositorLayerRemoval> {
+        if layer_index == 0 {
+            return None;
+        }
+
+        let recompose_area = if self.should_draw() {
+            Some(CompositorRecomposeArea::try_from_grid(
+                grids.grid(registry.layer_id(layer_index)?)?,
+            )?)
+        } else {
+            None
+        };
+
+        registry.remove_layer(grids, layer_index)?;
+
+        Some(CompositorLayerRemoval { recompose_area })
+    }
+
+    /// Finds the topmost non-default compositor grid at one screen point.
+    fn grid_at(
+        &self,
+        registry: &CompositorLayerRegistry,
+        grids: &impl GridAccess,
+        point: CompositorPoint,
+        hit_test: LayerHitTest,
+    ) -> Option<GridId> {
+        registry
+            .layer_stack(grids)?
+            .topmost_grid_at(point, hit_test)
+    }
+
+    /// Reports whether a sufficiently higher layer covers a grid's cursor.
+    fn is_cursor_covered(
+        &self,
+        registry: &CompositorLayerRegistry,
+        grids: &impl GridAccess,
+        current_grid: CompositorCursorGrid,
+        point: CompositorPoint,
+        minimum_z_index_gap: u32,
+    ) -> Option<bool> {
+        if !self.should_draw() {
+            return Some(false);
+        }
+
+        let layers = registry.layer_stack(grids)?;
+        Some(layers.is_cursor_covered_by_higher_layer(point, current_grid, minimum_z_index_gap))
     }
 
     /// Returns the active message-separator character for one screen row.
@@ -2331,68 +2505,6 @@ fn recompose_area_for_grid(
     CompositorRecomposeArea::try_from_grid(grids.grid(grid_id)?)
 }
 
-/// Prepares a new or existing grid placement without publishing external state.
-fn prepare_grid_placement(
-    registry: &mut CompositorLayerRegistry,
-    grids: &mut impl GridAccess,
-    target: CompositorGridPlacementTarget,
-    current_window_layer: Option<usize>,
-    request: CompositorGridPlacementRequest,
-    should_draw: bool,
-) -> Option<CompositorGridPlacementPlan> {
-    if target.was_registered {
-        if target.layer_index == 0 {
-            return None;
-        }
-        let plan = {
-            let layers = registry.layer_stack(grids)?;
-            let layer = layers.layer(target.layer_index)?;
-            layer.try_plan_placement(request.placement, request.valid, should_draw)?
-        };
-
-        let grid = grids.grid_mut(target.grid_id)?;
-        grid.mark_compositor_index_for_update();
-        if should_draw {
-            grid.set_compositor_disabled(true);
-        } else {
-            request.placement.apply_to(grid);
-        }
-        return Some(plan);
-    }
-
-    if target.layer_index.checked_add(1)? != registry.len() {
-        return None;
-    }
-    let (insertion_index, plan) = {
-        let grid = grids.grid(target.grid_id)?;
-        let layers = registry.layer_stack_prefix(grids, target.layer_index)?;
-        let insertion_index =
-            layers.plan_layer_insertion(grid.z_index(), current_window_layer, request.on_top)?;
-        let plan = CompositorGridPlacementPlan::try_for_new_grid(
-            grid,
-            request.placement,
-            request.valid,
-            should_draw,
-        )?;
-        (insertion_index, plan)
-    };
-
-    registry.place_appended_layer(grids, insertion_index, request.placement)?;
-    Some(plan)
-}
-
-/// Completes a temporarily disabled existing-grid placement.
-fn finish_grid_placement(
-    grids: &mut impl GridAccess,
-    grid_id: GridId,
-    placement: CompositorGridPlacement,
-) -> Option<()> {
-    let grid = grids.grid_mut(grid_id)?;
-    grid.set_compositor_disabled(false);
-    placement.apply_to(grid);
-    Some(())
-}
-
 /// Applies one validated cursor request to safe compositor state.
 fn apply_cursor_update(
     registry: &mut CompositorLayerRegistry,
@@ -2422,71 +2534,6 @@ fn apply_cursor_update(
         plan,
         recompose_areas,
     })
-}
-
-/// Adjusts a grid's layer position after its z-index changes.
-///
-/// A grid that is not currently registered is accepted as a no-op, matching
-/// the previous C-side `comp_index == 0` check.
-fn adjust_layer_order(
-    registry: &mut CompositorLayerRegistry,
-    grids: &mut impl GridAccess,
-    grid_id: GridId,
-    adjustment: CompositorLayerAdjustment,
-) -> bool {
-    let Some(layer_index) = registry.index_of(grid_id) else {
-        return true;
-    };
-    let movement = {
-        let Some(layers) = registry.layer_stack(grids) else {
-            return false;
-        };
-        let Some(movement) = layers.plan_layer_adjustment(layer_index, adjustment) else {
-            return false;
-        };
-        movement
-    };
-
-    registry.move_layer(grids, movement).is_some()
-}
-
-/// Removes one grid from safe compositor state.
-fn remove_layer(
-    registry: &mut CompositorLayerRegistry,
-    grids: &mut impl GridAccess,
-    layer_index: usize,
-    should_draw: bool,
-) -> Option<CompositorLayerRemoval> {
-    if layer_index == 0 {
-        return None;
-    }
-
-    let recompose_area = if should_draw {
-        Some(CompositorRecomposeArea::try_from_grid(
-            grids.grid(registry.layer_id(layer_index)?)?,
-        )?)
-    } else {
-        None
-    };
-
-    registry.remove_layer(grids, layer_index)?;
-
-    Some(CompositorLayerRemoval { recompose_area })
-}
-
-/// Checks cursor coverage using one safe compositor layer registry.
-fn cursor_is_covered(
-    registry: &CompositorLayerRegistry,
-    grids: &impl GridAccess,
-    current_grid: CompositorCursorGrid,
-    row: i32,
-    column: i32,
-    minimum_z_index_gap: u32,
-) -> Option<bool> {
-    let layers = registry.layer_stack(grids)?;
-    let point = CompositorPoint { row, column };
-
-    Some(layers.is_cursor_covered_by_higher_layer(point, current_grid, minimum_z_index_gap))
 }
 
 /// Emits one clear raw-line event used for compositor visualization.
@@ -2582,6 +2629,27 @@ mod tests {
         drop(current_state);
 
         TestCompositorLayerRegistry { _lock: test_lock }
+    }
+
+    /// Resets and attaches the process-global compositor for a serialized
+    /// registry test.
+    struct TestAttachedCompositor;
+
+    impl Drop for TestAttachedCompositor {
+        fn drop(&mut self) {
+            *lock_compositor() = Compositor::new();
+        }
+    }
+
+    /// Enables drawing for a test already protected by the registry test lock.
+    fn attach_test_compositor() -> TestAttachedCompositor {
+        {
+            let mut compositor = lock_compositor();
+            *compositor = Compositor::new();
+            compositor.attach();
+        }
+
+        TestAttachedCompositor
     }
 
     fn grid_with_row(characters: &[VimSCharT], attributes: &[VimSAttrT]) -> ScreenGrid {
@@ -3358,6 +3426,7 @@ mod tests {
 
         // SAFETY: The array contains distinct, exclusively accessible grids.
         let _registry = unsafe { register_test_compositor_layers(&cgrids) };
+        let _compositor = attach_test_compositor();
 
         // SAFETY: The candidate is already registered.
         let (grid_store, target) = unsafe {
@@ -3376,7 +3445,6 @@ mod tests {
                     valid: true,
                     on_top: false,
                 },
-                true,
                 |area| {
                     recomposed_areas.push(area);
                     true
@@ -3444,6 +3512,7 @@ mod tests {
 
         // SAFETY: The array contains distinct, exclusively accessible grids.
         let _registry = unsafe { register_test_compositor_layers(&cgrids) };
+        let _compositor = attach_test_compositor();
 
         // SAFETY: The candidate is distinct from every registered grid and is
         // exclusively accessible.
@@ -3464,7 +3533,6 @@ mod tests {
                     valid: true,
                     on_top: false,
                 },
-                true,
                 |area| {
                     recomposed_areas.push(area);
                     true
@@ -3726,11 +3794,12 @@ mod tests {
 
         // SAFETY: The array contains distinct, exclusively accessible grids.
         let _registry = unsafe { register_test_compositor_layers(&registry_cgrids) };
+        let _compositor = attach_test_compositor();
 
         let grid_store = LegacyGridStore::try_take_registered().unwrap();
         let layer_index = grid_store.registry.index_of(removed_grid_id).unwrap();
         assert_eq!(
-            remove_registered_layer(grid_store, layer_index, true),
+            remove_registered_layer(grid_store, layer_index),
             Some(CompositorLayerRemoval {
                 recompose_area: Some(CompositorRecomposeArea {
                     rows: 1..3,
@@ -3983,6 +4052,7 @@ mod tests {
             // SAFETY: The array contains distinct, exclusively accessible
             // grids for the duration of the coverage queries.
             let _registry = unsafe { register_test_compositor_layers(&cgrids) };
+            let _compositor = attach_test_compositor();
 
             assert_eq!(
                 cursor_is_covered_by_registered_layers(current_cursor_grid, 0, 0, 0),
