@@ -88,11 +88,7 @@ impl CompositorRuntime {
             let Some(grid_store) = LegacyGridStore::try_take_registered() else {
                 return;
             };
-            lock_compositor().clip_recompose_area(
-                &grid_store.registry,
-                &grid_store,
-                requested_area.clone(),
-            )
+            lock_compositor().clip_recompose_area(&grid_store, requested_area.clone())
         };
         let Ok(area) = area else {
             return;
