@@ -598,6 +598,37 @@ impl Compositor {
             message: MessageCompositorState::new(),
         }
     }
+
+    /// Records one newly attached composed UI.
+    fn attach(&mut self) {
+        self.display.register_ui();
+    }
+
+    /// Removes one composed UI and reports whether none remain.
+    fn detach(&mut self) -> Option<bool> {
+        self.display.unregister_ui()
+    }
+
+    /// Updates screen validity and returns its previous value.
+    ///
+    /// Invalidating the composed screen also hides the message separator.
+    fn set_screen_valid(&mut self, valid: bool) -> bool {
+        let previous = self.display.set_screen_valid(valid);
+        if !valid {
+            self.message.hide_separator();
+        }
+        previous
+    }
+
+    /// Reports whether composed output may currently be emitted.
+    fn should_draw(&self) -> bool {
+        self.display.should_draw()
+    }
+
+    /// Hides the message separator while preserving its configured character.
+    fn hide_message_separator(&mut self) {
+        self.message.hide_separator();
+    }
 }
 
 /// Validated grid-local inputs for planning one compositor scroll.
@@ -2626,24 +2657,26 @@ mod tests {
     }
 
     #[test]
-    fn compositor_draw_state_requires_an_attached_ui_and_valid_screen() {
-        let mut state = CompositorDrawState::new();
-        assert!(!state.should_draw());
+    fn compositor_lifecycle_requires_an_attached_ui_and_valid_screen() {
+        let mut compositor = Compositor::new();
+        assert!(!compositor.should_draw());
 
-        state.register_ui();
-        state.register_ui();
-        assert!(state.should_draw());
+        compositor.attach();
+        compositor.attach();
+        assert!(compositor.should_draw());
 
-        assert!(state.set_screen_valid(false));
-        assert!(!state.should_draw());
-        assert!(!state.set_screen_valid(true));
-        assert!(state.should_draw());
+        compositor.message.separator_row = Some(3);
+        assert!(compositor.set_screen_valid(false));
+        assert!(!compositor.should_draw());
+        assert_eq!(compositor.message.separator_row, None);
+        assert!(!compositor.set_screen_valid(true));
+        assert!(compositor.should_draw());
 
-        assert_eq!(state.unregister_ui(), Some(false));
-        assert!(state.should_draw());
-        assert_eq!(state.unregister_ui(), Some(true));
-        assert!(!state.should_draw());
-        assert_eq!(state.unregister_ui(), None);
+        assert_eq!(compositor.detach(), Some(false));
+        assert!(compositor.should_draw());
+        assert_eq!(compositor.detach(), Some(true));
+        assert!(!compositor.should_draw());
+        assert_eq!(compositor.detach(), None);
     }
 
     #[test]

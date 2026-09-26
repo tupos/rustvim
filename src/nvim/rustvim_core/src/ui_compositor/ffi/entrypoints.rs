@@ -45,15 +45,14 @@ pub extern "C" fn ui_comp_syn_init() {
 /// Records one newly attached composed UI.
 #[unsafe(no_mangle)]
 pub extern "C" fn ui_comp_attach() {
-    lock_compositor().display.register_ui();
+    lock_compositor().attach();
 }
 
 /// Removes one composed UI and releases the buffer after the final detach.
 #[unsafe(no_mangle)]
 pub extern "C" fn ui_comp_detach() {
     let detached_last = lock_compositor()
-        .display
-        .unregister_ui()
+        .detach()
         .expect("cannot unregister a composed UI when none are attached");
     if detached_last {
         assert!(lock_compositor_buffer_pool().release());
@@ -65,12 +64,7 @@ pub extern "C" fn ui_comp_detach() {
 /// Invalidating the composed screen also hides the message separator.
 #[unsafe(no_mangle)]
 pub extern "C" fn ui_comp_set_screen_valid(valid: bool) -> bool {
-    let mut compositor = lock_compositor();
-    let previous = compositor.display.set_screen_valid(valid);
-    if !valid {
-        compositor.message.hide_separator();
-    }
-    previous
+    lock_compositor().set_screen_valid(valid)
 }
 
 /// Handles one generated grid-resize event.
@@ -100,7 +94,7 @@ pub extern "C" fn ui_comp_grid_resize(grid: Integer, width: Integer, height: Int
 /// Hides the message separator after the composed screen is invalidated.
 #[unsafe(no_mangle)]
 pub extern "C" fn ui_comp_hide_message_separator() {
-    lock_compositor().message.hide_separator();
+    lock_compositor().hide_message_separator();
 }
 
 /// Updates message-grid state and executes its scrolling and recomposition.
@@ -133,7 +127,7 @@ unsafe fn update_message_position(
         let mut message_grid = unsafe { ScreenGridGuard::take(message_grid) };
         let default_grid = unsafe { ScreenGridGuard::take(default_grid) };
         let mut compositor = lock_compositor();
-        let should_draw = compositor.display.should_draw();
+        let should_draw = compositor.should_draw();
         compositor
             .message
             .update_position(&mut message_grid, &default_grid, request, should_draw)
@@ -223,7 +217,7 @@ pub unsafe extern "C" fn ui_comp_compose_grid(grid: *mut CScreenGrid) {
         grid.id()
     };
 
-    if !lock_compositor().display.should_draw() {
+    if !lock_compositor().should_draw() {
         return;
     }
     let runtime = compositor_runtime_snapshot().expect("compositor runtime must be valid");
@@ -330,7 +324,7 @@ pub unsafe extern "C" fn ui_comp_put_grid(
         Ok(handle) => Some(GridId::new(handle)),
         Err(_) => panic!("current-window grid handle must fit GridId"),
     };
-    let should_draw = lock_compositor().display.should_draw();
+    let should_draw = lock_compositor().should_draw();
 
     // SAFETY: The caller satisfies the candidate ownership requirements.
     let Some((grid_store, target)) =
@@ -519,7 +513,7 @@ pub unsafe extern "C" fn ui_comp_remove_grid(grid: *mut CScreenGrid) {
         grid.id()
     };
 
-    let should_draw = lock_compositor().display.should_draw();
+    let should_draw = lock_compositor().should_draw();
     let grid_store =
         LegacyGridStore::try_take_registered().expect("compositor registry must be valid");
     let Some(layer_index) = grid_store.registry.index_of(grid_id) else {
@@ -663,7 +657,7 @@ pub unsafe extern "C" fn ui_comp_cursor_is_covered_by_higher_layer(
     column: libc::c_int,
     minimum_z_index_gap: libc::c_int,
 ) -> bool {
-    if !lock_compositor().display.should_draw() {
+    if !lock_compositor().should_draw() {
         return false;
     }
     let Some(current_grid) = NonNull::new(current_grid) else {
@@ -884,7 +878,7 @@ unsafe fn process_raw_line(
     attributes: *const VimSAttrT,
     output: &mut impl CompositorOutput,
 ) -> bool {
-    if !lock_compositor().display.should_draw() {
+    if !lock_compositor().should_draw() {
         return true;
     }
     let Some(runtime) = compositor_runtime_snapshot() else {
@@ -1079,7 +1073,7 @@ unsafe fn process_scroll(
     request: CompositorScrollRequest,
     output: &mut impl CompositorOutput,
 ) -> bool {
-    if !lock_compositor().display.should_draw() {
+    if !lock_compositor().should_draw() {
         return true;
     }
     let Some(runtime) = compositor_runtime_snapshot() else {
