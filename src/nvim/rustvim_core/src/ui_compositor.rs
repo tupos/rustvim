@@ -865,6 +865,33 @@ impl Compositor {
         })
     }
 
+    /// Selects the complete safe operation for one raw-line event.
+    fn process_raw_line(
+        &self,
+        registry: &CompositorLayerRegistry,
+        grids: &impl GridAccess,
+        grid_id: GridId,
+        message_layer_index: Option<usize>,
+        request: CompositorRawLineRequest,
+    ) -> Option<CompositorRawLineOperation> {
+        if !self.should_draw() {
+            return Some(CompositorRawLineOperation::Ignore);
+        }
+
+        let layers = registry.layer_stack(grids)?;
+        let Some(current_layer_index) = layers.layer_index_with_id(grid_id) else {
+            return Some(CompositorRawLineOperation::Ignore);
+        };
+        let plan = layers.plan_raw_line(
+            current_layer_index,
+            message_layer_index,
+            self.message.was_scrolled,
+            request,
+        )?;
+
+        Some(CompositorRawLineOperation::Process(plan))
+    }
+
     /// Returns the active message-separator character for one screen row.
     fn message_separator_character_at(&self, row: i32) -> Option<VimSCharT> {
         self.message.separator_character_at(row)
@@ -1026,6 +1053,13 @@ struct CompositorRawLinePlan {
     requested_clear_column: i32,
     flags: i32,
     action: CompositorRawLineAction,
+}
+
+/// Safe raw-line work selected before any external output is emitted.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum CompositorRawLineOperation {
+    Ignore,
+    Process(CompositorRawLinePlan),
 }
 
 /// Output range prepared for one raw-line UI event.

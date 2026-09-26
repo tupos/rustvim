@@ -863,35 +863,27 @@ unsafe fn process_raw_line(
     attributes: *const VimSAttrT,
     output: &mut impl CompositorOutput,
 ) -> bool {
-    if !lock_compositor().should_draw() {
-        return true;
-    }
-    let Some(runtime) = compositor_runtime_snapshot() else {
-        return false;
-    };
-
-    let message_was_scrolled = lock_compositor().message_was_scrolled();
-    let plan = {
+    let operation = {
         let Some(grid_store) = LegacyGridStore::try_take_registered() else {
             return false;
         };
         let message_layer_index = grid_store.index_of(message_grid);
-        let Some(layers) = grid_store.registry.layer_stack(&grid_store) else {
-            return false;
-        };
-        let Some(current_layer_index) = layers.layer_index_with_id(grid_id) else {
-            return true;
-        };
-
-        let Some(plan) = layers.plan_raw_line(
-            current_layer_index,
+        let Some(operation) = lock_compositor().process_raw_line(
+            &grid_store.registry,
+            &grid_store,
+            grid_id,
             message_layer_index,
-            message_was_scrolled,
             request,
         ) else {
             return false;
         };
-        plan
+        operation
+    };
+    let CompositorRawLineOperation::Process(plan) = operation else {
+        return true;
+    };
+    let Some(runtime) = compositor_runtime_snapshot() else {
+        return false;
     };
 
     if plan.clear_column != plan.requested_clear_column {
