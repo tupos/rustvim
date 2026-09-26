@@ -353,7 +353,7 @@ pub(in crate::ui_compositor) fn apply_cursor_update_to_registered_grids(
     let mut grid_store = LegacyGridStore::try_take_registered()?;
     let previous_registry = grid_store.registry.clone();
     let mut registry = previous_registry.clone();
-    let update = apply_cursor_update(&mut registry, &mut grid_store, request)?;
+    let update = lock_compositor().move_cursor(&mut registry, &mut grid_store, request)?;
 
     if registry != previous_registry {
         replace_compositor_layer_registry(&previous_registry, registry.clone())?;

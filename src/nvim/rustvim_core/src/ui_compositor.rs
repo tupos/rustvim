@@ -833,6 +833,38 @@ impl Compositor {
         Some(layers.is_cursor_covered_by_higher_layer(point, current_grid, minimum_z_index_gap))
     }
 
+    /// Moves the composed cursor and applies any required layer raise.
+    fn move_cursor(
+        &self,
+        registry: &mut CompositorLayerRegistry,
+        grids: &mut impl GridAccess,
+        request: CompositorCursorRequest,
+    ) -> Option<CompositorCursorUpdate> {
+        let action = {
+            let layers = registry.layer_stack(grids)?;
+            layers.plan_cursor(request)?
+        };
+        let CompositorCursorAction::Update(plan) = action else {
+            return Some(CompositorCursorUpdate::Ignore);
+        };
+
+        let recompose_areas = if let Some(target_index) = plan.raise_to {
+            let raise_plan = {
+                let layers = registry.layer_stack(grids)?;
+                layers.plan_layer_raise(plan.layer_index, target_index)?
+            };
+            registry.move_layer(grids, raise_plan.movement)?;
+            raise_plan.recompose_areas
+        } else {
+            Vec::new()
+        };
+
+        Some(CompositorCursorUpdate::Apply {
+            plan,
+            recompose_areas,
+        })
+    }
+
     /// Returns the active message-separator character for one screen row.
     fn message_separator_character_at(&self, row: i32) -> Option<VimSCharT> {
         self.message.separator_character_at(row)
@@ -2503,37 +2535,6 @@ fn recompose_area_for_grid(
 ) -> Option<CompositorRecomposeArea> {
     registry.index_of(grid_id)?;
     CompositorRecomposeArea::try_from_grid(grids.grid(grid_id)?)
-}
-
-/// Applies one validated cursor request to safe compositor state.
-fn apply_cursor_update(
-    registry: &mut CompositorLayerRegistry,
-    grids: &mut impl GridAccess,
-    request: CompositorCursorRequest,
-) -> Option<CompositorCursorUpdate> {
-    let action = {
-        let layers = registry.layer_stack(grids)?;
-        layers.plan_cursor(request)?
-    };
-    let CompositorCursorAction::Update(plan) = action else {
-        return Some(CompositorCursorUpdate::Ignore);
-    };
-
-    let recompose_areas = if let Some(target_index) = plan.raise_to {
-        let raise_plan = {
-            let layers = registry.layer_stack(grids)?;
-            layers.plan_layer_raise(plan.layer_index, target_index)?
-        };
-        registry.move_layer(grids, raise_plan.movement)?;
-        raise_plan.recompose_areas
-    } else {
-        Vec::new()
-    };
-
-    Some(CompositorCursorUpdate::Apply {
-        plan,
-        recompose_areas,
-    })
 }
 
 /// Emits one clear raw-line event used for compositor visualization.
