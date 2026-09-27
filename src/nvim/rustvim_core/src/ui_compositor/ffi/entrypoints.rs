@@ -715,7 +715,7 @@ unsafe fn compose_line_from_registered_grids(
         i32::try_from(submission.start_col).map_err(|_| CompositorError::InvalidGeometry)?;
     let end_column =
         i32::try_from(submission.end_col).map_err(|_| CompositorError::InvalidGeometry)?;
-    let command = RawLineCommand::try_new(
+    let command = BorrowedRawLineCommand::try_new(
         request.row,
         start_column..end_column,
         end_column,
@@ -725,7 +725,7 @@ unsafe fn compose_line_from_registered_grids(
         attributes,
     )
     .ok_or(CompositorError::InvalidLineState)?;
-    output.emit(UiCommand::RawLine(command));
+    output.emit_raw_line(command);
     Ok(())
 }
 
@@ -908,7 +908,7 @@ unsafe fn process_raw_line(
             );
             debug_assert!(attributes.iter().all(|attribute| *attribute >= 0));
 
-            let command = RawLineCommand::try_new(
+            let command = BorrowedRawLineCommand::try_new(
                 plan.row,
                 plan.columns,
                 plan.clear_column,
@@ -918,7 +918,7 @@ unsafe fn process_raw_line(
                 attributes,
             )
             .ok_or(CompositorError::InvalidLineState)?;
-            output.emit(UiCommand::RawLine(command));
+            output.emit_raw_line(command);
             Ok(())
         }
     }

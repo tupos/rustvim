@@ -17,7 +17,10 @@ use crate::{
     },
     ui::{
         LineFlags,
-        output::{RawLineCommand, UiCommand, UiOutput},
+        output::{
+            BorrowedRawLineCommand, CellBuffer, CellBufferLease, CellBufferPool, UiCommand,
+            UiOutput,
+        },
     },
 };
 #[cfg(test)]
@@ -1047,7 +1050,7 @@ impl Compositor {
     /// Composes one complete output line from safely borrowed grids.
     fn compose_line(
         &self,
-        buffer: &mut CompositorBuffer,
+        buffer: &mut CellBuffer,
         grids: &impl GridAccess,
         message_grid: Option<&ScreenGrid>,
         request: &CompositorLineInput,
@@ -2560,38 +2563,8 @@ struct CompositorLineRequest<'grid> {
     abort_on_invalid: bool,
 }
 
-/// Rust-owned storage and state for compositor line construction.
-///
-/// Complete line requests select validated Rust grid segments and copy or
-/// blend them through `CompositorSegment`.
-struct CompositorBuffer {
-    characters: Vec<VimSCharT>,
-    attributes: Vec<VimSAttrT>,
-}
-
-impl CompositorBuffer {
-    /// Creates an empty compositor buffer.
-    const fn new() -> Self {
-        Self {
-            characters: Vec::new(),
-            attributes: Vec::new(),
-        }
-    }
-
-    /// Reallocates the buffer for a screen of `width` columns.
-    fn resize(&mut self, width: usize) {
-        if self.characters.len() != width {
-            self.characters = vec![schar_from_ascii(' '); width];
-            self.attributes = vec![0; width];
-        }
-    }
-
-    /// Releases all compositor storage.
-    fn release(&mut self) {
-        self.characters = Vec::new();
-        self.attributes = Vec::new();
-    }
-
+/// Compositor-specific operations on reusable cell storage.
+impl CellBuffer {
     /// Selects and composes every layer segment for one complete line.
     fn try_compose_line(
         &mut self,
@@ -2893,119 +2866,6 @@ impl CompositorBuffer {
     }
 }
 
-/// Reusable compositor storage that can be checked out without retaining its
-/// mutex lock.
-///
-/// Ordinarily the pool retains one buffer. If composition is reentered while
-/// that buffer is leased, another buffer is allocated temporarily.
-struct CompositorBufferPool {
-    width: usize,
-    available_buffer: Option<CompositorBuffer>,
-}
-
-impl CompositorBufferPool {
-    /// Creates a pool containing one empty reusable buffer.
-    const fn new() -> Self {
-        Self {
-            width: 0,
-            available_buffer: Some(CompositorBuffer::new()),
-        }
-    }
-
-    /// Returns the configured composed-screen width.
-    fn width(&self) -> usize {
-        self.width
-    }
-
-    /// Reconfigures available storage for a new composed-screen width.
-    fn resize(&mut self, width: usize) {
-        self.width = width;
-        if let Some(buffer) = self.available_buffer.as_mut() {
-            buffer.resize(width);
-        }
-    }
-
-    /// Releases all retained compositor storage.
-    fn release(&mut self) {
-        self.width = 0;
-        self.available_buffer = Some(CompositorBuffer::new());
-    }
-
-    /// Checks out reusable storage or allocates storage for reentrant work.
-    fn take_buffer(&mut self) -> CompositorBuffer {
-        let mut buffer = self
-            .available_buffer
-            .take()
-            .unwrap_or_else(CompositorBuffer::new);
-        buffer.resize(self.width);
-        buffer
-    }
-
-    /// Retains one returned buffer when it still has the configured width.
-    fn return_buffer(&mut self, buffer: CompositorBuffer) {
-        let has_current_width =
-            buffer.characters.len() == self.width && buffer.attributes.len() == self.width;
-        if self.available_buffer.is_none() && has_current_width {
-            self.available_buffer = Some(buffer);
-        }
-    }
-}
-
-/// Exclusive ownership of compositor storage without retaining the pool lock.
-///
-/// Dropping the lease returns compatible storage to the pool. If a synchronous
-/// callback resized the composed screen, the old-width storage is discarded.
-#[must_use = "dropping the lease returns its compositor buffer to the pool"]
-struct CompositorBufferLease<'pool> {
-    pool: &'pool Mutex<CompositorBufferPool>,
-    buffer: Option<CompositorBuffer>,
-}
-
-impl<'pool> CompositorBufferLease<'pool> {
-    /// Checks out one buffer while holding the pool lock only briefly.
-    fn acquire(pool: &'pool Mutex<CompositorBufferPool>) -> Self {
-        let buffer = pool
-            .try_lock()
-            .expect("compositor buffer pool is already borrowed")
-            .take_buffer();
-        Self {
-            pool,
-            buffer: Some(buffer),
-        }
-    }
-}
-
-impl std::ops::Deref for CompositorBufferLease<'_> {
-    type Target = CompositorBuffer;
-
-    fn deref(&self) -> &Self::Target {
-        self.buffer
-            .as_ref()
-            .expect("compositor buffer lease does not own a buffer")
-    }
-}
-
-impl std::ops::DerefMut for CompositorBufferLease<'_> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.buffer
-            .as_mut()
-            .expect("compositor buffer lease does not own a buffer")
-    }
-}
-
-impl Drop for CompositorBufferLease<'_> {
-    fn drop(&mut self) {
-        let buffer = self
-            .buffer
-            .take()
-            .expect("compositor buffer lease does not own a buffer");
-        self.pool
-            .try_lock()
-            .expect("compositor buffer pool is already borrowed")
-            .return_buffer(buffer);
-    }
-}
-
 static COMPOSITOR: Mutex<Compositor> = Mutex::new(Compositor::new());
 
 /// Acquires exclusive access to the safe process-global compositor state.
@@ -3015,19 +2875,18 @@ fn lock_compositor() -> MutexGuard<'static, Compositor> {
         .expect("compositor state is already borrowed")
 }
 
-static COMPOSITOR_BUFFER_POOL: Mutex<CompositorBufferPool> =
-    Mutex::new(CompositorBufferPool::new());
+static COMPOSITOR_BUFFER_POOL: Mutex<CellBufferPool> = Mutex::new(CellBufferPool::new());
 
 /// Acquires exclusive access to the process-global compositor buffer pool.
-fn lock_compositor_buffer_pool() -> MutexGuard<'static, CompositorBufferPool> {
+fn lock_compositor_buffer_pool() -> MutexGuard<'static, CellBufferPool> {
     COMPOSITOR_BUFFER_POOL
         .try_lock()
         .expect("compositor buffer pool is already borrowed")
 }
 
 /// Checks out compositor storage without retaining the pool mutex.
-fn acquire_compositor_buffer() -> CompositorBufferLease<'static> {
-    CompositorBufferLease::acquire(&COMPOSITOR_BUFFER_POOL)
+fn acquire_compositor_buffer() -> CellBufferLease<'static> {
+    CellBufferLease::acquire(&COMPOSITOR_BUFFER_POOL)
 }
 
 /// Emits one clear raw-line event used for compositor visualization.
@@ -3046,7 +2905,7 @@ fn emit_compositor_debug_line(
         return Err(CompositorError::InvalidLineState);
     }
 
-    let command = RawLineCommand::try_new(
+    let command = BorrowedRawLineCommand::try_new(
         row,
         columns.start..columns.start,
         columns.end,
@@ -3056,7 +2915,7 @@ fn emit_compositor_debug_line(
         &[],
     )
     .ok_or(CompositorError::InvalidLineState)?;
-    output.emit(UiCommand::RawLine(command));
+    output.emit_raw_line(command);
     Ok(())
 }
 
@@ -5096,41 +4955,41 @@ mod tests {
 
     #[test]
     fn compositor_buffer_pool_allows_reentrant_leases() {
-        let pool = Mutex::new(CompositorBufferPool::new());
+        let pool = Mutex::new(CellBufferPool::new());
         pool.try_lock().unwrap().resize(3);
 
         {
-            let first = CompositorBufferLease::acquire(&pool);
+            let first = CellBufferLease::acquire(&pool);
             assert_eq!(first.characters.len(), 3);
             assert_eq!(first.attributes.len(), 3);
 
             {
-                let second = CompositorBufferLease::acquire(&pool);
+                let second = CellBufferLease::acquire(&pool);
                 assert_eq!(second.characters.len(), 3);
                 assert_eq!(second.attributes.len(), 3);
             }
 
-            assert!(pool.try_lock().unwrap().available_buffer.is_some());
+            assert_eq!(pool.try_lock().unwrap().available_buffer_count(), 1);
         }
 
-        assert!(pool.try_lock().unwrap().available_buffer.is_some());
+        assert_eq!(pool.try_lock().unwrap().available_buffer_count(), 2);
     }
 
     #[test]
     fn compositor_buffer_pool_discards_old_width_storage() {
-        let pool = Mutex::new(CompositorBufferPool::new());
+        let pool = Mutex::new(CellBufferPool::new());
         pool.try_lock().unwrap().resize(2);
 
         {
-            let leased = CompositorBufferLease::acquire(&pool);
+            let leased = CellBufferLease::acquire(&pool);
             assert_eq!(leased.characters.len(), 2);
             assert_eq!(leased.attributes.len(), 2);
             pool.try_lock().unwrap().resize(4);
         }
 
-        assert!(pool.try_lock().unwrap().available_buffer.is_none());
+        assert_eq!(pool.try_lock().unwrap().available_buffer_count(), 0);
 
-        let resized = CompositorBufferLease::acquire(&pool);
+        let resized = CellBufferLease::acquire(&pool);
         assert_eq!(resized.characters.len(), 4);
         assert_eq!(resized.attributes.len(), 4);
     }
@@ -5142,7 +5001,7 @@ mod tests {
             .unwrap()
             .segment(0..2)
             .unwrap();
-        let mut compositor = CompositorBuffer::new();
+        let mut compositor = CellBuffer::new();
 
         compositor.resize(2);
         let mut line = compositor.prepare_line(0, 2, LineFlags::default()).unwrap();
@@ -5198,7 +5057,7 @@ mod tests {
                 compositor_layer(&disabled, 0, 1, 2, true),
             ],
         );
-        let mut compositor = CompositorBuffer::new();
+        let mut compositor = CellBuffer::new();
 
         compositor.resize(6);
         let submission = compositor
@@ -5244,7 +5103,7 @@ mod tests {
         );
         let message_grid = grid_with_row(&[schar_from_ascii('m'), schar_from_ascii('m')], &[4, 4]);
         let layers = compositor_layers(compositor_layer(&default_grid, 0, 3, 0, false), Vec::new());
-        let mut compositor = CompositorBuffer::new();
+        let mut compositor = CellBuffer::new();
 
         compositor.resize(3);
         let submission = compositor

@@ -3,7 +3,7 @@ use std::ffi::CString;
 use crate::{
     defines::Integer,
     grid::{ComposedGridSpace, VimSAttrT, VimSCharT},
-    ui::output::{UiCommand, UiOutput},
+    ui::output::{RawLineCells, RawLineCommand, UiCommand, UiOutput},
 };
 
 unsafe extern "C" {
@@ -38,7 +38,7 @@ unsafe extern "C" {
 pub(in crate::ui_compositor) struct NvimOutput;
 
 impl UiOutput<ComposedGridSpace> for NvimOutput {
-    fn emit(&mut self, command: UiCommand<'_, ComposedGridSpace>) {
+    fn emit(&mut self, command: UiCommand<ComposedGridSpace>) {
         match command {
             UiCommand::GridResize(size) => {
                 // SAFETY: The validated dimensions are converted at the C
@@ -77,24 +77,6 @@ impl UiOutput<ComposedGridSpace> for NvimOutput {
                     );
                 }
             }
-            UiCommand::RawLine(line) => {
-                // SAFETY: `RawLineCommand` guarantees equally sized readable
-                // payload slices matching the changed column range. They
-                // remain alive for this synchronous callback.
-                unsafe {
-                    ui_composed_call_raw_line(
-                        1,
-                        Integer::from(line.row),
-                        Integer::from(line.columns.start),
-                        Integer::from(line.columns.end),
-                        Integer::from(line.clear_column),
-                        Integer::from(line.clear_attribute),
-                        line.flags.raw(),
-                        line.characters.as_ptr(),
-                        line.attributes.as_ptr(),
-                    );
-                }
-            }
             UiCommand::Log(message) => {
                 let message = CString::new(message).expect("compositor diagnostic contains no NUL");
                 // SAFETY: `CString` supplies a non-null, NUL-terminated
@@ -117,6 +99,25 @@ impl UiOutput<ComposedGridSpace> for NvimOutput {
                     os_sleep(milliseconds);
                 }
             }
+        }
+    }
+
+    fn emit_raw_line<Cells: RawLineCells>(&mut self, line: RawLineCommand<Cells>) {
+        // SAFETY: `RawLineCommand` guarantees equally sized readable payload
+        // slices matching the changed column range. They remain alive for
+        // this synchronous callback.
+        unsafe {
+            ui_composed_call_raw_line(
+                1,
+                Integer::from(line.row),
+                Integer::from(line.columns.start),
+                Integer::from(line.columns.end),
+                Integer::from(line.clear_column),
+                Integer::from(line.clear_attribute),
+                line.flags.raw(),
+                line.characters().as_ptr(),
+                line.attributes().as_ptr(),
+            );
         }
     }
 }

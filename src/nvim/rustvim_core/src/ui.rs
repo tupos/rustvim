@@ -1,6 +1,6 @@
 pub(crate) mod output;
 
-use std::ffi::CString;
+use std::{ffi::CString, sync::Mutex};
 
 use crate::{
     defines::{Integer, OptInt},
@@ -11,7 +11,11 @@ use crate::{
     },
 };
 
-use output::{RawLineCommand, UiCommand, UiOutput};
+use output::{
+    CellBufferPool, OwnedRawLineCommand, RawLineCells, RawLineCommand, UiCommand, UiOutput,
+};
+
+static GRID_OUTPUT_BUFFER_POOL: Mutex<CellBufferPool> = Mutex::new(CellBufferPool::new());
 
 // TODO: move to highlight
 pub type RgbValue = i32;
@@ -80,8 +84,16 @@ impl GridOutputTarget {
     }
 
     /// Emits a command after the operation's grid borrow has ended.
-    pub(crate) fn emit(self, command: UiCommand<'_, LocalGridSpace>) {
+    pub(crate) fn emit(self, command: UiCommand<LocalGridSpace>) {
         NvimGridOutput { target: self }.emit(command);
+    }
+
+    /// Emits owned line commands after their source-grid borrows have ended.
+    pub(crate) fn emit_lines(self, commands: impl IntoIterator<Item = OwnedRawLineCommand>) {
+        let mut output = NvimGridOutput { target: self };
+        for command in commands {
+            output.emit_raw_line(command);
+        }
     }
 }
 
@@ -91,7 +103,7 @@ struct NvimGridOutput {
 }
 
 impl UiOutput<LocalGridSpace> for NvimGridOutput {
-    fn emit(&mut self, command: UiCommand<'_, LocalGridSpace>) {
+    fn emit(&mut self, command: UiCommand<LocalGridSpace>) {
         let grid = Integer::from(self.target.grid.as_native_handle());
         match command {
             UiCommand::GridResize(size) => {
@@ -131,36 +143,6 @@ impl UiOutput<LocalGridSpace> for NvimGridOutput {
                     );
                 }
             }
-            UiCommand::RawLine(line) => {
-                // SAFETY: `RawLineCommand` guarantees equally sized readable
-                // payloads matching the changed range. They remain alive for
-                // this synchronous callback.
-                unsafe {
-                    ui_may_set_default_colors();
-                    ui_call_raw_line(
-                        grid,
-                        Integer::from(line.row),
-                        Integer::from(line.columns.start),
-                        Integer::from(line.columns.end),
-                        Integer::from(line.clear_column),
-                        Integer::from(line.clear_attribute),
-                        line.flags.raw(),
-                        line.characters.as_ptr(),
-                        line.attributes.as_ptr(),
-                    );
-
-                    if p_wd != 0 && (rdb_flags & RdbFlags::Line as u32) != 0 {
-                        ui_call_grid_cursor_goto(
-                            grid,
-                            Integer::from(line.row),
-                            Integer::from(std::cmp::min(line.clear_column, self.target.width - 1)),
-                        );
-                        ui_call_flush();
-                        os_sleep(p_wd.unsigned_abs());
-                        pending_cursor_update = true;
-                    }
-                }
-            }
             UiCommand::Log(message) => {
                 let message = CString::new(message).expect("UI diagnostic contains no NUL");
                 // SAFETY: `CString` remains alive for this synchronous call.
@@ -179,6 +161,38 @@ impl UiOutput<LocalGridSpace> for NvimGridOutput {
                 unsafe {
                     os_sleep(milliseconds);
                 }
+            }
+        }
+    }
+
+    fn emit_raw_line<Cells: RawLineCells>(&mut self, line: RawLineCommand<Cells>) {
+        let grid = Integer::from(self.target.grid.as_native_handle());
+        // SAFETY: `RawLineCommand` guarantees equally sized readable payloads
+        // matching the changed range. They remain alive for this synchronous
+        // callback.
+        unsafe {
+            ui_may_set_default_colors();
+            ui_call_raw_line(
+                grid,
+                Integer::from(line.row),
+                Integer::from(line.columns.start),
+                Integer::from(line.columns.end),
+                Integer::from(line.clear_column),
+                Integer::from(line.clear_attribute),
+                line.flags.raw(),
+                line.characters().as_ptr(),
+                line.attributes().as_ptr(),
+            );
+
+            if p_wd != 0 && (rdb_flags & RdbFlags::Line as u32) != 0 {
+                ui_call_grid_cursor_goto(
+                    grid,
+                    Integer::from(line.row),
+                    Integer::from(std::cmp::min(line.clear_column, self.target.width - 1)),
+                );
+                ui_call_flush();
+                os_sleep(p_wd.unsigned_abs());
+                pending_cursor_update = true;
             }
         }
     }
@@ -262,24 +276,29 @@ pub unsafe extern "C" fn ui_line(
     clear_attr: libc::c_int,
     wrap: bool,
 ) {
-    // SAFETY: The caller transfers exclusive ownership of the grid buffers to
-    // the guard.
-    let grid = unsafe { ScreenGridGuard::take(grid) };
-    ui_line_r(
-        &grid,
-        row,
-        invalid_row,
-        start_col,
-        end_col,
-        clear_col,
-        clear_attr,
-        wrap,
-    );
+    let (target, command) = {
+        // SAFETY: The caller transfers exclusive ownership of the grid
+        // buffers to the guard.
+        let grid = unsafe { ScreenGridGuard::take(grid) };
+        let target = GridOutputTarget::new(grid.id(), grid.cols);
+        let command = ui_line_r(
+            &grid,
+            row,
+            invalid_row,
+            start_col,
+            end_col,
+            clear_col,
+            clear_attr,
+            wrap,
+        );
+        (target, command)
+    };
+    target.emit_lines([command]);
 }
 
 // Keep the arguments aligned with ui_line() in ui.c.
 #[allow(clippy::too_many_arguments)]
-pub fn ui_line_r(
+pub(crate) fn ui_line_r(
     grid: &ScreenGrid,
     row: i32,
     invalid_row: bool,
@@ -288,7 +307,7 @@ pub fn ui_line_r(
     clear_col: i32,
     clear_attr: i32,
     wrap: bool,
-) {
+) -> OwnedRawLineCommand {
     assert!(0 <= row && row < grid.rows);
     let mut flags = if wrap {
         LineFlags::WRAP
@@ -302,7 +321,7 @@ pub fn ui_line_r(
     let offset = grid.line_offset[row as usize] + start_col as usize;
     let payload_len = usize::try_from(end_col - start_col).expect("ordered line columns");
     let payload_end = offset + payload_len;
-    let command = RawLineCommand::try_new(
+    OwnedRawLineCommand::try_owned(
         row,
         start_col..end_col,
         clear_col,
@@ -310,7 +329,7 @@ pub fn ui_line_r(
         flags,
         &grid.chars[offset..payload_end],
         &grid.attrs[offset..payload_end],
+        &GRID_OUTPUT_BUFFER_POOL,
     )
-    .expect("valid grid line output");
-    GridOutputTarget::new(grid.id(), grid.cols).emit(UiCommand::RawLine(command));
+    .expect("valid grid line output")
 }

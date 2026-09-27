@@ -12,7 +12,10 @@ use crate::{
     defines::OptInt,
     generated::enums::{RdbFlags, Slf},
     globals, mbyte,
-    ui::{self, GridOutputTarget, output::UiCommand},
+    ui::{
+        self, GridOutputTarget,
+        output::{OwnedRawLineCommand, UiCommand},
+    },
 };
 use std::{
     borrow::Cow,
@@ -706,7 +709,8 @@ impl ScreenGrid {
         mut last_vcol: VimColNrT,
         flags: i32,
         lb: &mut LineBuffer,
-    ) {
+    ) -> Vec<OwnedRawLineCommand> {
+        let mut output = Vec::new();
         assert!(0 <= row && row < self.rows);
         let is_right_left_set = flags & Slf::Rightleft as i32 != 0;
         let is_inc_vcol_set = flags & Slf::IncVcol as i32 != 0;
@@ -717,7 +721,7 @@ impl ScreenGrid {
             endcol = self.cols;
         }
         if row >= self.rows || col_offset >= self.cols {
-            return;
+            return output;
         }
         let row = row as usize;
         let invalid_row = unsafe {
@@ -881,7 +885,7 @@ impl ScreenGrid {
                 // cannot draw now or too small to be worth a separate "clear" event
                 start_dirty = clear_dirty_start;
             } else {
-                ui::ui_line_r(
+                output.push(ui::ui_line_r(
                     self,
                     row as i32,
                     invalid_row,
@@ -890,7 +894,7 @@ impl ScreenGrid {
                     col_offset + clear_end,
                     clear_attr,
                     is_wrap_set,
-                );
+                ));
             }
             clear_end = end_dirty;
         } else {
@@ -907,7 +911,7 @@ impl ScreenGrid {
         }
         if clear_end > start_dirty {
             if !self.throttled {
-                ui::ui_line_r(
+                output.push(ui::ui_line_r(
                     self,
                     row as i32,
                     invalid_row,
@@ -916,11 +920,12 @@ impl ScreenGrid {
                     col_offset + clear_end,
                     clear_attr,
                     is_wrap_set,
-                );
+                ));
             } else {
                 self.mark_dirty_column(row, clear_end);
             }
         }
+        output
     }
 
     fn line_copy(&mut self, to: usize, from: usize, col: usize, width: usize) {
@@ -945,7 +950,7 @@ impl ScreenGrid {
         col: i32,
         width: i32,
         row_delta: i32,
-    ) -> Option<UiCommand<'static, LocalGridSpace>> {
+    ) -> Option<UiCommand<LocalGridSpace>> {
         if self.throttled {
             return None;
         }
@@ -964,7 +969,7 @@ impl ScreenGrid {
         end: i32,
         col: i32,
         width: i32,
-    ) -> Option<UiCommand<'static, LocalGridSpace>> {
+    ) -> Option<UiCommand<LocalGridSpace>> {
         if line_count <= 0 {
             return None;
         }
@@ -1021,7 +1026,7 @@ impl ScreenGrid {
         end: i32,
         col: i32,
         width: i32,
-    ) -> Option<UiCommand<'static, LocalGridSpace>> {
+    ) -> Option<UiCommand<LocalGridSpace>> {
         if line_count <= 0 {
             return None;
         }
@@ -1512,7 +1517,7 @@ impl LineState {
     }
 
     /// Writes the completed line into an owned Rust grid.
-    fn write_line(&self, grid: &mut ScreenGrid, lb: &mut LineBuffer) {
+    fn write_line(&self, grid: &mut ScreenGrid, lb: &mut LineBuffer) -> Vec<OwnedRawLineCommand> {
         grid.put_line_buffer(
             self.row,
             self.col_offset,
@@ -1524,7 +1529,7 @@ impl LineState {
             -1,
             self.flags,
             lb,
-        );
+        )
     }
 }
 
@@ -1577,10 +1582,12 @@ impl<'grid> LineGrid<'grid> {
         self.state.put_text(col, text, attr, line_buf)
     }
 
-    /// Ends the current line operation and sends it to the UI layer.
-    fn flush(&mut self, line_buf: &mut LineBuffer) {
+    /// Ends the current line operation and returns its UI output.
+    fn flush(&mut self, line_buf: &mut LineBuffer) -> Vec<OwnedRawLineCommand> {
         if self.state.finish() {
-            self.state.write_line(&mut *self.grid, line_buf);
+            self.state.write_line(&mut *self.grid, line_buf)
+        } else {
+            Vec::new()
         }
     }
 }
@@ -1714,7 +1721,7 @@ impl CLineGrid {
     }
 
     /// Plans a cursor move within the currently rendered line.
-    fn cursor_update(&self, col: i32) -> (GridOutputTarget, UiCommand<'static, LocalGridSpace>) {
+    fn cursor_update(&self, col: i32) -> (GridOutputTarget, UiCommand<LocalGridSpace>) {
         let target = self.target();
         // SAFETY: An active operation uniquely owns the target grid buffers.
         let grid = unsafe { ScreenGridGuard::take(target.as_ptr()) };
@@ -1728,25 +1735,37 @@ impl CLineGrid {
         self.state.mirror_cells(width, line_buf);
     }
 
-    /// Ends a C-facing line operation and sends it to the UI layer.
-    fn flush(&mut self, line_buf: &mut LineBuffer) {
+    /// Ends a C-facing line operation and returns its UI output.
+    fn flush(
+        &mut self,
+        line_buf: &mut LineBuffer,
+    ) -> Option<(GridOutputTarget, Vec<OwnedRawLineCommand>)> {
         let target = self
             .target
             .take()
             .expect("line operation has no target grid");
         if !self.state.finish() {
-            return;
+            return None;
         }
 
-        // SAFETY: The active operation uniquely owns the target grid buffers.
-        let mut grid = unsafe { ScreenGridGuard::take(target.as_ptr()) };
-        self.state.write_line(&mut grid, line_buf);
+        let (output_target, commands) = {
+            // SAFETY: The active operation uniquely owns the target grid
+            // buffers.
+            let mut grid = unsafe { ScreenGridGuard::take(target.as_ptr()) };
+            let output_target = GridOutputTarget::new(grid.id(), grid.cols);
+            let commands = self.state.write_line(&mut grid, line_buf);
+            (output_target, commands)
+        };
+        Some((output_target, commands))
     }
 
     /// Flushes the current line only if its row belongs to the target grid.
     ///
     /// This is a stopgap until message.c has been refactored to behave
-    fn flush_if_valid_row(&mut self, line_buf: &mut LineBuffer) {
+    fn flush_if_valid_row(
+        &mut self,
+        line_buf: &mut LineBuffer,
+    ) -> Option<(GridOutputTarget, Vec<OwnedRawLineCommand>)> {
         let target = self.target();
         // SAFETY: The active target remains valid until the matching flush.
         let rows = unsafe { target.as_ref().rows };
@@ -1755,10 +1774,10 @@ impl CLineGrid {
                 panic!("rdb_flags & RdbFlags::Invalid != 0");
             } else {
                 self.cancel();
-                return;
+                return None;
             }
         }
-        self.flush(line_buf);
+        self.flush(line_buf)
     }
 
     /// Returns the last usable column for the active line.
@@ -2435,10 +2454,13 @@ pub extern "C" fn linebuf_put_char_pair(col: libc::c_int, first: VimSCharT, seco
 /// End a group of grid_line_puts calls and send the screen buffer to the UI layer.
 #[unsafe(no_mangle)]
 pub extern "C" fn grid_line_flush() {
-    let mut line_buffer = LineBufferGuard::acquire();
-    with_line_grid(|line_grid| {
-        line_grid.flush(&mut line_buffer);
-    });
+    let output = {
+        let mut line_buffer = LineBufferGuard::acquire();
+        with_line_grid(|line_grid| line_grid.flush(&mut line_buffer))
+    };
+    if let Some((target, commands)) = output {
+        target.emit_lines(commands);
+    }
 }
 
 /// flush grid line but only if on a valid row
@@ -2446,10 +2468,13 @@ pub extern "C" fn grid_line_flush() {
 /// This is a stopgap until message.c has been refactored to behave
 #[unsafe(no_mangle)]
 pub extern "C" fn grid_line_flush_if_valid_row() {
-    let mut line_buffer = LineBufferGuard::acquire();
-    with_line_grid(|line_grid| {
-        line_grid.flush_if_valid_row(&mut line_buffer);
-    });
+    let output = {
+        let mut line_buffer = LineBufferGuard::acquire();
+        with_line_grid(|line_grid| line_grid.flush_if_valid_row(&mut line_buffer))
+    };
+    if let Some((target, commands)) = output {
+        target.emit_lines(commands);
+    }
 }
 
 /// # Safety
@@ -2489,45 +2514,50 @@ pub unsafe extern "C" fn grid_put_window_line(
         SmoothScrollMarker::new(config.preserve_line_number, config.smoothscroll_marker_attr)
     });
 
-    let mut line_buffer = LineBufferGuard::acquire();
-    let Some(submission) = LineSubmission::prepare(
-        &mut line_buffer,
-        end_col,
-        width,
-        config.clear_end,
-        config.right_left,
-        smooth_scroll_marker,
-    ) else {
-        return;
-    };
-    let (Ok(start_col), Ok(end_col), Ok(clear_width)) = (
-        libc::c_int::try_from(submission.start_col()),
-        libc::c_int::try_from(submission.end_col()),
-        libc::c_int::try_from(submission.clear_width()),
-    ) else {
-        return;
-    };
-    let flags = if submission.is_right_left() {
-        config.flags | Slf::Rightleft as libc::c_int
-    } else {
-        config.flags
-    };
+    let (output_target, commands) = {
+        let mut line_buffer = LineBufferGuard::acquire();
+        let Some(submission) = LineSubmission::prepare(
+            &mut line_buffer,
+            end_col,
+            width,
+            config.clear_end,
+            config.right_left,
+            smooth_scroll_marker,
+        ) else {
+            return;
+        };
+        let (Ok(start_col), Ok(end_col), Ok(clear_width)) = (
+            libc::c_int::try_from(submission.start_col()),
+            libc::c_int::try_from(submission.end_col()),
+            libc::c_int::try_from(submission.clear_width()),
+        ) else {
+            return;
+        };
+        let flags = if submission.is_right_left() {
+            config.flags | Slf::Rightleft as libc::c_int
+        } else {
+            config.flags
+        };
 
-    // SAFETY: The caller guarantees exclusive access to the target and valid
-    // Rust-owned buffer pointers.
-    let mut grid = unsafe { ScreenGridGuard::take(target) };
-    grid.put_line_buffer(
-        row,
-        view.col_offset,
-        start_col,
-        end_col,
-        clear_width,
-        config.bg_attr,
-        0,
-        config.last_vcol,
-        flags,
-        &mut line_buffer,
-    );
+        // SAFETY: The caller guarantees exclusive access to the target and
+        // valid Rust-owned buffer pointers.
+        let mut grid = unsafe { ScreenGridGuard::take(target) };
+        let output_target = GridOutputTarget::new(grid.id(), grid.cols);
+        let commands = grid.put_line_buffer(
+            row,
+            view.col_offset,
+            start_col,
+            end_col,
+            clear_width,
+            config.bg_attr,
+            0,
+            config.last_vcol,
+            flags,
+            &mut line_buffer,
+        );
+        (output_target, commands)
+    };
+    output_target.emit_lines(commands);
 }
 
 /// Clears a rectangular region of a grid view.
@@ -2545,23 +2575,32 @@ pub unsafe extern "C" fn grid_clear(
     mut end_col: libc::c_int,
     attr: libc::c_int,
 ) {
-    let mut line_buffer = LineBufferGuard::acquire();
-    with_line_grid(|line_grid| {
-        for row in start_row..end_row {
-            // SAFETY: The caller guarantees that `view` and its target remain
-            // valid and exclusively accessible for this operation.
-            unsafe {
-                line_grid.begin_view(view, row, &mut line_buffer);
+    let output = {
+        let mut line_buffer = LineBufferGuard::acquire();
+        with_line_grid(|line_grid| {
+            let mut output = Vec::new();
+            for row in start_row..end_row {
+                // SAFETY: The caller guarantees that `view` and its target remain
+                // valid and exclusively accessible for this operation.
+                unsafe {
+                    line_grid.begin_view(view, row, &mut line_buffer);
+                }
+                end_col = std::cmp::min(end_col, line_grid.max_col());
+                if line_grid.row_reaches_grid_end() || start_col >= end_col {
+                    line_grid.cancel();
+                    break;
+                }
+                line_grid.set_clear_range(start_col, end_col, attr, 0);
+                if let Some(update) = line_grid.flush(&mut line_buffer) {
+                    output.push(update);
+                }
             }
-            end_col = std::cmp::min(end_col, line_grid.max_col());
-            if line_grid.row_reaches_grid_end() || start_col >= end_col {
-                line_grid.cancel();
-                break;
-            }
-            line_grid.set_clear_range(start_col, end_col, attr, 0);
-            line_grid.flush(&mut line_buffer);
-        }
-    });
+            output
+        })
+    };
+    for (target, commands) in output {
+        target.emit_lines(commands);
+    }
 }
 
 /// Draws a floating-window border from a stable subset of `WinConfig`.
@@ -2604,17 +2643,21 @@ pub unsafe extern "C" fn grid_draw_border_impl(
         return;
     };
 
-    // SAFETY: The caller transfers exclusive ownership of the grid buffers
-    // into the guard for the duration of this function.
-    let mut rust_grid = unsafe { ScreenGridGuard::take(grid) };
-    let mut line_buffer = LineBufferGuard::acquire();
-    {
+    let (target, commands) = {
+        // SAFETY: The caller transfers exclusive ownership of the grid
+        // buffers into the guard for the duration of this function.
+        let mut rust_grid = unsafe { ScreenGridGuard::take(grid) };
+        let target = GridOutputTarget::new(rust_grid.id(), rust_grid.cols);
+        let mut line_buffer = LineBufferGuard::acquire();
         let mut canvas = BorderCanvas {
             line_grid: LineGrid::new(&mut rust_grid),
             line_buffer: &mut line_buffer,
+            output: Vec::new(),
         };
         border.draw(&mut canvas);
-    }
+        (target, canvas.output)
+    };
+    target.emit_lines(commands);
 }
 
 /// Converts ascii char to `VimSCharT`
@@ -3274,6 +3317,7 @@ impl Border {
 struct BorderCanvas<'a> {
     line_grid: LineGrid<'a>,
     line_buffer: &'a mut LineBuffer,
+    output: Vec<OwnedRawLineCommand>,
 }
 
 impl BorderCanvas<'_> {
@@ -3309,7 +3353,7 @@ impl BorderCanvas<'_> {
 
     /// Commits the current buffered row to the grid.
     fn flush(&mut self) {
-        self.line_grid.flush(self.line_buffer);
+        self.output.extend(self.line_grid.flush(self.line_buffer));
     }
 }
 
