@@ -655,13 +655,33 @@ impl MessageCompositorState {
     }
 }
 
+/// Compositor-owned state for one registered grid layer.
+///
+/// Additional placement and policy metadata will move here as their legacy C
+/// callers are migrated.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct LayerState {
+    grid_id: GridId,
+    disabled: bool,
+}
+
+impl LayerState {
+    /// Creates enabled state for one newly registered grid.
+    const fn new(grid_id: GridId) -> Self {
+        Self {
+            grid_id,
+            disabled: false,
+        }
+    }
+}
+
 /// Safe process-global state of the UI compositor.
 ///
 /// Reentrant line-buffer storage and transitional C grid bindings remain
 /// outside this state because their ownership must be released independently
 /// around synchronous UI callbacks.
 struct Compositor {
-    layers: Option<Layers<GridId>>,
+    layers: Option<Layers<LayerState>>,
     display: CompositorDrawState,
     message: MessageCompositorState,
 }
@@ -682,7 +702,7 @@ impl Compositor {
             return Err(CompositorError::InvalidLayerState);
         }
         self.layers = Some(Layers {
-            default: default_grid_id,
+            default: LayerState::new(default_grid_id),
             overlays: Vec::new(),
         });
         Ok(())
@@ -697,14 +717,14 @@ impl Compositor {
     }
 
     /// Borrows the initialized compositor layer collection.
-    fn layers(&self) -> CompositorResult<&Layers<GridId>> {
+    fn layers(&self) -> CompositorResult<&Layers<LayerState>> {
         self.layers
             .as_ref()
             .ok_or(CompositorError::InvalidLayerState)
     }
 
     /// Returns an owned snapshot for a short C-grid ownership transaction.
-    fn layer_snapshot(&self) -> CompositorResult<Layers<GridId>> {
+    fn layer_snapshot(&self) -> CompositorResult<Layers<LayerState>> {
         self.layers().cloned()
     }
 
@@ -809,20 +829,30 @@ impl Compositor {
                 layer.try_plan_placement(request.placement, request.valid, should_draw)?
             };
 
-            let grid = grids
+            grids
                 .grid_mut(target.grid_id)
+                .ok_or(CompositorError::InvalidLayerState)?
+                .mark_compositor_index_for_update();
+            let layer = layers
+                .get_mut(target.layer_index)
                 .ok_or(CompositorError::InvalidLayerState)?;
-            grid.mark_compositor_index_for_update();
+            if layer.grid_id != target.grid_id {
+                return Err(CompositorError::InvalidLayerState);
+            }
             let deferred_completion = if should_draw {
-                grid.set_compositor_disabled(true);
+                layer.disabled = true;
                 Some(CompositorGridPlacementCompletion {
                     grid_id: target.grid_id,
                     placement: request.placement,
                 })
             } else {
+                let grid = grids
+                    .grid_mut(target.grid_id)
+                    .ok_or(CompositorError::InvalidLayerState)?;
                 request.placement.apply_to(grid);
                 None
             };
+            self.layers = Some(layers);
             return Ok(CompositorGridPlacementPreparation {
                 plan,
                 deferred_completion,
@@ -863,15 +893,26 @@ impl Compositor {
     /// Completes an existing-grid placement after exposed areas were
     /// recomposed.
     fn finish_grid_placement(
-        &self,
+        &mut self,
         grids: &mut impl GridAccess,
         completion: CompositorGridPlacementCompletion,
     ) -> CompositorResult<()> {
+        let mut layers = self.layer_snapshot()?;
+        let layer_index = layers
+            .index_of(completion.grid_id)
+            .ok_or(CompositorError::InvalidLayerState)?;
+        let layer = layers
+            .get_mut(layer_index)
+            .ok_or(CompositorError::InvalidLayerState)?;
+        if layer.grid_id != completion.grid_id {
+            return Err(CompositorError::InvalidLayerState);
+        }
         let grid = grids
             .grid_mut(completion.grid_id)
             .ok_or(CompositorError::InvalidLayerState)?;
-        grid.set_compositor_disabled(false);
         completion.placement.apply_to(grid);
+        layer.disabled = false;
+        self.layers = Some(layers);
         Ok(())
     }
 
@@ -1059,9 +1100,13 @@ impl Compositor {
         let message_separator = match self.message.separator_character_at(request.row) {
             Some(character) => {
                 let message_grid = message_grid.ok_or(CompositorError::InvalidLayerState)?;
+                let layer = layers
+                    .layer_index_with_id(message_grid.id())
+                    .and_then(|index| layers.layer(index))
+                    .or_else(|| CompositorLayer::try_from_grid(message_grid, false))
+                    .ok_or(CompositorError::InvalidLayerState)?;
                 Some(MessageSeparator {
-                    layer: CompositorLayer::try_from_grid(message_grid)
-                        .ok_or(CompositorError::InvalidLayerState)?,
+                    layer,
                     character,
                     attribute: request.settings.message_separator_attribute,
                 })
@@ -1089,7 +1134,7 @@ impl Compositor {
         grids: &impl GridAccess,
         area: CompositorRecomposeArea,
     ) -> CompositorResult<CompositorRecomposeArea> {
-        let default_grid_id = *self.layers()?.default();
+        let default_grid_id = self.layers()?.default().grid_id;
         let default_grid = grids
             .grid(default_grid_id)
             .ok_or(CompositorError::InvalidLayerState)?;
@@ -1453,8 +1498,8 @@ struct CompositorLayer<'grid> {
 }
 
 impl<'grid> CompositorLayer<'grid> {
-    /// Constructs a validated layer view from a Rust screen grid.
-    fn try_from_grid(grid: &'grid ScreenGrid) -> Option<Self> {
+    /// Constructs a validated layer view from grid and compositor-owned state.
+    fn try_from_grid(grid: &'grid ScreenGrid, disabled: bool) -> Option<Self> {
         let (origin_row, origin_column) = grid.compositor_position();
         let (requested_width, requested_height) = grid.compositor_size();
         let allocated_size = GridSize::try_new(grid.rows, grid.cols)?;
@@ -1472,7 +1517,7 @@ impl<'grid> CompositorLayer<'grid> {
             z_index: grid.z_index(),
             layer_index: grid.compositor_index(),
             blending: grid.blends_with_background(),
-            disabled: grid.is_compositor_disabled(),
+            disabled,
         })
     }
 
@@ -1766,43 +1811,53 @@ impl<T> Layers<T> {
         }
     }
 
+    /// Mutably borrows one layer by its complete stack index.
+    fn get_mut(&mut self, index: usize) -> Option<&mut T> {
+        if index == 0 {
+            Some(&mut self.default)
+        } else {
+            self.overlays.get_mut(index - 1)
+        }
+    }
+
     /// Iterates over the default layer followed by every overlay.
     fn iter(&self) -> impl Iterator<Item = &T> {
         std::iter::once(&self.default).chain(&self.overlays)
     }
 }
 
-impl Layers<GridId> {
-    /// Creates layers from nonempty, uniquely ordered grid identities.
+impl Layers<LayerState> {
+    /// Creates enabled layers from nonempty, uniquely ordered grid identities.
     fn try_new(layer_ids: Vec<GridId>) -> Option<Self> {
         let mut layer_ids = layer_ids.into_iter();
-        let default = layer_ids.next()?;
-        let overlays = layer_ids.collect::<Vec<_>>();
-        if overlays
-            .iter()
-            .enumerate()
-            .any(|(index, grid_id)| *grid_id == default || overlays[..index].contains(grid_id))
-        {
+        let default_grid_id = layer_ids.next()?;
+        let overlay_grid_ids = layer_ids.collect::<Vec<_>>();
+        if overlay_grid_ids.iter().enumerate().any(|(index, grid_id)| {
+            *grid_id == default_grid_id || overlay_grid_ids[..index].contains(grid_id)
+        }) {
             return None;
         }
 
-        Some(Self { default, overlays })
+        Some(Self {
+            default: LayerState::new(default_grid_id),
+            overlays: overlay_grid_ids.into_iter().map(LayerState::new).collect(),
+        })
     }
 
     /// Returns one identity by its layer index.
     fn layer_id(&self, index: usize) -> Option<GridId> {
-        self.get(index).copied()
+        self.get(index).map(|layer| layer.grid_id)
     }
 
     /// Returns the layer index of one registered grid.
     fn index_of(&self, grid_id: GridId) -> Option<usize> {
-        if self.default == grid_id {
+        if self.default.grid_id == grid_id {
             return Some(0);
         }
 
         self.overlays
             .iter()
-            .position(|candidate| *candidate == grid_id)
+            .position(|candidate| candidate.grid_id == grid_id)
             .and_then(|index| index.checked_add(1))
     }
 
@@ -1812,7 +1867,7 @@ impl Layers<GridId> {
             return Err(CompositorError::InvalidLayerState);
         }
 
-        self.overlays.push(grid_id);
+        self.overlays.push(LayerState::new(grid_id));
         Ok(())
     }
 
@@ -1825,7 +1880,7 @@ impl Layers<GridId> {
             .get(overlay_index)
             .ok_or(CompositorError::InvalidLayerState)?;
 
-        Ok(self.overlays.remove(overlay_index))
+        Ok(self.overlays.remove(overlay_index).grid_id)
     }
 
     /// Applies one validated layer relocation.
@@ -1850,16 +1905,34 @@ impl Layers<GridId> {
         &self,
         grids: &'grid impl GridAccess,
     ) -> CompositorResult<Layers<CompositorLayer<'grid>>> {
-        let grids = self
+        let mut resolved_layers = self
             .iter()
-            .map(|grid_id| {
-                grids
-                    .grid(*grid_id)
-                    .ok_or(CompositorError::InvalidLayerState)
+            .map(|layer| {
+                let grid = grids.grid(layer.grid_id)?;
+                (grid.id() == layer.grid_id)
+                    .then(|| CompositorLayer::try_from_grid(grid, layer.disabled))
+                    .flatten()
             })
-            .collect::<CompositorResult<Vec<_>>>()?;
-        Layers::<CompositorLayer<'grid>>::try_from_grids(&grids)
-            .ok_or(CompositorError::InvalidLayerState)
+            .collect::<Option<Vec<_>>>()
+            .ok_or(CompositorError::InvalidLayerState)?
+            .into_iter();
+        let default = resolved_layers
+            .next()
+            .ok_or(CompositorError::InvalidLayerState)?;
+        let layers = Layers {
+            default,
+            overlays: resolved_layers.collect(),
+        };
+
+        if layers
+            .iter()
+            .enumerate()
+            .any(|(index, layer)| layer.layer_index != index)
+        {
+            return Err(CompositorError::InvalidLayerState);
+        }
+
+        Ok(layers)
     }
 
     /// Places the appended grid at its planned compositor-stack index.
@@ -1992,27 +2065,6 @@ struct CompositorCoveredAboveQuery {
 }
 
 impl<'grid> Layers<CompositorLayer<'grid>> {
-    /// Resolves structurally ordered layers from grids owned by Rust guards.
-    fn try_from_grids(grids: &[&'grid ScreenGrid]) -> Option<Self> {
-        let (default_grid, overlay_grids) = grids.split_first()?;
-        let default = CompositorLayer::try_from_grid(default_grid)?;
-        let overlays = overlay_grids
-            .iter()
-            .map(|grid| CompositorLayer::try_from_grid(grid))
-            .collect::<Option<Vec<_>>>()?;
-        let layers = Self { default, overlays };
-
-        if layers
-            .iter()
-            .enumerate()
-            .any(|(index, layer)| layer.layer_index != index)
-        {
-            return None;
-        }
-
-        Some(layers)
-    }
-
     /// Returns the default grid at the bottom of the stack.
     fn default_layer(&self) -> CompositorLayer<'grid> {
         self.default
@@ -3012,7 +3064,7 @@ mod tests {
             .layers()
             .unwrap()
             .iter()
-            .copied()
+            .map(|layer| layer.grid_id)
             .collect()
     }
 
@@ -3041,13 +3093,21 @@ mod tests {
         let second = GridId::new(2);
         let third = GridId::new(3);
 
-        assert!(Layers::<GridId>::try_new(Vec::new()).is_none());
-        assert!(Layers::<GridId>::try_new(vec![first, first]).is_none());
-        assert!(Layers::<GridId>::try_new(vec![first, second, second]).is_none());
+        assert!(Layers::<LayerState>::try_new(Vec::new()).is_none());
+        assert!(Layers::<LayerState>::try_new(vec![first, first]).is_none());
+        assert!(Layers::<LayerState>::try_new(vec![first, second, second]).is_none());
 
-        let mut layers = Layers::<GridId>::try_new(vec![first, second, third]).unwrap();
-        assert_eq!(*layers.default(), first);
-        assert_eq!(layers.overlays(), &[second, third]);
+        let mut layers = Layers::<LayerState>::try_new(vec![first, second, third]).unwrap();
+        assert_eq!(layers.default().grid_id, first);
+        assert!(!layers.default().disabled);
+        assert_eq!(
+            layers
+                .overlays()
+                .iter()
+                .map(|layer| layer.grid_id)
+                .collect::<Vec<_>>(),
+            [second, third]
+        );
         assert_eq!(layers.len(), 3);
         assert_eq!(layers.index_of(second), Some(1));
 
@@ -3058,7 +3118,7 @@ mod tests {
             })
             .unwrap();
         assert_eq!(
-            layers.iter().copied().collect::<Vec<_>>(),
+            layers.iter().map(|layer| layer.grid_id).collect::<Vec<_>>(),
             [first, third, second]
         );
         assert_eq!(
@@ -3073,7 +3133,10 @@ mod tests {
             Err(CompositorError::DefaultLayerMutation)
         );
         assert_eq!(layers.remove_non_default(1), Ok(third));
-        assert_eq!(layers.iter().copied().collect::<Vec<_>>(), [first, second]);
+        assert_eq!(
+            layers.iter().map(|layer| layer.grid_id).collect::<Vec<_>>(),
+            [first, second]
+        );
     }
 
     fn compositor_layer(
@@ -3860,7 +3923,7 @@ mod tests {
         assert_eq!(moving_grid.compositor_index(), 1);
         assert_eq!(moving_grid.compositor_position(), (1, 2));
         assert_eq!(moving_grid.compositor_size(), (2, 2));
-        assert!(!moving_grid.is_compositor_disabled());
+        assert!(!lock_compositor().layers().unwrap().get(1).unwrap().disabled);
     }
 
     #[test]
@@ -4077,7 +4140,7 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(
-                layers.iter().copied().collect::<Vec<_>>(),
+                layers.iter().map(|layer| layer.grid_id).collect::<Vec<_>>(),
                 expected_registry
             );
         }
@@ -4131,7 +4194,7 @@ mod tests {
             );
             assert_eq!(layers.remove_layer(&mut grid_store, 1), Ok(()));
             assert_eq!(
-                layers.iter().copied().collect::<Vec<_>>(),
+                layers.iter().map(|layer| layer.grid_id).collect::<Vec<_>>(),
                 expected_registry
             );
         }

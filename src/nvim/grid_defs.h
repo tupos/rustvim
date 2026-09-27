@@ -92,17 +92,13 @@ struct ScreenGrid {
   // default_grid.comp_index is always zero.
   size_t comp_index;
 
-  // compositor should momentarily ignore the grid. Used internally when
-  // moving around grids etc.
-  bool comp_disabled;
-
   // need to resend win_float_pos or similar due to comp_index change
   bool pending_comp_index_update;
 };
 
 #define SCREEN_GRID_INIT { 0, NULL, NULL, NULL, NULL, NULL, 0, 0, false, \
                            false, false, true, 0, \
-                           0, 0, 0, 0, 0,  false, true }
+                           0, 0, 0, 0, 0, true }
 
 /// Represents the position of a viewport within a ScreenGrid
 typedef struct {

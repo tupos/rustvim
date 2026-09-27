@@ -300,10 +300,6 @@ pub struct ScreenGrid {
     /// default_grid.comp_index is always zero.
     comp_index: usize,
 
-    /// compositor should momentarily ignore the grid. Used internally when
-    /// moving around grids etc.
-    comp_disabled: bool,
-
     /// need to resend win_float_pos or similar due to comp_index change
     pending_comp_index_update: bool,
 }
@@ -331,7 +327,6 @@ impl ScreenGrid {
             comp_width: 0,
             comp_height: 0,
             comp_index: 0,
-            comp_disabled: false,
             pending_comp_index_update: true,
         };
         for i in 0..rows {
@@ -417,19 +412,9 @@ impl ScreenGrid {
         self.pending_comp_index_update = true;
     }
 
-    /// Controls whether composition temporarily ignores this grid.
-    pub(crate) fn set_compositor_disabled(&mut self, disabled: bool) {
-        self.comp_disabled = disabled;
-    }
-
     /// Returns this grid's index in the compositor layer stack.
     pub(crate) fn compositor_index(&self) -> usize {
         self.comp_index
-    }
-
-    /// Reports whether the compositor is temporarily ignoring this grid.
-    pub(crate) fn is_compositor_disabled(&self) -> bool {
-        self.comp_disabled
     }
 
     pub fn from_grid(
@@ -561,7 +546,6 @@ impl ScreenGrid {
             comp_width: cgrid.comp_width,
             comp_height: cgrid.comp_height,
             comp_index: cgrid.comp_index,
-            comp_disabled: cgrid.comp_disabled,
             pending_comp_index_update: cgrid.pending_comp_index_update,
         }
     }
@@ -596,7 +580,6 @@ impl ScreenGrid {
             comp_width: self.comp_width,
             comp_height: self.comp_height,
             comp_index: self.comp_index,
-            comp_disabled: self.comp_disabled,
             pending_comp_index_update: self.pending_comp_index_update,
         }
     }
@@ -2773,8 +2756,6 @@ pub struct CScreenGrid {
     comp_height: libc::c_int,
 
     comp_index: libc::size_t,
-
-    comp_disabled: bool,
 
     pending_comp_index_update: bool,
 }
@@ -5088,7 +5069,6 @@ mod tests {
             comp_width: 0,
             comp_height: 0,
             comp_index: 0,
-            comp_disabled: false,
             pending_comp_index_update: true,
         };
 
