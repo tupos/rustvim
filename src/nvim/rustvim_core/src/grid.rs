@@ -279,13 +279,6 @@ pub struct ScreenGrid {
 
     /// z-index: the order in the stack of grids.
     zindex: i32,
-
-    /// z-index of the grid. Grids with higher index is draw on top.
-    /// default_grid.comp_index is always zero.
-    comp_index: usize,
-
-    /// need to resend win_float_pos or similar due to comp_index change
-    pending_comp_index_update: bool,
 }
 
 impl ScreenGrid {
@@ -305,8 +298,6 @@ impl ScreenGrid {
             throttled: false,
             blending: false,
             zindex: 0,
-            comp_index: 0,
-            pending_comp_index_update: true,
         };
         for i in 0..rows {
             let offset = i as usize * cols as usize;
@@ -346,22 +337,6 @@ impl ScreenGrid {
     /// Reports whether this grid is at least `minimum_gap` above another grid.
     pub(crate) fn is_at_least_z_index_above(&self, lower_z_index: i32, minimum_gap: u32) -> bool {
         i64::from(self.zindex) - i64::from(lower_z_index) >= i64::from(minimum_gap)
-    }
-
-    /// Assigns a compositor-stack index and records that it must be published.
-    pub(crate) fn set_compositor_index(&mut self, index: usize) {
-        self.comp_index = index;
-        self.mark_compositor_index_for_update();
-    }
-
-    /// Records that the compositor index must be published.
-    pub(crate) fn mark_compositor_index_for_update(&mut self) {
-        self.pending_comp_index_update = true;
-    }
-
-    /// Returns this grid's index in the compositor layer stack.
-    pub(crate) fn compositor_index(&self) -> usize {
-        self.comp_index
     }
 
     pub fn from_grid(
@@ -487,8 +462,6 @@ impl ScreenGrid {
             throttled: cgrid.throttled,
             blending: cgrid.blending,
             zindex: cgrid.zindex,
-            comp_index: cgrid.comp_index,
-            pending_comp_index_update: cgrid.pending_comp_index_update,
         }
     }
 
@@ -516,8 +489,6 @@ impl ScreenGrid {
             throttled: self.throttled,
             blending: self.blending,
             zindex: self.zindex,
-            comp_index: self.comp_index,
-            pending_comp_index_update: self.pending_comp_index_update,
         }
     }
 
@@ -2683,10 +2654,6 @@ pub struct CScreenGrid {
     blending: bool,
 
     zindex: libc::c_int,
-
-    comp_index: libc::size_t,
-
-    pending_comp_index_update: bool,
 }
 
 impl CScreenGrid {
@@ -4992,8 +4959,6 @@ mod tests {
             throttled: false,
             blending: false,
             zindex: 0,
-            comp_index: 0,
-            pending_comp_index_update: true,
         };
 
         let allocator = GridHandleAllocator::new(DEFAULT_GRID_HANDLE);

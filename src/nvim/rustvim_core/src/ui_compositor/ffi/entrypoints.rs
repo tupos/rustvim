@@ -125,9 +125,9 @@ unsafe fn update_message_position(
     let plan = {
         // SAFETY: The caller transfers exclusive ownership of both grids'
         // buffers into distinct guards for the duration of this operation.
-        let mut message_grid = unsafe { ScreenGridGuard::take(message_grid) };
+        let message_grid = unsafe { ScreenGridGuard::take(message_grid) };
         let default_grid = unsafe { ScreenGridGuard::take(default_grid) };
-        lock_compositor().set_message_position(&mut message_grid, &default_grid, request)
+        lock_compositor().set_message_position(&message_grid, &default_grid, request)
     }?;
 
     if let Some(scroll) = plan.scroll {
@@ -239,9 +239,9 @@ pub(in crate::ui_compositor) fn place_grid_in_registered_layers(
     mut recompose_area: impl FnMut(CompositorRecomposeArea) -> CompositorResult<()>,
 ) -> CompositorResult<CompositorGridPlacementOutcome> {
     let preparation = {
-        let mut grid_store = grid_store;
+        let grid_store = grid_store;
         let preparation = lock_compositor().prepare_grid_placement(
-            &mut grid_store,
+            &grid_store,
             target,
             current_window_layer,
             request,
@@ -360,9 +360,9 @@ pub unsafe extern "C" fn ui_comp_put_grid(
 pub(in crate::ui_compositor) fn apply_cursor_update_to_registered_grids(
     request: CompositorCursorRequest,
 ) -> CompositorResult<CompositorCursorUpdate> {
-    let mut grid_store =
+    let grid_store =
         LegacyGridStore::try_take_registered().ok_or(CompositorError::InvalidLayerState)?;
-    lock_compositor().move_cursor(&mut grid_store, request)
+    lock_compositor().move_cursor(&grid_store, request)
 }
 
 /// Applies one cursor update to the compositor layer stack.
@@ -430,9 +430,9 @@ pub(in crate::ui_compositor) fn adjust_registered_layer_order(
     grid_id: GridId,
     adjustment: CompositorLayerAdjustment,
 ) -> CompositorResult<()> {
-    let mut grid_store =
+    let grid_store =
         LegacyGridStore::try_take_registered().ok_or(CompositorError::InvalidLayerState)?;
-    lock_compositor().adjust_layer_order(&mut grid_store, grid_id, adjustment)
+    lock_compositor().adjust_layer_order(&grid_store, grid_id, adjustment)
 }
 
 /// Adjusts the layer position of one compositor grid.
@@ -467,7 +467,7 @@ pub(in crate::ui_compositor) fn remove_registered_layer(
     let (grid_id, removal) = {
         let mut compositor = lock_compositor();
         let grid_id = compositor.layer_id(layer_index)?;
-        let removal = compositor.remove_layer(&mut grid_store, layer_index)?;
+        let removal = compositor.remove_layer(&grid_store, layer_index)?;
         (grid_id, removal)
     };
     grid_store.remove_binding(grid_id)?;
@@ -642,6 +642,36 @@ pub unsafe extern "C" fn ui_comp_grid_origin(
         *column.as_mut() = origin.column;
     }
     true
+}
+
+/// Reports whether one registered grid must publish its current layer index.
+#[unsafe(no_mangle)]
+pub extern "C" fn ui_comp_grid_publication_pending(grid_handle: Integer) -> bool {
+    let Ok(grid_handle) = i32::try_from(grid_handle) else {
+        return false;
+    };
+
+    lock_compositor()
+        .grid_publication_pending(GridId::new(grid_handle))
+        .unwrap_or(false)
+}
+
+/// Takes one registered grid's current layer-index publication.
+///
+/// Returns zero when the grid is not registered. Taking a registered
+/// publication clears its pending state.
+#[unsafe(no_mangle)]
+pub extern "C" fn ui_comp_take_grid_publication(grid_handle: Integer) -> libc::c_int {
+    let Ok(grid_handle) = i32::try_from(grid_handle) else {
+        return 0;
+    };
+    let Ok(Some(publication)) = lock_compositor().take_grid_publication(GridId::new(grid_handle))
+    else {
+        return 0;
+    };
+
+    i32::try_from(publication.layer_index)
+        .expect("compositor layer index must fit the C UI event representation")
 }
 
 /// Checks cursor coverage after acquiring the registered legacy grids.

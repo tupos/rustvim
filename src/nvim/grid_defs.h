@@ -71,17 +71,10 @@ struct ScreenGrid {
 
   // z-index: the order in the stack of grids.
   int zindex;
-
-  // z-index of the grid. Grids with higher index is draw on top.
-  // default_grid.comp_index is always zero.
-  size_t comp_index;
-
-  // need to resend win_float_pos or similar due to comp_index change
-  bool pending_comp_index_update;
 };
 
 #define SCREEN_GRID_INIT { 0, NULL, NULL, NULL, NULL, NULL, 0, 0, false, \
-                           false, false, 0, 0, true }
+                           false, false, 0 }
 
 /// Represents the position of a viewport within a ScreenGrid
 typedef struct {

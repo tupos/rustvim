@@ -261,12 +261,6 @@ impl GridAccess for LegacyGridStore {
     fn grid(&self, grid_id: GridId) -> Option<&ScreenGrid> {
         self.bindings.get(&grid_id).map(|layer| &*layer.grid)
     }
-
-    fn grid_mut(&mut self, grid_id: GridId) -> Option<&mut ScreenGrid> {
-        self.bindings
-            .get_mut(&grid_id)
-            .map(|layer| &mut *layer.grid)
-    }
 }
 
 static COMPOSITOR_GRID_BINDINGS: Mutex<Option<CCompositorGridBindings>> = Mutex::new(None);

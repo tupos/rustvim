@@ -663,6 +663,7 @@ struct LayerState {
     placement: CompositorGridPlacement,
     disabled: bool,
     accepts_mouse_input: bool,
+    publication_pending: bool,
 }
 
 impl LayerState {
@@ -677,6 +678,7 @@ impl LayerState {
             placement,
             disabled: false,
             accepts_mouse_input,
+            publication_pending: true,
         }
     }
 
@@ -780,6 +782,27 @@ impl Compositor {
             .ok_or(CompositorError::InvalidLayerState)
     }
 
+    /// Reports whether one registered layer must publish its stack index.
+    fn grid_publication_pending(&self, grid_id: GridId) -> CompositorResult<bool> {
+        Ok(self.layers()?.publication_pending(grid_id))
+    }
+
+    /// Takes one registered layer's current stack-index publication.
+    ///
+    /// Taking a publication acknowledges any pending update. A registered
+    /// layer can also be taken when no update was pending because callers may
+    /// need its current structural index for another position event.
+    fn take_grid_publication(
+        &mut self,
+        grid_id: GridId,
+    ) -> CompositorResult<Option<CompositorLayerPublication>> {
+        Ok(self
+            .layers
+            .as_mut()
+            .ok_or(CompositorError::InvalidLayerState)?
+            .take_publication(grid_id))
+    }
+
     /// Returns the composed-screen origin of one registered grid.
     fn grid_origin(&self, grid_id: GridId) -> CompositorResult<Option<ComposedPosition>> {
         Ok(self
@@ -833,7 +856,7 @@ impl Compositor {
     /// Updates message-grid placement and returns its required display work.
     fn set_message_position(
         &mut self,
-        message_grid: &mut ScreenGrid,
+        message_grid: &ScreenGrid,
         default_grid: &ScreenGrid,
         request: CompositorMessagePositionRequest,
     ) -> CompositorResult<CompositorMessagePositionPlan> {
@@ -841,7 +864,6 @@ impl Compositor {
         let plan =
             self.message
                 .update_position(message_grid, default_grid, request, should_draw)?;
-        message_grid.mark_compositor_index_for_update();
         if let Some(layer) = self.layers.as_mut().and_then(|layers| {
             layers
                 .index_of(message_grid.id())
@@ -856,7 +878,7 @@ impl Compositor {
     /// state.
     fn prepare_grid_placement(
         &mut self,
-        grids: &mut impl GridAccess,
+        grids: &impl GridAccess,
         target: CompositorGridPlacementTarget,
         current_window_layer: Option<usize>,
         request: CompositorGridPlacementRequest,
@@ -875,10 +897,6 @@ impl Compositor {
                 layer.try_plan_placement(request.placement, request.valid, should_draw)?
             };
 
-            grids
-                .grid_mut(target.grid_id)
-                .ok_or(CompositorError::InvalidLayerState)?
-                .mark_compositor_index_for_update();
             let layer = layers
                 .get_mut(target.layer_index)
                 .ok_or(CompositorError::InvalidLayerState)?;
@@ -886,6 +904,7 @@ impl Compositor {
                 return Err(CompositorError::InvalidLayerState);
             }
             layer.accepts_mouse_input = request.accepts_mouse_input;
+            layer.publication_pending = true;
             let deferred_completion = if should_draw {
                 layer.disabled = true;
                 Some(CompositorGridPlacementCompletion {
@@ -930,7 +949,7 @@ impl Compositor {
             request.placement,
             request.accepts_mouse_input,
         )?;
-        layers.place_appended_layer(grids, insertion_index, request.placement)?;
+        layers.place_appended_layer(insertion_index, request.placement)?;
         self.layers = Some(layers);
         Ok(CompositorGridPlacementPreparation {
             plan,
@@ -966,7 +985,7 @@ impl Compositor {
     /// matching the previous C-side `comp_index == 0` check.
     fn adjust_layer_order(
         &mut self,
-        grids: &mut impl GridAccess,
+        grids: &impl GridAccess,
         grid_id: GridId,
         adjustment: CompositorLayerAdjustment,
     ) -> CompositorResult<()> {
@@ -979,7 +998,7 @@ impl Compositor {
             resolved_layers.plan_layer_adjustment(layer_index, adjustment)?
         };
 
-        layers.move_layer(grids, movement)?;
+        layers.move_layer(movement)?;
         self.layers = Some(layers);
         Ok(())
     }
@@ -987,7 +1006,7 @@ impl Compositor {
     /// Removes one non-default grid from the compositor layer stack.
     fn remove_layer(
         &mut self,
-        grids: &mut impl GridAccess,
+        grids: &impl GridAccess,
         layer_index: usize,
     ) -> CompositorResult<CompositorLayerRemoval> {
         if layer_index == 0 {
@@ -1011,7 +1030,7 @@ impl Compositor {
             None
         };
 
-        layers.remove_layer(grids, layer_index)?;
+        layers.remove_layer(layer_index)?;
         self.layers = Some(layers);
 
         Ok(CompositorLayerRemoval { recompose_area })
@@ -1047,7 +1066,7 @@ impl Compositor {
     /// Moves the composed cursor and applies any required layer raise.
     fn move_cursor(
         &mut self,
-        grids: &mut impl GridAccess,
+        grids: &impl GridAccess,
         request: CompositorCursorRequest,
     ) -> CompositorResult<CompositorCursorUpdate> {
         let mut layers = self.layer_snapshot()?;
@@ -1064,7 +1083,7 @@ impl Compositor {
                 let resolved_layers = layers.layer_stack(grids)?;
                 resolved_layers.plan_layer_raise(plan.layer_index, target_index)?
             };
-            layers.move_layer(grids, raise_plan.movement)?;
+            layers.move_layer(raise_plan.movement)?;
             raise_plan.recompose_areas
         } else {
             Vec::new()
@@ -1152,6 +1171,7 @@ impl Compositor {
                         let size = GridSize::try_new(message_grid.rows, message_grid.cols)?;
                         CompositorLayer::try_from_grid(
                             message_grid,
+                            0,
                             CompositorGridPlacement {
                                 origin: ComposedPosition::new(self.message.current_row, 0),
                                 size,
@@ -1565,6 +1585,7 @@ impl<'grid> CompositorLayer<'grid> {
     /// Constructs a validated layer view from grid and compositor-owned state.
     fn try_from_grid(
         grid: &'grid ScreenGrid,
+        layer_index: usize,
         placement: CompositorGridPlacement,
         accepts_mouse_input: bool,
         disabled: bool,
@@ -1581,7 +1602,7 @@ impl<'grid> CompositorLayer<'grid> {
             requested_size: placement.size,
             visible_size,
             z_index: grid.z_index(),
-            layer_index: grid.compositor_index(),
+            layer_index,
             blending: grid.blends_with_background(),
             accepts_mouse_input,
             disabled,
@@ -1824,9 +1845,6 @@ impl LayerHitTest {
 trait GridAccess {
     /// Borrows one grid by identity.
     fn grid(&self, grid_id: GridId) -> Option<&ScreenGrid>;
-
-    /// Mutably borrows one grid by identity.
-    fn grid_mut(&mut self, grid_id: GridId) -> Option<&mut ScreenGrid>;
 }
 
 /// Direction in which a layer's changed z-index may move it.
@@ -1841,6 +1859,12 @@ enum CompositorLayerAdjustment {
 struct CompositorLayerMove {
     source_index: usize,
     target_index: usize,
+}
+
+/// One registered layer's structural index for external publication.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CompositorLayerPublication {
+    layer_index: usize,
 }
 
 /// A compositor layer collection with a structurally separate default layer.
@@ -1936,6 +1960,34 @@ impl Layers<LayerState> {
             .and_then(|index| index.checked_add(1))
     }
 
+    /// Reports whether one registered layer must publish its stack index.
+    fn publication_pending(&self, grid_id: GridId) -> bool {
+        self.index_of(grid_id)
+            .and_then(|layer_index| self.get(layer_index))
+            .is_some_and(|layer| layer.publication_pending)
+    }
+
+    /// Takes a registered layer's current stack-index publication.
+    fn take_publication(&mut self, grid_id: GridId) -> Option<CompositorLayerPublication> {
+        let layer_index = self.index_of(grid_id)?;
+        let layer = self.get_mut(layer_index)?;
+        layer.publication_pending = false;
+        Some(CompositorLayerPublication { layer_index })
+    }
+
+    /// Schedules publication for every layer in an inclusive index range.
+    fn schedule_publications(
+        &mut self,
+        affected_indices: std::ops::RangeInclusive<usize>,
+    ) -> CompositorResult<()> {
+        for layer_index in affected_indices {
+            self.get_mut(layer_index)
+                .ok_or(CompositorError::InvalidLayerState)?
+                .publication_pending = true;
+        }
+        Ok(())
+    }
+
     /// Appends one previously unregistered grid identity.
     fn try_append(
         &mut self,
@@ -1988,12 +2040,14 @@ impl Layers<LayerState> {
     ) -> CompositorResult<Layers<CompositorLayer<'grid>>> {
         let mut resolved_layers = self
             .iter()
-            .map(|layer| {
+            .enumerate()
+            .map(|(layer_index, layer)| {
                 let grid = grids.grid(layer.grid_id)?;
                 (grid.id() == layer.grid_id)
                     .then(|| {
                         CompositorLayer::try_from_grid(
                             grid,
+                            layer_index,
                             layer.placement,
                             layer.accepts_mouse_input,
                             layer.disabled,
@@ -2012,21 +2066,12 @@ impl Layers<LayerState> {
             overlays: resolved_layers.collect(),
         };
 
-        if layers
-            .iter()
-            .enumerate()
-            .any(|(index, layer)| layer.layer_index != index)
-        {
-            return Err(CompositorError::InvalidLayerState);
-        }
-
         Ok(layers)
     }
 
     /// Places the appended grid at its planned compositor-stack index.
     fn place_appended_layer(
         &mut self,
-        grids: &mut impl GridAccess,
         insertion_index: usize,
         placement: CompositorGridPlacement,
     ) -> CompositorResult<()> {
@@ -2038,13 +2083,10 @@ impl Layers<LayerState> {
             return Err(CompositorError::InvalidLayerState);
         }
 
-        self.move_layer(
-            grids,
-            CompositorLayerMove {
-                source_index: appended_index,
-                target_index: insertion_index,
-            },
-        )?;
+        self.move_layer(CompositorLayerMove {
+            source_index: appended_index,
+            target_index: insertion_index,
+        })?;
         let grid_id = self
             .layer_id(insertion_index)
             .ok_or(CompositorError::InvalidLayerState)?;
@@ -2058,48 +2100,17 @@ impl Layers<LayerState> {
         Ok(())
     }
 
-    /// Applies a relocation and synchronizes affected grid metadata.
-    fn move_layer(
-        &mut self,
-        grids: &mut impl GridAccess,
-        movement: CompositorLayerMove,
-    ) -> CompositorResult<()> {
+    /// Applies a relocation and schedules affected layer publications.
+    fn move_layer(&mut self, movement: CompositorLayerMove) -> CompositorResult<()> {
         self.apply_layer_move(movement)?;
-
-        let affected_indices = movement.affected_indices();
-        let first_index = *affected_indices.start();
-        for (offset, index) in affected_indices.enumerate() {
-            let grid_id = self
-                .layer_id(index)
-                .ok_or(CompositorError::InvalidLayerState)?;
-            let grid = grids
-                .grid_mut(grid_id)
-                .ok_or(CompositorError::InvalidLayerState)?;
-            grid.set_compositor_index(first_index + offset);
-        }
-        Ok(())
+        self.schedule_publications(movement.affected_indices())
     }
 
-    /// Removes one non-default layer and synchronizes shifted grid indices.
-    fn remove_layer(
-        &mut self,
-        grids: &mut impl GridAccess,
-        layer_index: usize,
-    ) -> CompositorResult<()> {
-        let removed_grid_id = self.remove_non_default(layer_index)?;
-        grids
-            .grid_mut(removed_grid_id)
-            .ok_or(CompositorError::InvalidLayerState)?
-            .set_compositor_index(0);
-
-        for new_index in layer_index..self.len() {
-            let grid_id = self
-                .layer_id(new_index)
-                .ok_or(CompositorError::InvalidLayerState)?;
-            let grid = grids
-                .grid_mut(grid_id)
-                .ok_or(CompositorError::InvalidLayerState)?;
-            grid.set_compositor_index(new_index);
+    /// Removes one non-default layer and schedules shifted publications.
+    fn remove_layer(&mut self, layer_index: usize) -> CompositorResult<()> {
+        self.remove_non_default(layer_index)?;
+        if layer_index < self.len() {
+            self.schedule_publications(layer_index..=self.len() - 1)?;
         }
         Ok(())
     }
@@ -3177,6 +3188,22 @@ mod tests {
             .collect()
     }
 
+    /// Acknowledges every publication in the installed test compositor.
+    fn clear_registered_test_layer_publications() {
+        let grid_ids = compositor_layer_ids();
+        let mut compositor = lock_compositor();
+        for grid_id in grid_ids {
+            assert!(compositor.take_grid_publication(grid_id).unwrap().is_some());
+        }
+    }
+
+    /// Takes one publication from the installed test compositor.
+    fn take_registered_test_layer_publication(
+        grid_id: GridId,
+    ) -> Option<CompositorLayerPublication> {
+        lock_compositor().take_grid_publication(grid_id).unwrap()
+    }
+
     /// Assigns one screen origin in the installed test compositor.
     fn set_registered_test_layer_origin(grid_id: GridId, origin: ComposedPosition) {
         let mut compositor = lock_compositor();
@@ -3419,7 +3446,7 @@ mod tests {
     #[test]
     fn moving_message_grid_down_recomposes_the_exposed_rows() {
         let mut compositor = Compositor::new();
-        let mut message_grid = grid_with_size(10, 20);
+        let message_grid = grid_with_size(10, 20);
         let default_grid = grid_with_size(10, 18);
         compositor.layers = Some(Layers {
             default: test_layer_state(&default_grid),
@@ -3427,7 +3454,7 @@ mod tests {
         });
         assert_eq!(
             compositor.set_message_position(
-                &mut message_grid,
+                &message_grid,
                 &default_grid,
                 message_position_request(5, false),
             ),
@@ -3437,7 +3464,7 @@ mod tests {
         compositor.attach();
         let plan = compositor
             .set_message_position(
-                &mut message_grid,
+                &message_grid,
                 &default_grid,
                 message_position_request(7, false),
             )
@@ -3468,7 +3495,7 @@ mod tests {
     #[test]
     fn moving_message_grid_up_scrolls_text_and_recomposes_a_new_separator() {
         let mut compositor = Compositor::new();
-        let mut message_grid = grid_with_size(10, 20);
+        let message_grid = grid_with_size(10, 20);
         let default_grid = grid_with_size(10, 18);
         compositor.layers = Some(Layers {
             default: test_layer_state(&default_grid),
@@ -3476,7 +3503,7 @@ mod tests {
         });
         compositor
             .set_message_position(
-                &mut message_grid,
+                &message_grid,
                 &default_grid,
                 message_position_request(5, false),
             )
@@ -3485,7 +3512,7 @@ mod tests {
         compositor.attach();
         let plan = compositor
             .set_message_position(
-                &mut message_grid,
+                &message_grid,
                 &default_grid,
                 message_position_request(2, true),
             )
@@ -3710,23 +3737,22 @@ mod tests {
     }
 
     #[test]
-    fn registered_layer_adjustment_updates_rust_order_and_indices() {
+    fn registered_layer_adjustment_updates_rust_order_and_publication() {
         let default_grid = grid_with_size(1, 1);
         let mut moving_grid = grid_with_size(1, 1);
         moving_grid.set_z_index(30);
-        moving_grid.set_compositor_index(1);
         let mut lower_grid = grid_with_size(1, 1);
         lower_grid.set_z_index(20);
-        lower_grid.set_compositor_index(2);
         let mut equal_grid = grid_with_size(1, 1);
         equal_grid.set_z_index(30);
-        equal_grid.set_compositor_index(3);
         let moving_grid_id = moving_grid.id();
+        let lower_grid_id = lower_grid.id();
+        let equal_grid_id = equal_grid.id();
         let expected_registry = [
             default_grid.id(),
-            lower_grid.id(),
+            lower_grid_id,
             moving_grid_id,
-            equal_grid.id(),
+            equal_grid_id,
         ];
 
         // SAFETY: Each conversion transfers its grid allocations to a
@@ -3755,6 +3781,7 @@ mod tests {
             // grids for the duration of the adjustment.
             let _registry = unsafe { register_test_compositor_layers(&cgrids) };
 
+            clear_registered_test_layer_publications();
             assert_eq!(
                 adjust_registered_layer_order(moving_grid_id, CompositorLayerAdjustment::Raise,),
                 Ok(())
@@ -3769,10 +3796,23 @@ mod tests {
                     equal_pointer,
                 ]
             );
+            assert_eq!(
+                take_registered_test_layer_publication(lower_grid_id),
+                Some(CompositorLayerPublication { layer_index: 1 })
+            );
+            assert_eq!(
+                take_registered_test_layer_publication(moving_grid_id),
+                Some(CompositorLayerPublication { layer_index: 2 })
+            );
+            assert!(
+                !lock_compositor()
+                    .grid_publication_pending(equal_grid_id)
+                    .unwrap()
+            );
         }
 
         // SAFETY: The adjustment restored every grid allocation.
-        let (default_grid, moving_grid, lower_grid, equal_grid) = unsafe {
+        let (_default_grid, _moving_grid, _lower_grid, _equal_grid) = unsafe {
             (
                 ScreenGrid::take_from_cgrid(&mut default_cgrid),
                 ScreenGrid::take_from_cgrid(&mut moving_cgrid),
@@ -3780,10 +3820,6 @@ mod tests {
                 ScreenGrid::take_from_cgrid(&mut equal_cgrid),
             )
         };
-        assert_eq!(default_grid.compositor_index(), 0);
-        assert_eq!(moving_grid.compositor_index(), 2);
-        assert_eq!(lower_grid.compositor_index(), 1);
-        assert_eq!(equal_grid.compositor_index(), 3);
     }
 
     #[test]
@@ -3947,11 +3983,10 @@ mod tests {
     #[test]
     fn registered_cursor_update_raises_the_layer_and_restores_grid_ownership() {
         let default_grid = grid_with_size(10, 12);
+        let default_grid_id = default_grid.id();
         let mut selected_grid = grid_with_size(2, 2);
         selected_grid.handle = 7;
-        selected_grid.set_compositor_index(1);
-        let mut upper_grid = grid_with_size(2, 2);
-        upper_grid.set_compositor_index(2);
+        let upper_grid = grid_with_size(2, 2);
         let selected_grid_id = selected_grid.id();
         let upper_grid_id = upper_grid.id();
 
@@ -3973,6 +4008,7 @@ mod tests {
         let _registry = unsafe { register_test_compositor_layers(&cgrids) };
         set_registered_test_layer_origin(selected_grid_id, ComposedPosition::new(2, 3));
         set_registered_test_layer_origin(upper_grid_id, ComposedPosition::new(2, 3));
+        clear_registered_test_layer_publications();
 
         assert_eq!(
             apply_cursor_update_to_registered_grids(CompositorCursorRequest {
@@ -4004,18 +4040,27 @@ mod tests {
             })
         );
         assert_eq!(cgrids, [default_pointer, selected_pointer, upper_pointer]);
+        assert_eq!(
+            compositor_layer_ids(),
+            [default_grid_id, upper_grid_id, selected_grid_id]
+        );
+        assert_eq!(
+            take_registered_test_layer_publication(upper_grid_id),
+            Some(CompositorLayerPublication { layer_index: 1 })
+        );
+        assert_eq!(
+            take_registered_test_layer_publication(selected_grid_id),
+            Some(CompositorLayerPublication { layer_index: 2 })
+        );
 
         // SAFETY: Both cursor updates restored every grid allocation.
-        let (default_grid, selected_grid, upper_grid) = unsafe {
+        let (_default_grid, _selected_grid, _upper_grid) = unsafe {
             (
                 ScreenGrid::take_from_cgrid(&mut default_cgrid),
                 ScreenGrid::take_from_cgrid(&mut selected_cgrid),
                 ScreenGrid::take_from_cgrid(&mut upper_cgrid),
             )
         };
-        assert_eq!(default_grid.compositor_index(), 0);
-        assert_eq!(selected_grid.compositor_index(), 2);
-        assert_eq!(upper_grid.compositor_index(), 1);
     }
 
     #[test]
@@ -4029,8 +4074,8 @@ mod tests {
     #[test]
     fn registered_layers_place_existing_grid_and_restore_ownership() {
         let default_grid = grid_with_size(4, 4);
-        let mut moving_grid = grid_with_size(2, 2);
-        moving_grid.set_compositor_index(1);
+        let moving_grid = grid_with_size(2, 2);
+        let moving_grid_id = moving_grid.id();
         // SAFETY: Each conversion transfers its grid allocations to a distinct
         // C representation.
         let (mut default_cgrid, mut moving_cgrid) =
@@ -4043,6 +4088,7 @@ mod tests {
         // SAFETY: The array contains distinct, exclusively accessible grids.
         let _registry = unsafe { register_test_compositor_layers(&cgrids) };
         let _compositor = attach_test_compositor();
+        clear_registered_test_layer_publications();
 
         // SAFETY: The candidate is already registered.
         let (grid_store, grid_id, was_registered) = unsafe {
@@ -4093,15 +4139,17 @@ mod tests {
                 },
             ]
         );
+        assert_eq!(
+            take_registered_test_layer_publication(moving_grid_id),
+            Some(CompositorLayerPublication { layer_index: 1 })
+        );
         // SAFETY: The placement restored ownership to both C grids.
-        let (default_grid, moving_grid) = unsafe {
+        let (_default_grid, _moving_grid) = unsafe {
             (
                 ScreenGrid::take_from_cgrid(&mut default_cgrid),
                 ScreenGrid::take_from_cgrid(&mut moving_cgrid),
             )
         };
-        assert_eq!(default_grid.compositor_index(), 0);
-        assert_eq!(moving_grid.compositor_index(), 1);
         assert_eq!(
             lock_compositor()
                 .layers()
@@ -4117,11 +4165,11 @@ mod tests {
     #[test]
     fn registered_layers_place_appended_grid_and_restore_ownership() {
         let default_grid = grid_with_size(4, 4);
-        let mut current_grid = grid_with_size(2, 2);
-        current_grid.set_compositor_index(1);
+        let current_grid = grid_with_size(2, 2);
         let appended_grid = grid_with_size(2, 2);
         let current_grid_id = current_grid.id();
-        let expected_registry = [default_grid.id(), appended_grid.id(), current_grid_id];
+        let appended_grid_id = appended_grid.id();
+        let expected_registry = [default_grid.id(), appended_grid_id, current_grid_id];
         // SAFETY: Each conversion transfers its grid allocations to a distinct
         // C representation.
         let (mut default_cgrid, mut current_cgrid, mut appended_cgrid) = unsafe {
@@ -4140,6 +4188,7 @@ mod tests {
         // SAFETY: The array contains distinct, exclusively accessible grids.
         let _registry = unsafe { register_test_compositor_layers(&cgrids) };
         let _compositor = attach_test_compositor();
+        clear_registered_test_layer_publications();
 
         // SAFETY: The candidate is distinct from every registered grid and is
         // exclusively accessible.
@@ -4184,18 +4233,23 @@ mod tests {
             }]
         );
         assert_eq!(compositor_layer_ids(), expected_registry);
+        assert_eq!(
+            take_registered_test_layer_publication(appended_grid_id),
+            Some(CompositorLayerPublication { layer_index: 1 })
+        );
+        assert_eq!(
+            take_registered_test_layer_publication(current_grid_id),
+            Some(CompositorLayerPublication { layer_index: 2 })
+        );
 
         // SAFETY: The placement restored ownership to every C grid.
-        let (default_grid, current_grid, appended_grid) = unsafe {
+        let (_default_grid, _current_grid, _appended_grid) = unsafe {
             (
                 ScreenGrid::take_from_cgrid(&mut default_cgrid),
                 ScreenGrid::take_from_cgrid(&mut current_cgrid),
                 ScreenGrid::take_from_cgrid(&mut appended_cgrid),
             )
         };
-        assert_eq!(default_grid.compositor_index(), 0);
-        assert_eq!(appended_grid.compositor_index(), 1);
-        assert_eq!(current_grid.compositor_index(), 2);
         assert_eq!(
             lock_compositor()
                 .layers()
@@ -4299,11 +4353,13 @@ mod tests {
     }
 
     #[test]
-    fn guarded_layer_move_updates_registry_and_grid_indices() {
+    fn guarded_layer_move_updates_registry_and_publication() {
         let default_grid = grid_with_row(&[schar_from_ascii('d')], &[1]);
         let lower_grid = grid_with_row(&[schar_from_ascii('l')], &[2]);
         let upper_grid = grid_with_row(&[schar_from_ascii('u')], &[3]);
-        let expected_registry = [default_grid.id(), upper_grid.id(), lower_grid.id()];
+        let lower_grid_id = lower_grid.id();
+        let upper_grid_id = upper_grid.id();
+        let expected_registry = [default_grid.id(), upper_grid_id, lower_grid_id];
         // SAFETY: Each conversion transfers its grid allocations to a distinct
         // C representation.
         let (mut default_cgrid, mut lower_cgrid, mut upper_cgrid) = unsafe {
@@ -4321,47 +4377,54 @@ mod tests {
         {
             // SAFETY: The pointers identify distinct, exclusively accessible
             // C grids and the pointer array remains readable for this scope.
-            let (mut grid_store, layer_ids) = unsafe {
+            let (_grid_store, layer_ids) = unsafe {
                 LegacyGridStore::try_take_in_binding_order(cgrids.as_ptr(), cgrids.len())
             }
             .unwrap();
             let mut layers = Layers::try_new(layer_ids).unwrap();
+            for grid_id in layers.iter().map(|layer| layer.grid_id).collect::<Vec<_>>() {
+                assert!(layers.take_publication(grid_id).is_some());
+            }
             layers
-                .move_layer(
-                    &mut grid_store,
-                    CompositorLayerMove {
-                        source_index: 2,
-                        target_index: 1,
-                    },
-                )
+                .move_layer(CompositorLayerMove {
+                    source_index: 2,
+                    target_index: 1,
+                })
                 .unwrap();
             assert_eq!(
                 layers.iter().map(|layer| layer.grid_id).collect::<Vec<_>>(),
                 expected_registry
+            );
+            assert_eq!(
+                layers.take_publication(upper_grid_id),
+                Some(CompositorLayerPublication { layer_index: 1 })
+            );
+            assert_eq!(
+                layers.take_publication(lower_grid_id),
+                Some(CompositorLayerPublication { layer_index: 2 })
             );
         }
 
         assert_eq!(cgrids, [default_pointer, lower_pointer, upper_pointer]);
 
         // SAFETY: Dropping the collection returned ownership to every C grid.
-        let (default_grid, lower_grid, upper_grid) = unsafe {
+        let (_default_grid, _lower_grid, _upper_grid) = unsafe {
             (
                 ScreenGrid::take_from_cgrid(&mut default_cgrid),
                 ScreenGrid::take_from_cgrid(&mut lower_cgrid),
                 ScreenGrid::take_from_cgrid(&mut upper_cgrid),
             )
         };
-        assert_eq!(default_grid.compositor_index(), 0);
-        assert_eq!(lower_grid.compositor_index(), 2);
-        assert_eq!(upper_grid.compositor_index(), 1);
     }
 
     #[test]
-    fn guarded_layer_removal_updates_registry_and_indices() {
+    fn guarded_layer_removal_updates_registry_and_publication() {
         let default_grid = grid_with_row(&[schar_from_ascii('d')], &[1]);
         let removed_grid = grid_with_row(&[schar_from_ascii('r')], &[2]);
         let remaining_grid = grid_with_row(&[schar_from_ascii('k')], &[3]);
-        let expected_registry = [default_grid.id(), remaining_grid.id()];
+        let removed_grid_id = removed_grid.id();
+        let remaining_grid_id = remaining_grid.id();
+        let expected_registry = [default_grid.id(), remaining_grid_id];
         // SAFETY: Each conversion transfers its grid allocations to a distinct
         // C representation.
         let (mut default_cgrid, mut removed_cgrid, mut remaining_cgrid) = unsafe {
@@ -4379,19 +4442,27 @@ mod tests {
         {
             // SAFETY: The pointers identify distinct, exclusively accessible
             // C grids and the pointer array remains readable for this scope.
-            let (mut grid_store, layer_ids) = unsafe {
+            let (_grid_store, layer_ids) = unsafe {
                 LegacyGridStore::try_take_in_binding_order(cgrids.as_ptr(), cgrids.len())
             }
             .unwrap();
             let mut layers = Layers::try_new(layer_ids).unwrap();
+            for grid_id in layers.iter().map(|layer| layer.grid_id).collect::<Vec<_>>() {
+                assert!(layers.take_publication(grid_id).is_some());
+            }
             assert_eq!(
-                layers.remove_layer(&mut grid_store, 0),
+                layers.remove_layer(0),
                 Err(CompositorError::DefaultLayerMutation)
             );
-            assert_eq!(layers.remove_layer(&mut grid_store, 1), Ok(()));
+            assert_eq!(layers.remove_layer(1), Ok(()));
             assert_eq!(
                 layers.iter().map(|layer| layer.grid_id).collect::<Vec<_>>(),
                 expected_registry
+            );
+            assert!(layers.take_publication(removed_grid_id).is_none());
+            assert_eq!(
+                layers.take_publication(remaining_grid_id),
+                Some(CompositorLayerPublication { layer_index: 1 })
             );
         }
 
@@ -4401,27 +4472,23 @@ mod tests {
         );
 
         // SAFETY: Dropping the collection returned ownership to every C grid.
-        let (default_grid, removed_grid, remaining_grid) = unsafe {
+        let (_default_grid, _removed_grid, _remaining_grid) = unsafe {
             (
                 ScreenGrid::take_from_cgrid(&mut default_cgrid),
                 ScreenGrid::take_from_cgrid(&mut removed_cgrid),
                 ScreenGrid::take_from_cgrid(&mut remaining_cgrid),
             )
         };
-        assert_eq!(default_grid.compositor_index(), 0);
-        assert_eq!(removed_grid.compositor_index(), 0);
-        assert_eq!(remaining_grid.compositor_index(), 1);
     }
 
     #[test]
     fn registered_layer_removal_returns_area_and_restores_ownership() {
         let default_grid = grid_with_size(4, 4);
-        let mut removed_grid = grid_with_size(2, 2);
-        removed_grid.set_compositor_index(1);
-        let mut remaining_grid = grid_with_size(2, 2);
-        remaining_grid.set_compositor_index(2);
+        let removed_grid = grid_with_size(2, 2);
+        let remaining_grid = grid_with_size(2, 2);
         let removed_grid_id = removed_grid.id();
-        let expected_registry = [default_grid.id(), remaining_grid.id()];
+        let remaining_grid_id = remaining_grid.id();
+        let expected_registry = [default_grid.id(), remaining_grid_id];
 
         // SAFETY: Each conversion transfers its grid allocations to a distinct
         // C representation.
@@ -4441,6 +4508,7 @@ mod tests {
         let _registry = unsafe { register_test_compositor_layers(&registry_cgrids) };
         set_registered_test_layer_origin(removed_grid_id, ComposedPosition::new(1, 1));
         let _compositor = attach_test_compositor();
+        clear_registered_test_layer_publications();
 
         let grid_store = LegacyGridStore::try_take_registered().unwrap();
         let layer_index = lock_compositor()
@@ -4457,6 +4525,10 @@ mod tests {
             })
         );
         assert_eq!(compositor_layer_ids(), expected_registry);
+        assert_eq!(
+            take_registered_test_layer_publication(remaining_grid_id),
+            Some(CompositorLayerPublication { layer_index: 1 })
+        );
 
         {
             let grid_store = LegacyGridStore::try_take_registered().unwrap();
@@ -4465,16 +4537,13 @@ mod tests {
         }
 
         // SAFETY: Removal restored every grid allocation.
-        let (default_grid, removed_grid, remaining_grid) = unsafe {
+        let (_default_grid, _removed_grid, _remaining_grid) = unsafe {
             (
                 ScreenGrid::take_from_cgrid(&mut default_cgrid),
                 ScreenGrid::take_from_cgrid(&mut removed_cgrid),
                 ScreenGrid::take_from_cgrid(&mut remaining_cgrid),
             )
         };
-        assert_eq!(default_grid.compositor_index(), 0);
-        assert_eq!(removed_grid.compositor_index(), 0);
-        assert_eq!(remaining_grid.compositor_index(), 1);
     }
 
     #[test]
@@ -4503,8 +4572,7 @@ mod tests {
     #[test]
     fn registered_hit_testing_returns_the_bound_c_grid() {
         let default_grid = grid_with_size(4, 4);
-        let mut overlay_grid = grid_with_size(2, 2);
-        overlay_grid.set_compositor_index(1);
+        let overlay_grid = grid_with_size(2, 2);
         let overlay_grid_id = overlay_grid.id();
 
         // SAFETY: Each conversion transfers its grid allocations to a
@@ -4650,10 +4718,8 @@ mod tests {
     #[test]
     fn registered_bindings_support_cursor_coverage_queries() {
         let default_grid = grid_with_size(4, 4);
-        let mut current_grid = grid_with_size(2, 2);
-        current_grid.set_compositor_index(1);
-        let mut upper_grid = grid_with_size(2, 2);
-        upper_grid.set_compositor_index(2);
+        let current_grid = grid_with_size(2, 2);
+        let upper_grid = grid_with_size(2, 2);
         let external_grid = grid_with_size(2, 2);
         let current_cursor_grid = CompositorCursorGrid::from(&current_grid);
         let external_cursor_grid = CompositorCursorGrid::from(&external_grid);

@@ -45,6 +45,9 @@ extern bool ui_comp_grid_contains_at(
 
 extern bool ui_comp_grid_origin(Integer grid_handle, int *row, int *column);
 
+extern bool ui_comp_grid_publication_pending(Integer grid_handle);
+extern int ui_comp_take_grid_publication(Integer grid_handle);
+
 extern bool ui_comp_cursor_is_covered_by_higher_layer(
   ScreenGrid *current_grid, int row, int column,
   int minimum_z_index_gap);

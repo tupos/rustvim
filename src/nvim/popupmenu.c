@@ -1673,12 +1673,14 @@ void pum_make_popup(const char *path_name, int use_mouse_pos)
 void pum_pos_ui_flush(bool force)
 {
   if (force || (ui_has(kUIMultigrid) && pum_is_drawn && !pum_external
-                && pum_grid.handle != 0 && pum_grid.pending_comp_index_update)) {
+                && pum_grid.handle != 0
+                && ui_comp_grid_publication_pending(pum_grid.handle))) {
+    int compositor_index = ui_comp_take_grid_publication(pum_grid.handle);
+    assert(compositor_index > 0);
     const char *anchor = pum_above ? "SW" : "NW";
     int row_off = pum_above ? -pum_height : 0;
     ui_call_win_float_pos(pum_grid.handle, -1, cstr_as_string(anchor), pum_anchor_grid,
                           pum_row - row_off - pum_win_row_offset, pum_left_col - pum_win_col_offset,
-                          false, pum_grid.zindex, (int)pum_grid.comp_index, pum_row, pum_left_col);
-    pum_grid.pending_comp_index_update = false;
+                          false, pum_grid.zindex, compositor_index, pum_row, pum_left_col);
   }
 }

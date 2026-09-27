@@ -961,10 +961,13 @@ void ui_ext_win_position(win_T *wp, bool validate)
                        wp->w_height_outer, wp->w_width_outer, valid, false,
                        c.mouse, curwin ? curwin->w_grid_alloc.handle : 0);
       if (ui_has(kUIMultigrid)) {
+        int compositor_index =
+          ui_comp_take_grid_publication(wp->w_grid_alloc.handle);
+        assert(compositor_index > 0);
         String anchor = cstr_as_string(float_anchor_str[c.anchor]);
         ui_call_win_float_pos(wp->w_grid_alloc.handle, wp->handle, anchor,
                               grid->handle, row, col, c.mouse,
-                              wp->w_grid_alloc.zindex, (int)wp->w_grid_alloc.comp_index,
+                              wp->w_grid_alloc.zindex, compositor_index,
                               wp->w_winrow, wp->w_wincol);
       }
       ui_check_cursor_grid(wp->w_grid_alloc.handle);
@@ -7902,7 +7905,8 @@ void win_get_tabwin(handle_T id, int *tabnr, int *winnr)
 void win_ui_flush(bool validate)
 {
   FOR_ALL_TAB_WINDOWS(tp, wp) {
-    if ((wp->w_pos_changed || wp->w_grid_alloc.pending_comp_index_update)
+    if ((wp->w_pos_changed
+         || ui_comp_grid_publication_pending(wp->w_grid_alloc.handle))
         && grid_is_allocated(&wp->w_grid_alloc)) {
       if (tp == curtab) {
         ui_ext_win_position(wp, validate);
@@ -7910,7 +7914,11 @@ void win_ui_flush(bool validate)
         ui_call_win_hide(wp->w_grid_alloc.handle);
         wp->w_pos_changed = false;
       }
-      wp->w_grid_alloc.pending_comp_index_update = false;
+      if (ui_comp_grid_publication_pending(wp->w_grid_alloc.handle)) {
+        int compositor_index =
+          ui_comp_take_grid_publication(wp->w_grid_alloc.handle);
+        assert(compositor_index > 0);
+      }
     }
     if (tp == curtab) {
       ui_ext_win_viewport(wp);
