@@ -25,10 +25,10 @@ use crate::{
 };
 #[cfg(test)]
 use ffi::{
-    adjust_registered_layer_order, apply_cursor_update_to_registered_grids,
-    cursor_is_covered_by_registered_layers,
+    apply_cursor_update_to_registered_grids, cursor_is_covered_by_registered_layers,
     grid_store::{LegacyGridStore, lock_compositor_grid_bindings},
     place_grid_in_registered_layers, remove_registered_layer, ui_comp_find_grid_at_coord,
+    update_registered_layer_z_index,
 };
 
 #[cfg(test)]
@@ -47,21 +47,20 @@ impl SegmentComposition {
     }
 }
 
-/// Identity and stacking position of the grid whose cursor is being tested.
+/// Identity and fallback stacking position for a cursor coverage query.
 ///
-/// The grid need not be registered as a compositor layer.
+/// Registered grids use their compositor-owned z-index. The fallback supports
+/// grids that are not registered as compositor layers.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct CompositorCursorGrid {
     grid_id: GridId,
     z_index: i32,
 }
 
-impl From<&ScreenGrid> for CompositorCursorGrid {
-    fn from(grid: &ScreenGrid) -> Self {
-        Self {
-            grid_id: grid.id(),
-            z_index: grid.z_index(),
-        }
+impl CompositorCursorGrid {
+    /// Creates one cursor-grid identity with an unregistered-grid fallback.
+    const fn new(grid_id: GridId, z_index: i32) -> Self {
+        Self { grid_id, z_index }
     }
 }
 
@@ -274,28 +273,28 @@ struct CompositorGridPlacement {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct CompositorGridPlacementRequest {
     placement: CompositorGridPlacement,
+    z_index: i32,
     valid: bool,
     on_top: bool,
     accepts_mouse_input: bool,
 }
 
 impl CompositorGridPlacementRequest {
-    /// Constructs a placement request with valid dimensions.
-    fn try_new(
-        row: i32,
-        column: i32,
-        height: i32,
-        width: i32,
+    /// Constructs a request from validated placement geometry.
+    const fn new(
+        placement: CompositorGridPlacement,
+        z_index: i32,
         valid: bool,
         on_top: bool,
         accepts_mouse_input: bool,
-    ) -> Option<Self> {
-        Some(Self {
-            placement: CompositorGridPlacement::try_new(row, column, height, width)?,
+    ) -> Self {
+        Self {
+            placement,
+            z_index,
             valid,
             on_top,
             accepts_mouse_input,
-        })
+        }
     }
 }
 
@@ -427,6 +426,7 @@ impl CompositorGridPlacementPlan {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct CompositorMessagePositionRequest {
     row: i32,
+    z_index: i32,
     separator_character: Option<VimSCharT>,
     screen_size: GridSize,
     scrolled: bool,
@@ -436,12 +436,14 @@ impl CompositorMessagePositionRequest {
     /// Constructs a message-position request from validated native values.
     fn new(
         row: i32,
+        z_index: i32,
         separator_character: Option<VimSCharT>,
         screen_size: GridSize,
         scrolled: bool,
     ) -> Self {
         Self {
             row,
+            z_index,
             separator_character,
             screen_size,
             scrolled,
@@ -513,6 +515,7 @@ impl CompositorDrawState {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct MessageCompositorState {
     current_row: i32,
+    z_index: i32,
     was_scrolled: bool,
     separator_row: Option<i32>,
     separator_character: VimSCharT,
@@ -523,6 +526,7 @@ impl MessageCompositorState {
     const fn new() -> Self {
         Self {
             current_row: i32::MAX,
+            z_index: 0,
             was_scrolled: false,
             separator_row: None,
             separator_character: VimSCharT::from_ne_bytes([b' ', 0, 0, 0]),
@@ -637,6 +641,7 @@ impl MessageCompositorState {
         }
         self.separator_row = separator_row;
         self.current_row = request.row;
+        self.z_index = request.z_index;
         self.was_scrolled = request.scrolled;
 
         Ok(plan)
@@ -661,6 +666,7 @@ impl MessageCompositorState {
 struct LayerState {
     grid_id: GridId,
     placement: CompositorGridPlacement,
+    z_index: i32,
     disabled: bool,
     accepts_mouse_input: bool,
     publication_pending: bool,
@@ -671,11 +677,13 @@ impl LayerState {
     const fn new(
         grid_id: GridId,
         placement: CompositorGridPlacement,
+        z_index: i32,
         accepts_mouse_input: bool,
     ) -> Self {
         Self {
             grid_id,
             placement,
+            z_index,
             disabled: false,
             accepts_mouse_input,
             publication_pending: true,
@@ -693,6 +701,7 @@ impl LayerState {
                     width: 0,
                 },
             },
+            0,
             true,
         )
     }
@@ -870,6 +879,7 @@ impl Compositor {
                 .and_then(|layer_index| layers.get_mut(layer_index))
         }) {
             layer.placement.origin.row = request.row;
+            layer.z_index = request.z_index;
         }
         Ok(plan)
     }
@@ -904,6 +914,7 @@ impl Compositor {
                 return Err(CompositorError::InvalidLayerState);
             }
             layer.accepts_mouse_input = request.accepts_mouse_input;
+            layer.z_index = request.z_index;
             layer.publication_pending = true;
             let deferred_completion = if should_draw {
                 layer.disabled = true;
@@ -929,9 +940,8 @@ impl Compositor {
             let grid = grids
                 .grid(target.grid_id)
                 .ok_or(CompositorError::InvalidLayerState)?;
-            let resolved_layers = layers.layer_stack(grids)?;
-            let insertion_index = resolved_layers.plan_layer_insertion(
-                grid.z_index(),
+            let insertion_index = layers.plan_layer_insertion(
+                request.z_index,
                 current_window_layer,
                 request.on_top,
             )?;
@@ -947,6 +957,7 @@ impl Compositor {
         layers.try_append(
             target.grid_id,
             request.placement,
+            request.z_index,
             request.accepts_mouse_input,
         )?;
         layers.place_appended_layer(insertion_index, request.placement)?;
@@ -979,24 +990,31 @@ impl Compositor {
         Ok(())
     }
 
-    /// Adjusts a grid's layer position after its z-index changes.
+    /// Updates one registered grid's z-index and adjusts its layer position.
     ///
     /// A grid that is not currently registered is accepted as a no-op,
     /// matching the previous C-side `comp_index == 0` check.
-    fn adjust_layer_order(
-        &mut self,
-        grids: &impl GridAccess,
-        grid_id: GridId,
-        adjustment: CompositorLayerAdjustment,
-    ) -> CompositorResult<()> {
+    fn update_layer_z_index(&mut self, grid_id: GridId, z_index: i32) -> CompositorResult<()> {
         let mut layers = self.layer_snapshot()?;
         let Some(layer_index) = layers.index_of(grid_id) else {
             return Ok(());
         };
-        let movement = {
-            let resolved_layers = layers.layer_stack(grids)?;
-            resolved_layers.plan_layer_adjustment(layer_index, adjustment)?
+        let previous_z_index = layers
+            .get(layer_index)
+            .ok_or(CompositorError::InvalidLayerState)?
+            .z_index;
+        let adjustment = if z_index > previous_z_index {
+            CompositorLayerAdjustment::Raise
+        } else if z_index < previous_z_index {
+            CompositorLayerAdjustment::Lower
+        } else {
+            return Ok(());
         };
+        layers
+            .get_mut(layer_index)
+            .ok_or(CompositorError::InvalidLayerState)?
+            .z_index = z_index;
+        let movement = layers.plan_layer_adjustment(layer_index, adjustment)?;
 
         layers.move_layer(movement)?;
         self.layers = Some(layers);
@@ -1176,6 +1194,7 @@ impl Compositor {
                                 origin: ComposedPosition::new(self.message.current_row, 0),
                                 size,
                             },
+                            self.message.z_index,
                             false,
                             false,
                         )
@@ -1587,6 +1606,7 @@ impl<'grid> CompositorLayer<'grid> {
         grid: &'grid ScreenGrid,
         layer_index: usize,
         placement: CompositorGridPlacement,
+        z_index: i32,
         accepts_mouse_input: bool,
         disabled: bool,
     ) -> Option<Self> {
@@ -1601,7 +1621,7 @@ impl<'grid> CompositorLayer<'grid> {
             origin: placement.origin,
             requested_size: placement.size,
             visible_size,
-            z_index: grid.z_index(),
+            z_index,
             layer_index,
             blending: grid.blends_with_background(),
             accepts_mouse_input,
@@ -1776,6 +1796,11 @@ impl<'grid> CompositorLayer<'grid> {
             grid: self.grid,
             origin: self.origin,
         }
+    }
+
+    /// Reports whether this layer is at least `minimum_gap` above a z-index.
+    fn is_at_least_z_index_above(self, lower_z_index: i32, minimum_gap: u32) -> bool {
+        i64::from(self.z_index) - i64::from(lower_z_index) >= i64::from(minimum_gap)
     }
 
     /// Borrows the grid cells corresponding to composed-screen columns.
@@ -1988,19 +2013,104 @@ impl Layers<LayerState> {
         Ok(())
     }
 
+    /// Selects the stable insertion index for one new layer.
+    fn plan_layer_insertion(
+        &self,
+        z_index: i32,
+        current_window_layer: Option<usize>,
+        on_top: bool,
+    ) -> CompositorResult<usize> {
+        if self.default.z_index > z_index {
+            return Err(CompositorError::InvalidLayerState);
+        }
+
+        let mut insertion_index = self.len();
+        while insertion_index > 1
+            && self
+                .get(insertion_index - 1)
+                .ok_or(CompositorError::InvalidLayerState)?
+                .z_index
+                > z_index
+        {
+            insertion_index -= 1;
+        }
+
+        if !on_top && insertion_index > 1 {
+            let preceding_index = insertion_index - 1;
+            let preceding_layer = self
+                .get(preceding_index)
+                .ok_or(CompositorError::InvalidLayerState)?;
+            if current_window_layer == Some(preceding_index) && preceding_layer.z_index == z_index {
+                insertion_index = preceding_index;
+            }
+        }
+
+        Ok(insertion_index)
+    }
+
+    /// Plans a stable relocation after one layer's z-index changes.
+    fn plan_layer_adjustment(
+        &self,
+        layer_index: usize,
+        adjustment: CompositorLayerAdjustment,
+    ) -> CompositorResult<CompositorLayerMove> {
+        if layer_index == 0 {
+            return Err(CompositorError::DefaultLayerMutation);
+        }
+        let layer = self
+            .get(layer_index)
+            .ok_or(CompositorError::InvalidLayerState)?;
+
+        let mut target_index = layer_index;
+        match adjustment {
+            CompositorLayerAdjustment::Raise => {
+                while target_index + 1 < self.len()
+                    && layer.z_index
+                        > self
+                            .get(target_index + 1)
+                            .ok_or(CompositorError::InvalidLayerState)?
+                            .z_index
+                {
+                    target_index += 1;
+                }
+            }
+            CompositorLayerAdjustment::Lower => {
+                while target_index > 1
+                    && layer.z_index
+                        < self
+                            .get(target_index - 1)
+                            .ok_or(CompositorError::InvalidLayerState)?
+                            .z_index
+                {
+                    target_index -= 1;
+                }
+            }
+        }
+
+        Ok(CompositorLayerMove {
+            source_index: layer_index,
+            target_index,
+        })
+    }
+
     /// Appends one previously unregistered grid identity.
     fn try_append(
         &mut self,
         grid_id: GridId,
         placement: CompositorGridPlacement,
+        z_index: i32,
         accepts_mouse_input: bool,
     ) -> CompositorResult<()> {
         if self.index_of(grid_id).is_some() {
             return Err(CompositorError::InvalidLayerState);
         }
 
-        self.overlays
-            .push(LayerState::new(grid_id, placement, accepts_mouse_input));
+        self.overlays.push(LayerState::new(
+            grid_id,
+            placement,
+            z_index,
+            accepts_mouse_input,
+        ));
         Ok(())
     }
 
@@ -2049,6 +2159,7 @@ impl Layers<LayerState> {
                             grid,
                             layer_index,
                             layer.placement,
+                            layer.z_index,
                             layer.accepts_mouse_input,
                             layer.disabled,
                         )
@@ -2177,41 +2288,6 @@ impl<'grid> Layers<CompositorLayer<'grid>> {
         self.get(index).copied()
     }
 
-    /// Selects the stable insertion index for one new layer.
-    fn plan_layer_insertion(
-        &self,
-        z_index: i32,
-        current_window_layer: Option<usize>,
-        on_top: bool,
-    ) -> CompositorResult<usize> {
-        if self.default.z_index > z_index {
-            return Err(CompositorError::InvalidLayerState);
-        }
-
-        let mut insertion_index = self.len();
-        while insertion_index > 1
-            && self
-                .layer(insertion_index - 1)
-                .ok_or(CompositorError::InvalidLayerState)?
-                .z_index
-                > z_index
-        {
-            insertion_index -= 1;
-        }
-
-        if !on_top && insertion_index > 1 {
-            let preceding_index = insertion_index - 1;
-            let preceding_layer = self
-                .layer(preceding_index)
-                .ok_or(CompositorError::InvalidLayerState)?;
-            if current_window_layer == Some(preceding_index) && preceding_layer.z_index == z_index {
-                insertion_index = preceding_index;
-            }
-        }
-
-        Ok(insertion_index)
-    }
-
     /// Finds the compositor layer identified by one native grid identity.
     fn layer_index_with_id(&self, grid_id: GridId) -> Option<usize> {
         self.iter().position(|layer| layer.grid.id() == grid_id)
@@ -2292,60 +2368,18 @@ impl<'grid> Layers<CompositorLayer<'grid>> {
         current_grid: CompositorCursorGrid,
         minimum_z_index_gap: u32,
     ) -> bool {
+        let current_z_index = self
+            .layer_index_with_id(current_grid.grid_id)
+            .and_then(|index| self.layer(index))
+            .map_or(current_grid.z_index, |layer| layer.z_index);
+
         self.topmost_grid_at(point, LayerHitTest::Any)
             .and_then(|hit| self.layer_index_with_id(hit.grid_id))
             .and_then(|index| self.layer(index))
             .is_some_and(|top_layer| {
                 top_layer.grid.id() != current_grid.grid_id
-                    && top_layer
-                        .grid
-                        .is_at_least_z_index_above(current_grid.z_index, minimum_z_index_gap)
+                    && top_layer.is_at_least_z_index_above(current_z_index, minimum_z_index_gap)
             })
-    }
-
-    /// Plans a stable relocation after one layer's z-index changes.
-    fn plan_layer_adjustment(
-        &self,
-        layer_index: usize,
-        adjustment: CompositorLayerAdjustment,
-    ) -> CompositorResult<CompositorLayerMove> {
-        if layer_index == 0 {
-            return Err(CompositorError::DefaultLayerMutation);
-        }
-        let layer = self
-            .layer(layer_index)
-            .ok_or(CompositorError::InvalidLayerState)?;
-
-        let mut target_index = layer_index;
-        match adjustment {
-            CompositorLayerAdjustment::Raise => {
-                while target_index + 1 < self.len()
-                    && layer.z_index
-                        > self
-                            .layer(target_index + 1)
-                            .ok_or(CompositorError::InvalidLayerState)?
-                            .z_index
-                {
-                    target_index += 1;
-                }
-            }
-            CompositorLayerAdjustment::Lower => {
-                while target_index > 1
-                    && layer.z_index
-                        < self
-                            .layer(target_index - 1)
-                            .ok_or(CompositorError::InvalidLayerState)?
-                            .z_index
-                {
-                    target_index -= 1;
-                }
-            }
-        }
-
-        Ok(CompositorLayerMove {
-            source_index: layer_index,
-            target_index,
-        })
     }
 
     /// Plans an explicit upward move and recomposition of crossed layers.
@@ -3218,6 +3252,19 @@ mod tests {
             .origin = origin;
     }
 
+    /// Assigns one z-index in the installed test compositor.
+    fn set_registered_test_layer_z_index(grid_id: GridId, z_index: i32) {
+        let mut compositor = lock_compositor();
+        let layer_index = compositor.layer_index(grid_id).unwrap().unwrap();
+        compositor
+            .layers
+            .as_mut()
+            .unwrap()
+            .get_mut(layer_index)
+            .unwrap()
+            .z_index = z_index;
+    }
+
     /// Sets mouse-input policy for one layer in the installed test compositor.
     fn set_registered_test_layer_mouse_input(grid_id: GridId, accepts_mouse_input: bool) {
         let mut compositor = lock_compositor();
@@ -3258,6 +3305,7 @@ mod tests {
                 origin: ComposedPosition::new(0, 0),
                 size: GridSize::try_new(grid.rows, grid.cols).unwrap(),
             },
+            0,
             true,
         )
     }
@@ -3360,6 +3408,7 @@ mod tests {
     fn message_position_request(row: i32, scrolled: bool) -> CompositorMessagePositionRequest {
         CompositorMessagePositionRequest {
             row,
+            z_index: 0,
             separator_character: Some(schar_from_ascii('-')),
             screen_size: GridSize {
                 height: 10,
@@ -3716,16 +3765,16 @@ mod tests {
         let moving_grid = grid_with_size(1, 1);
         let lower_grid = grid_with_size(1, 1);
         let equal_grid = grid_with_size(1, 1);
-        let mut moving_layer = compositor_layer(&moving_grid, 0, 1, 1, false);
+        let mut moving_layer = test_layer_state(&moving_grid);
         moving_layer.z_index = 30;
-        let mut lower_layer = compositor_layer(&lower_grid, 0, 1, 2, false);
+        let mut lower_layer = test_layer_state(&lower_grid);
         lower_layer.z_index = 20;
-        let mut equal_layer = compositor_layer(&equal_grid, 0, 1, 3, false);
+        let mut equal_layer = test_layer_state(&equal_grid);
         equal_layer.z_index = 30;
-        let layers = compositor_layers(
-            compositor_layer(&default_grid, 0, 1, 0, false),
-            vec![moving_layer, lower_layer, equal_layer],
-        );
+        let layers = Layers {
+            default: test_layer_state(&default_grid),
+            overlays: vec![moving_layer, lower_layer, equal_layer],
+        };
 
         assert_eq!(
             layers.plan_layer_adjustment(1, CompositorLayerAdjustment::Raise),
@@ -3739,12 +3788,9 @@ mod tests {
     #[test]
     fn registered_layer_adjustment_updates_rust_order_and_publication() {
         let default_grid = grid_with_size(1, 1);
-        let mut moving_grid = grid_with_size(1, 1);
-        moving_grid.set_z_index(30);
-        let mut lower_grid = grid_with_size(1, 1);
-        lower_grid.set_z_index(20);
-        let mut equal_grid = grid_with_size(1, 1);
-        equal_grid.set_z_index(30);
+        let moving_grid = grid_with_size(1, 1);
+        let lower_grid = grid_with_size(1, 1);
+        let equal_grid = grid_with_size(1, 1);
         let moving_grid_id = moving_grid.id();
         let lower_grid_id = lower_grid.id();
         let equal_grid_id = equal_grid.id();
@@ -3780,12 +3826,11 @@ mod tests {
             // SAFETY: The array contains distinct, exclusively accessible
             // grids for the duration of the adjustment.
             let _registry = unsafe { register_test_compositor_layers(&cgrids) };
+            set_registered_test_layer_z_index(lower_grid_id, 20);
+            set_registered_test_layer_z_index(equal_grid_id, 30);
 
             clear_registered_test_layer_publications();
-            assert_eq!(
-                adjust_registered_layer_order(moving_grid_id, CompositorLayerAdjustment::Raise,),
-                Ok(())
-            );
+            assert_eq!(update_registered_layer_z_index(moving_grid_id, 30), Ok(()));
             assert_eq!(compositor_layer_ids(), expected_registry);
             assert_eq!(
                 cgrids,
@@ -3913,14 +3958,14 @@ mod tests {
         let default_grid = grid_with_size(1, 1);
         let current_grid = grid_with_size(1, 1);
         let upper_grid = grid_with_size(1, 1);
-        let mut current_layer = compositor_layer(&current_grid, 0, 1, 1, false);
+        let mut current_layer = test_layer_state(&current_grid);
         current_layer.z_index = 10;
-        let mut upper_layer = compositor_layer(&upper_grid, 0, 1, 2, false);
+        let mut upper_layer = test_layer_state(&upper_grid);
         upper_layer.z_index = 20;
-        let layers = compositor_layers(
-            compositor_layer(&default_grid, 0, 1, 0, false),
-            vec![current_layer, upper_layer],
-        );
+        let layers = Layers {
+            default: test_layer_state(&default_grid),
+            overlays: vec![current_layer, upper_layer],
+        };
 
         assert_eq!(layers.plan_layer_insertion(10, Some(1), true), Ok(2));
         assert_eq!(layers.plan_layer_insertion(10, Some(1), false), Ok(1));
@@ -4066,7 +4111,10 @@ mod tests {
     #[test]
     fn layer_insertion_never_displaces_default_layer() {
         let default_grid = grid_with_size(1, 1);
-        let layers = compositor_layers(compositor_layer(&default_grid, 0, 1, 0, false), Vec::new());
+        let layers = Layers {
+            default: test_layer_state(&default_grid),
+            overlays: Vec::new(),
+        };
 
         assert_eq!(layers.plan_layer_insertion(0, Some(0), false), Ok(1));
     }
@@ -4107,6 +4155,7 @@ mod tests {
                 None,
                 CompositorGridPlacementRequest {
                     placement: CompositorGridPlacement::try_new(1, 2, 2, 2).unwrap(),
+                    z_index: 0,
                     valid: true,
                     on_top: false,
                     accepts_mouse_input: true,
@@ -4214,6 +4263,7 @@ mod tests {
                 current_window_layer,
                 CompositorGridPlacementRequest {
                     placement: CompositorGridPlacement::try_new(1, 2, 2, 2).unwrap(),
+                    z_index: 0,
                     valid: true,
                     on_top: false,
                     accepts_mouse_input: true,
@@ -4267,16 +4317,16 @@ mod tests {
         let equal_grid = grid_with_size(1, 1);
         let higher_grid = grid_with_size(1, 1);
         let moving_grid = grid_with_size(1, 1);
-        let mut equal_layer = compositor_layer(&equal_grid, 0, 1, 1, false);
+        let mut equal_layer = test_layer_state(&equal_grid);
         equal_layer.z_index = 10;
-        let mut higher_layer = compositor_layer(&higher_grid, 0, 1, 2, false);
+        let mut higher_layer = test_layer_state(&higher_grid);
         higher_layer.z_index = 20;
-        let mut moving_layer = compositor_layer(&moving_grid, 0, 1, 3, false);
+        let mut moving_layer = test_layer_state(&moving_grid);
         moving_layer.z_index = 10;
-        let layers = compositor_layers(
-            compositor_layer(&default_grid, 0, 1, 0, false),
-            vec![equal_layer, higher_layer, moving_layer],
-        );
+        let layers = Layers {
+            default: test_layer_state(&default_grid),
+            overlays: vec![equal_layer, higher_layer, moving_layer],
+        };
 
         assert_eq!(
             layers.plan_layer_adjustment(3, CompositorLayerAdjustment::Lower),
@@ -4696,17 +4746,19 @@ mod tests {
         let default_grid = grid_with_size(3, 3);
         let current_grid = grid_with_size(3, 3);
         let upper_grid = grid_with_size(2, 2);
+        let mut upper_layer = compositor_layer(&upper_grid, 1, 2, 1, false);
+        upper_layer.z_index = 100;
         let layers = compositor_layers(
             compositor_layer(&default_grid, 0, 3, 0, false),
-            vec![compositor_layer(&upper_grid, 1, 2, 1, false)],
+            vec![upper_layer],
         );
         let covered_point = ComposedPosition::new(0, 1);
 
-        let current_cursor_grid = CompositorCursorGrid::from(&current_grid);
-        let upper_cursor_grid = CompositorCursorGrid::from(&upper_grid);
+        let current_cursor_grid = CompositorCursorGrid::new(current_grid.id(), 50);
+        let upper_cursor_grid = CompositorCursorGrid::new(upper_grid.id(), 100);
 
-        assert!(layers.is_cursor_covered_by_higher_layer(covered_point, current_cursor_grid, 0));
-        assert!(!layers.is_cursor_covered_by_higher_layer(covered_point, current_cursor_grid, 1));
+        assert!(layers.is_cursor_covered_by_higher_layer(covered_point, current_cursor_grid, 50));
+        assert!(!layers.is_cursor_covered_by_higher_layer(covered_point, current_cursor_grid, 51));
         assert!(!layers.is_cursor_covered_by_higher_layer(covered_point, upper_cursor_grid, 0));
         assert!(!layers.is_cursor_covered_by_higher_layer(
             ComposedPosition::new(2, 2),
@@ -4721,8 +4773,10 @@ mod tests {
         let current_grid = grid_with_size(2, 2);
         let upper_grid = grid_with_size(2, 2);
         let external_grid = grid_with_size(2, 2);
-        let current_cursor_grid = CompositorCursorGrid::from(&current_grid);
-        let external_cursor_grid = CompositorCursorGrid::from(&external_grid);
+        let current_grid_id = current_grid.id();
+        let upper_grid_id = upper_grid.id();
+        let current_cursor_grid = CompositorCursorGrid::new(current_grid_id, 0);
+        let external_cursor_grid = CompositorCursorGrid::new(external_grid.id(), 50);
 
         // SAFETY: Each conversion transfers its grid allocations to a
         // distinct C representation.
@@ -4743,17 +4797,19 @@ mod tests {
             // grids for the duration of the coverage queries.
             let _registry = unsafe { register_test_compositor_layers(&cgrids) };
             let _compositor = attach_test_compositor();
+            set_registered_test_layer_z_index(current_grid_id, 50);
+            set_registered_test_layer_z_index(upper_grid_id, 100);
 
             assert_eq!(
-                cursor_is_covered_by_registered_layers(current_cursor_grid, 0, 0, 0),
+                cursor_is_covered_by_registered_layers(current_cursor_grid, 0, 0, 50),
                 Ok(true)
             );
             assert_eq!(
-                cursor_is_covered_by_registered_layers(external_cursor_grid, 0, 0, 0),
+                cursor_is_covered_by_registered_layers(external_cursor_grid, 0, 0, 50),
                 Ok(true)
             );
             assert_eq!(
-                cursor_is_covered_by_registered_layers(current_cursor_grid, 0, 0, 1),
+                cursor_is_covered_by_registered_layers(current_cursor_grid, 0, 0, 51),
                 Ok(false)
             );
         }

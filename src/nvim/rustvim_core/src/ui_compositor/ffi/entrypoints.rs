@@ -157,15 +157,18 @@ pub unsafe extern "C" fn ui_comp_msg_set_pos(
     row: Integer,
     scrolled: bool,
     separator_character: CVimString,
-    _z_index: Integer,
+    z_index: Integer,
     _compositor_index: Integer,
 ) {
-    let row = i32::try_from(row).expect("message-grid row must fit native coordinates");
+    let (Ok(row), Ok(z_index)) = (i32::try_from(row), i32::try_from(z_index)) else {
+        panic!("message-grid position must fit native compositor values");
+    };
     let runtime = compositor_runtime_snapshot().expect("compositor runtime must be valid");
     let separator_character = (!separator_character.data.is_null())
         .then(|| schar_from_buf(separator_character.data, separator_character.size));
     let request = CompositorMessagePositionRequest::new(
         row,
+        z_index,
         separator_character,
         runtime.screen_size,
         scrolled,
@@ -295,22 +298,17 @@ pub unsafe extern "C" fn ui_comp_put_grid(
     column: libc::c_int,
     height: libc::c_int,
     width: libc::c_int,
+    z_index: libc::c_int,
     valid: bool,
     on_top: bool,
     accepts_mouse_input: bool,
     current_window_grid_handle: Integer,
 ) -> bool {
     let grid = NonNull::new(grid).expect("grid to place must not be null");
-    let request = CompositorGridPlacementRequest::try_new(
-        row,
-        column,
-        height,
-        width,
-        valid,
-        on_top,
-        accepts_mouse_input,
-    )
-    .expect("grid placement dimensions must be nonnegative");
+    let placement = CompositorGridPlacement::try_new(row, column, height, width)
+        .expect("grid placement dimensions must be nonnegative");
+    let request =
+        CompositorGridPlacementRequest::new(placement, z_index, valid, on_top, accepts_mouse_input);
     let runtime = compositor_runtime_snapshot().expect("compositor runtime must be valid");
     let current_window_grid_id = match i32::try_from(current_window_grid_handle) {
         Ok(0) => None,
@@ -425,37 +423,20 @@ pub extern "C" fn ui_comp_grid_cursor_goto(grid_handle: Integer, row: Integer, c
         .expect("cursor update must preserve compositor invariants");
 }
 
-/// Adjusts a registered grid's layer order.
-pub(in crate::ui_compositor) fn adjust_registered_layer_order(
+/// Updates a registered grid's z-index and layer order.
+pub(in crate::ui_compositor) fn update_registered_layer_z_index(
     grid_id: GridId,
-    adjustment: CompositorLayerAdjustment,
+    z_index: i32,
 ) -> CompositorResult<()> {
-    let grid_store =
-        LegacyGridStore::try_take_registered().ok_or(CompositorError::InvalidLayerState)?;
-    lock_compositor().adjust_layer_order(&grid_store, grid_id, adjustment)
+    lock_compositor().update_layer_z_index(grid_id, z_index)
 }
 
-/// Adjusts the layer position of one compositor grid.
-///
-/// # Safety
-///
-/// `grid` must point to an exclusively accessible C grid whose buffers satisfy
-/// the ownership and layout requirements of `ScreenGrid`.
+/// Updates one compositor grid's z-index and layer position.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ui_comp_layers_adjust(grid: *mut CScreenGrid, raise: bool) {
-    let grid = NonNull::new(grid).expect("grid to adjust must not be null");
-    let grid_id = {
-        // SAFETY: The caller transfers exclusive ownership for this scope.
-        let grid = unsafe { ScreenGridGuard::take(grid.as_ptr()) };
-        grid.id()
-    };
-    let adjustment = if raise {
-        CompositorLayerAdjustment::Raise
-    } else {
-        CompositorLayerAdjustment::Lower
-    };
-
-    adjust_registered_layer_order(grid_id, adjustment)
+pub extern "C" fn ui_comp_update_grid_zindex(grid_handle: Integer, z_index: libc::c_int) {
+    let grid_handle =
+        i32::try_from(grid_handle).expect("grid handle must fit the compositor grid identity");
+    update_registered_layer_z_index(GridId::new(grid_handle), z_index)
         .expect("layer adjustment must preserve compositor invariants");
 }
 
@@ -693,29 +674,22 @@ pub(in crate::ui_compositor) fn cursor_is_covered_by_registered_layers(
 
 /// Reports whether a sufficiently higher compositor layer covers a grid's
 /// cursor.
-///
-/// # Safety
-///
-/// `current_grid` must point to an exclusively accessible C grid whose buffers
-/// satisfy the ownership and layout requirements of `ScreenGrid`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ui_comp_cursor_is_covered_by_higher_layer(
-    current_grid: *mut CScreenGrid,
+pub extern "C" fn ui_comp_cursor_is_covered_by_higher_layer(
+    current_grid_handle: Integer,
+    current_grid_z_index: libc::c_int,
     row: libc::c_int,
     column: libc::c_int,
     minimum_z_index_gap: libc::c_int,
 ) -> bool {
-    let Some(current_grid) = NonNull::new(current_grid) else {
+    let Ok(current_grid_handle) = i32::try_from(current_grid_handle) else {
         return false;
     };
     let Ok(minimum_z_index_gap) = u32::try_from(minimum_z_index_gap) else {
         return false;
     };
-    let current_grid = {
-        // SAFETY: The caller transfers exclusive ownership for this scope.
-        let grid = unsafe { ScreenGridGuard::take(current_grid.as_ptr()) };
-        CompositorCursorGrid::from(&*grid)
-    };
+    let current_grid =
+        CompositorCursorGrid::new(GridId::new(current_grid_handle), current_grid_z_index);
 
     cursor_is_covered_by_registered_layers(current_grid, row, column, minimum_z_index_gap)
         .unwrap_or(false)

@@ -927,12 +927,7 @@ void ui_ext_win_position(win_T *wp, bool validate)
       row += tabline_height();
     }
 
-    bool zindex_changed = wp->w_grid_alloc.zindex != wp->w_config.zindex;
-    bool raise = wp->w_grid_alloc.zindex < wp->w_config.zindex;
-    wp->w_grid_alloc.zindex = wp->w_config.zindex;
-    if (zindex_changed) {
-      ui_comp_layers_adjust(&wp->w_grid_alloc, raise);
-    }
+    ui_comp_update_grid_zindex(wp->w_grid_alloc.handle, wp->w_config.zindex);
     bool valid = (wp->w_redr_type == 0 || ui_has(kUIMultigrid));
     if (!valid && !validate) {
       wp->w_pos_changed = true;
@@ -958,7 +953,7 @@ void ui_ext_win_position(win_T *wp, bool validate)
 
     if (!c.hide) {
       ui_comp_put_grid(&wp->w_grid_alloc, comp_row, comp_col,
-                       wp->w_height_outer, wp->w_width_outer, valid, false,
+                       wp->w_height_outer, wp->w_width_outer, c.zindex, valid, false,
                        c.mouse, curwin ? curwin->w_grid_alloc.handle : 0);
       if (ui_has(kUIMultigrid)) {
         int compositor_index =
@@ -967,7 +962,7 @@ void ui_ext_win_position(win_T *wp, bool validate)
         String anchor = cstr_as_string(float_anchor_str[c.anchor]);
         ui_call_win_float_pos(wp->w_grid_alloc.handle, wp->handle, anchor,
                               grid->handle, row, col, c.mouse,
-                              wp->w_grid_alloc.zindex, compositor_index,
+                              c.zindex, compositor_index,
                               wp->w_winrow, wp->w_wincol);
       }
       ui_check_cursor_grid(wp->w_grid_alloc.handle);

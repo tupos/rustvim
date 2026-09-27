@@ -276,9 +276,6 @@ pub struct ScreenGrid {
 
     /// whether the compositor should blend the grid with the background grid
     blending: bool,
-
-    /// z-index: the order in the stack of grids.
-    zindex: i32,
 }
 
 impl ScreenGrid {
@@ -297,7 +294,6 @@ impl ScreenGrid {
             valid: false,
             throttled: false,
             blending: false,
-            zindex: 0,
         };
         for i in 0..rows {
             let offset = i as usize * cols as usize;
@@ -322,21 +318,6 @@ impl ScreenGrid {
     /// Controls whether this grid blends with the default-grid background.
     pub(crate) fn set_blends_with_background(&mut self, blends: bool) {
         self.blending = blends;
-    }
-
-    /// Returns this grid's z-index in the compositor stack.
-    pub(crate) fn z_index(&self) -> i32 {
-        self.zindex
-    }
-
-    /// Updates this grid's compositor z-index.
-    pub(crate) fn set_z_index(&mut self, z_index: i32) {
-        self.zindex = z_index;
-    }
-
-    /// Reports whether this grid is at least `minimum_gap` above another grid.
-    pub(crate) fn is_at_least_z_index_above(&self, lower_z_index: i32, minimum_gap: u32) -> bool {
-        i64::from(self.zindex) - i64::from(lower_z_index) >= i64::from(minimum_gap)
     }
 
     pub fn from_grid(
@@ -461,7 +442,6 @@ impl ScreenGrid {
             valid: cgrid.valid,
             throttled: cgrid.throttled,
             blending: cgrid.blending,
-            zindex: cgrid.zindex,
         }
     }
 
@@ -488,7 +468,6 @@ impl ScreenGrid {
             valid: self.valid,
             throttled: self.throttled,
             blending: self.blending,
-            zindex: self.zindex,
         }
     }
 
@@ -2652,8 +2631,6 @@ pub struct CScreenGrid {
     throttled: bool,
 
     blending: bool,
-
-    zindex: libc::c_int,
 }
 
 impl CScreenGrid {
@@ -4958,7 +4935,6 @@ mod tests {
             valid: false,
             throttled: false,
             blending: false,
-            zindex: 0,
         };
 
         let allocator = GridHandleAllocator::new(DEFAULT_GRID_HANDLE);
@@ -4972,21 +4948,6 @@ mod tests {
         assert!(cgrid.attrs.is_null());
         assert!(cgrid.vcols.is_null());
         assert!(cgrid.line_offset.is_null());
-    }
-
-    #[test]
-    fn compositor_z_index_gap_is_inclusive() {
-        let mut line_buffer = LineBuffer::new(1);
-        let mut lower_grid = ScreenGrid::new(1, 1, true, &mut line_buffer);
-        let mut upper_grid = ScreenGrid::new(1, 1, true, &mut line_buffer);
-        lower_grid.zindex = 50;
-        upper_grid.zindex = 99;
-
-        assert!(!upper_grid.is_at_least_z_index_above(lower_grid.z_index(), 50));
-
-        upper_grid.zindex = 100;
-        assert!(upper_grid.is_at_least_z_index_above(lower_grid.z_index(), 50));
-        assert!(!lower_grid.is_at_least_z_index_above(upper_grid.z_index(), 50));
     }
 
     #[test]

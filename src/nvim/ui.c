@@ -667,7 +667,8 @@ static bool ui_cursor_is_behind_floatwin(void)
              + (curwin->w_p_rl ? curwin->w_view_width - curwin->w_wcol - 1 : curwin->w_wcol);
 
   return ui_comp_cursor_is_covered_by_higher_layer(
-    &curwin->w_grid_alloc, crow, ccol, kZIndexFloatDefault);
+    curwin->w_grid_alloc.handle, curwin->w_floating ? curwin->w_config.zindex : 0,
+    crow, ccol, kZIndexFloatDefault);
 }
 
 /// Returns true if the given UI extension is enabled.

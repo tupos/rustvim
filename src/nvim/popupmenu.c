@@ -81,6 +81,7 @@ static int pum_win_row_offset;      // The row offset needed to convert to windo
 static int pum_win_col_offset;      // The column offset needed to convert to window relative coordinates
 static int pum_left_col;            // left column of pum, before padding or scrollbar
 static int pum_right_col;           // right column of pum, after padding or scrollbar
+static int pum_zindex;              // compositor stacking order of pum
 static bool pum_above;              // pum is drawn above cursor line
 
 static bool pum_is_visible = false;
@@ -433,7 +434,7 @@ void pum_display(pumitem_T *array, int size, int selected, bool array_changed, i
     // room the window size will keep changing.
   } while (pum_set_selected(selected, redo_count) && ++redo_count <= 2);
 
-  pum_grid.zindex = (State & MODE_CMDLINE) ? kZIndexCmdlinePopupMenu : kZIndexPopupMenu;
+  pum_zindex = (State & MODE_CMDLINE) ? kZIndexCmdlinePopupMenu : kZIndexPopupMenu;
   pum_redraw();
 }
 
@@ -661,8 +662,8 @@ void pum_redraw(void)
   pum_left_col = pum_col - col_off;
   pum_right_col = pum_left_col + grid_width;
   bool moved = ui_comp_put_grid(&pum_grid, pum_row, pum_left_col,
-                                pum_height + border_width, grid_width + border_width, false,
-                                true, true, curwin ? curwin->w_grid_alloc.handle : 0);
+                                pum_height + border_width, grid_width + border_width, pum_zindex,
+                                false, true, true, curwin ? curwin->w_grid_alloc.handle : 0);
   bool invalid_grid = moved || pum_invalid;
   pum_invalid = false;
   must_redraw_pum = false;
@@ -1585,7 +1586,7 @@ void pum_show_popupmenu(vimmenu_T *menu)
   while (true) {
     pum_is_visible = true;
     pum_is_drawn = true;
-    pum_grid.zindex = kZIndexCmdlinePopupMenu;  // show above cmdline area #23275
+    pum_zindex = kZIndexCmdlinePopupMenu;  // show above cmdline area #23275
     pum_redraw();
     setcursor_mayforce(curwin, true);
 
@@ -1681,6 +1682,6 @@ void pum_pos_ui_flush(bool force)
     int row_off = pum_above ? -pum_height : 0;
     ui_call_win_float_pos(pum_grid.handle, -1, cstr_as_string(anchor), pum_anchor_grid,
                           pum_row - row_off - pum_win_row_offset, pum_left_col - pum_win_col_offset,
-                          false, pum_grid.zindex, compositor_index, pum_row, pum_left_col);
+                          false, pum_zindex, compositor_index, pum_row, pum_left_col);
   }
 }

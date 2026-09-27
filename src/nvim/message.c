@@ -172,7 +172,7 @@ static void ui_ext_msg_set_pos(int row, bool scrolled)
   size_t size = schar_get(buf, curwin->w_p_fcs_chars.msgsep);
   int compositor_index = ui_comp_take_grid_publication(msg_grid.handle);
   ui_call_msg_set_pos(msg_grid.handle, row, scrolled,
-                      (String){ .data = buf, .size = size }, msg_grid.zindex,
+                      (String){ .data = buf, .size = size }, kZIndexMessages,
                       compositor_index);
 }
 
@@ -203,8 +203,6 @@ void msg_grid_validate(void)
     // TODO(bfredl): eventually should be set to "invalid". I e all callers
     // will use the grid including clear to EOS if necessary.
     grid_alloc(&msg_grid, Rows, Columns, false, true);
-    msg_grid.zindex = kZIndexMessages;
-
     grid_reset_dirty_columns(&msg_grid);
 
     // Tricky: allow resize while pager or ex mode is active
@@ -212,7 +210,8 @@ void msg_grid_validate(void)
     msg_grid.throttled = false;  // don't throttle in 'cmdheight' area
     msg_grid_set_pos(pos, msg_scrolled);
     ui_comp_put_grid(&msg_grid, pos, 0, msg_grid.rows, msg_grid.cols,
-                     false, true, false, curwin ? curwin->w_grid_alloc.handle : 0);
+                     kZIndexMessages, false, true, false,
+                     curwin ? curwin->w_grid_alloc.handle : 0);
     ui_call_grid_resize(msg_grid.handle, msg_grid.cols, msg_grid.rows);
 
     msg_scrolled_at_flush = msg_scrolled;

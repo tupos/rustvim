@@ -13,10 +13,10 @@ extern void ui_comp_free_all_mem(void);
 extern void ui_comp_syn_init(void);
 extern void ui_comp_attach(void);
 extern void ui_comp_detach(void);
-extern void ui_comp_layers_adjust(ScreenGrid *grid, bool raise);
+extern void ui_comp_update_grid_zindex(Integer grid_handle, int z_index);
 extern bool ui_comp_put_grid(
   ScreenGrid *grid, int row, int column, int height, int width,
-  bool valid, bool on_top, bool accepts_mouse_input,
+  int z_index, bool valid, bool on_top, bool accepts_mouse_input,
   Integer current_window_grid_handle);
 extern void ui_comp_remove_grid(ScreenGrid *grid);
 extern void ui_comp_compose_grid(ScreenGrid *grid);
@@ -49,5 +49,5 @@ extern bool ui_comp_grid_publication_pending(Integer grid_handle);
 extern int ui_comp_take_grid_publication(Integer grid_handle);
 
 extern bool ui_comp_cursor_is_covered_by_higher_layer(
-  ScreenGrid *current_grid, int row, int column,
+  Integer current_grid_handle, int current_grid_z_index, int row, int column,
   int minimum_z_index_gap);
