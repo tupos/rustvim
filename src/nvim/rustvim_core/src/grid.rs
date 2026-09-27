@@ -290,12 +290,6 @@ pub struct ScreenGrid {
     comp_row: i32,
     comp_col: i32,
 
-    /// Requested width and height of the grid upon resize. Used by
-    /// `ui_compositor` to correctly determine which regions need to
-    /// be redrawn.
-    comp_width: i32,
-    comp_height: i32,
-
     /// z-index of the grid. Grids with higher index is draw on top.
     /// default_grid.comp_index is always zero.
     comp_index: usize,
@@ -324,8 +318,6 @@ impl ScreenGrid {
             zindex: 0,
             comp_row: 0,
             comp_col: 0,
-            comp_width: 0,
-            comp_height: 0,
             comp_index: 0,
             pending_comp_index_update: true,
         };
@@ -388,17 +380,6 @@ impl ScreenGrid {
     /// Reports whether this grid is at least `minimum_gap` above another grid.
     pub(crate) fn is_at_least_z_index_above(&self, lower_z_index: i32, minimum_gap: u32) -> bool {
         i64::from(self.zindex) - i64::from(lower_z_index) >= i64::from(minimum_gap)
-    }
-
-    /// Returns the size currently requested by the compositor.
-    pub(crate) fn compositor_size(&self) -> (i32, i32) {
-        (self.comp_width, self.comp_height)
-    }
-
-    /// Updates the size requested by the compositor.
-    pub(crate) fn set_compositor_size(&mut self, height: i32, width: i32) {
-        self.comp_height = height;
-        self.comp_width = width;
     }
 
     /// Assigns a compositor-stack index and records that it must be published.
@@ -543,8 +524,6 @@ impl ScreenGrid {
             zindex: cgrid.zindex,
             comp_row: cgrid.comp_row,
             comp_col: cgrid.comp_col,
-            comp_width: cgrid.comp_width,
-            comp_height: cgrid.comp_height,
             comp_index: cgrid.comp_index,
             pending_comp_index_update: cgrid.pending_comp_index_update,
         }
@@ -577,8 +556,6 @@ impl ScreenGrid {
             zindex: self.zindex,
             comp_row: self.comp_row,
             comp_col: self.comp_col,
-            comp_width: self.comp_width,
-            comp_height: self.comp_height,
             comp_index: self.comp_index,
             pending_comp_index_update: self.pending_comp_index_update,
         }
@@ -2751,9 +2728,6 @@ pub struct CScreenGrid {
 
     comp_row: libc::c_int,
     comp_col: libc::c_int,
-
-    comp_width: libc::c_int,
-    comp_height: libc::c_int,
 
     comp_index: libc::size_t,
 
@@ -5066,8 +5040,6 @@ mod tests {
             zindex: 0,
             comp_row: 0,
             comp_col: 0,
-            comp_width: 0,
-            comp_height: 0,
             comp_index: 0,
             pending_comp_index_update: true,
         };

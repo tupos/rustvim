@@ -208,9 +208,6 @@ bool default_grid_alloc(void)
   tab_page_click_defs = stl_alloc_click_defs(tab_page_click_defs, Columns,
                                              &tab_page_click_defs_size);
 
-  default_grid.comp_height = Rows;
-  default_grid.comp_width = Columns;
-
   default_grid.handle = DEFAULT_GRID_HANDLE;
 
   resizing = false;
