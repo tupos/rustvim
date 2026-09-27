@@ -84,7 +84,7 @@ fn library_link_name(path: &Path) -> Option<&str> {
     let file_name = path.file_name()?.to_str()?;
     let file_name = file_name.strip_prefix("lib").unwrap_or(file_name);
 
-    [".a", ".so", ".dylib", ".lib"]
+    [".a", ".so", ".dylib", ".tbd", ".lib"]
         .into_iter()
         .find_map(|suffix| file_name.strip_suffix(suffix))
 }
