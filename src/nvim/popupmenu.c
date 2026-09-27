@@ -1678,8 +1678,7 @@ void pum_pos_ui_flush(bool force)
     int row_off = pum_above ? -pum_height : 0;
     ui_call_win_float_pos(pum_grid.handle, -1, cstr_as_string(anchor), pum_anchor_grid,
                           pum_row - row_off - pum_win_row_offset, pum_left_col - pum_win_col_offset,
-                          false, pum_grid.zindex, (int)pum_grid.comp_index, pum_grid.comp_row,
-                          pum_grid.comp_col);
+                          false, pum_grid.zindex, (int)pum_grid.comp_index, pum_row, pum_left_col);
     pum_grid.pending_comp_index_update = false;
   }
 }

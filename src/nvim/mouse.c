@@ -1486,8 +1486,8 @@ retnomove:
     }
 
     if (grid == 0) {
-      row -= curwin->w_grid_alloc.comp_row + curwin->w_grid.row_offset;
-      col -= curwin->w_grid_alloc.comp_col + curwin->w_grid.col_offset;
+      row -= curwin->w_winrow + curwin->w_grid.row_offset;
+      col -= curwin->w_wincol + curwin->w_grid.col_offset;
     } else if (grid != DEFAULT_GRID_HANDLE) {
       row -= curwin->w_grid.row_offset;
       col -= curwin->w_grid.col_offset;
@@ -1854,12 +1854,16 @@ static win_T *mouse_find_grid_win(int *gridp, int *rowp, int *colp)
       return wp;
     }
   } else if (*gridp == 0) {
-    ScreenGrid *grid = ui_comp_find_grid_at_coord(*rowp, *colp, true);
+    int grid_row;
+    int grid_col;
+    ScreenGrid *grid = ui_comp_find_grid_at_coord(
+      *rowp, *colp, true, &grid_row, &grid_col);
     if (grid == NULL && ui_has(kUIMultigrid)) {
       FOR_ALL_WINDOWS_IN_TAB(wp, curtab) {
         ScreenGrid *window_grid = &wp->w_grid_alloc;
         if (ui_comp_grid_accepts_mouse_at(
-              window_grid, wp->w_winrow, wp->w_wincol, *rowp, *colp)) {
+              window_grid, wp->w_winrow, wp->w_wincol, *rowp, *colp,
+              &grid_row, &grid_col)) {
           grid = window_grid;
           break;
         }
@@ -1868,8 +1872,8 @@ static win_T *mouse_find_grid_win(int *gridp, int *rowp, int *colp)
 
     if (grid == &pum_grid) {
       *gridp = grid->handle;
-      *rowp -= grid->comp_row;
-      *colp -= grid->comp_col;
+      *rowp = grid_row;
+      *colp = grid_col;
       // The popup menu doesn't have a window, so return NULL
       return NULL;
     } else {
@@ -1878,8 +1882,8 @@ static win_T *mouse_find_grid_win(int *gridp, int *rowp, int *colp)
           continue;
         }
         *gridp = grid->handle;
-        *rowp -= wp->w_winrow + wp->w_grid.row_offset;
-        *colp -= wp->w_wincol + wp->w_grid.col_offset;
+        *rowp = grid_row - wp->w_grid.row_offset;
+        *colp = grid_col - wp->w_grid.col_offset;
         return wp;
       }
     }

@@ -78,12 +78,6 @@ impl<'grid> PositionedGrid<'grid> {
         (grid.rows >= 0 && grid.cols >= 0).then_some(Self { grid, origin })
     }
 
-    /// Positions a grid at its stored compositor origin.
-    fn try_from_compositor_position(grid: &'grid ScreenGrid) -> Option<Self> {
-        let (row, column) = grid.compositor_position();
-        Self::try_new(grid, ComposedPosition::new(row, column))
-    }
-
     /// Reports whether the allocated grid contains one screen cell.
     fn contains(self, point: ComposedPosition) -> bool {
         point.row >= self.origin.row
@@ -100,10 +94,27 @@ impl<'grid> PositionedGrid<'grid> {
                 .is_some_and(|right| point.column < right)
     }
 
+    /// Translates one contained screen position into grid-local coordinates.
+    fn local_position(self, point: ComposedPosition) -> Option<GridPosition> {
+        self.contains(point).then(|| {
+            GridPosition::new(
+                point.row - self.origin.row,
+                point.column - self.origin.column,
+            )
+        })
+    }
+
     /// Applies one compositor hit-test policy to this grid.
     fn matches(self, point: ComposedPosition, hit_test: LayerHitTest) -> bool {
         self.contains(point) && hit_test.accepts(self)
     }
+}
+
+/// One compositor hit with coordinates relative to the selected grid.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CompositorGridHit {
+    grid_id: GridId,
+    local_position: GridPosition,
 }
 
 /// An inclusive rectangle in composed-screen coordinates.
@@ -156,15 +167,14 @@ struct CompositorRecomposeArea {
 
 impl CompositorRecomposeArea {
     /// Returns the composed-screen area occupied by an allocated grid.
-    fn try_from_grid(grid: &ScreenGrid) -> Option<Self> {
+    fn try_from_grid(grid: &ScreenGrid, origin: ComposedPosition) -> Option<Self> {
         if grid.rows < 0 || grid.cols < 0 {
             return None;
         }
 
-        let (row, column) = grid.compositor_position();
         Some(Self {
-            rows: row..row.checked_add(grid.rows)?,
-            columns: column..column.checked_add(grid.cols)?,
+            rows: origin.row..origin.row.checked_add(grid.rows)?,
+            columns: origin.column..origin.column.checked_add(grid.cols)?,
         })
     }
 
@@ -298,14 +308,6 @@ impl CompositorGridPlacement {
             origin: ComposedPosition::new(row, column),
             size: GridSize::try_new(height, width)?,
         })
-    }
-
-    /// Publishes this placement's origin to transitional grid metadata.
-    ///
-    /// C still reads the composed origin. Requested size is owned exclusively
-    /// by `LayerState`.
-    fn publish_origin(self, grid: &mut ScreenGrid) {
-        grid.set_compositor_position(self.origin.row, self.origin.column);
     }
 
     /// Returns the exclusive bottom edge of the requested area.
@@ -613,7 +615,7 @@ impl MessageCompositorState {
     /// Updates the message grid and records its new compositor state.
     fn update_position(
         &mut self,
-        message_grid: &mut ScreenGrid,
+        message_grid: &ScreenGrid,
         default_grid: &ScreenGrid,
         request: CompositorMessagePositionRequest,
         should_draw: bool,
@@ -629,10 +631,6 @@ impl MessageCompositorState {
             None
         };
         let plan = self.plan_redraw(request, message_grid, default_grid, should_draw)?;
-
-        message_grid.mark_compositor_index_for_update();
-        let (_, column) = message_grid.compositor_position();
-        message_grid.set_compositor_position(request.row, column);
 
         if separator_row.is_some()
             && let Some(character) = request.separator_character
@@ -664,16 +662,16 @@ impl MessageCompositorState {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct LayerState {
     grid_id: GridId,
-    requested_size: GridSize,
+    placement: CompositorGridPlacement,
     disabled: bool,
 }
 
 impl LayerState {
     /// Creates enabled state for one grid with its requested dimensions.
-    const fn new(grid_id: GridId, requested_size: GridSize) -> Self {
+    const fn new(grid_id: GridId, placement: CompositorGridPlacement) -> Self {
         Self {
             grid_id,
-            requested_size,
+            placement,
             disabled: false,
         }
     }
@@ -682,9 +680,12 @@ impl LayerState {
     const fn unplaced(grid_id: GridId) -> Self {
         Self::new(
             grid_id,
-            GridSize {
-                height: 0,
-                width: 0,
+            CompositorGridPlacement {
+                origin: ComposedPosition::new(0, 0),
+                size: GridSize {
+                    height: 0,
+                    width: 0,
+                },
             },
         )
     }
@@ -774,6 +775,15 @@ impl Compositor {
             .ok_or(CompositorError::InvalidLayerState)
     }
 
+    /// Returns the composed-screen origin of one registered grid.
+    fn grid_origin(&self, grid_id: GridId) -> CompositorResult<Option<ComposedPosition>> {
+        Ok(self
+            .layers()?
+            .index_of(grid_id)
+            .and_then(|layer_index| self.layers.as_ref()?.get(layer_index))
+            .map(|layer| layer.placement.origin))
+    }
+
     /// Records one newly attached composed UI.
     fn attach(&mut self) {
         self.display.register_ui();
@@ -808,7 +818,8 @@ impl Compositor {
             .as_mut()
             .ok_or(CompositorError::InvalidLayerState)?
             .default
-            .requested_size = size;
+            .placement
+            .size = size;
         self.display.screen_size = Some(size);
 
         Ok(CompositorResizePlan { size, buffer_width })
@@ -822,8 +833,18 @@ impl Compositor {
         request: CompositorMessagePositionRequest,
     ) -> CompositorResult<CompositorMessagePositionPlan> {
         let should_draw = self.should_draw();
-        self.message
-            .update_position(message_grid, default_grid, request, should_draw)
+        let plan =
+            self.message
+                .update_position(message_grid, default_grid, request, should_draw)?;
+        message_grid.mark_compositor_index_for_update();
+        if let Some(layer) = self.layers.as_mut().and_then(|layers| {
+            layers
+                .index_of(message_grid.id())
+                .and_then(|layer_index| layers.get_mut(layer_index))
+        }) {
+            layer.placement.origin.row = request.row;
+        }
+        Ok(plan)
     }
 
     /// Prepares a new or existing grid placement without publishing external
@@ -866,11 +887,7 @@ impl Compositor {
                     placement: request.placement,
                 })
             } else {
-                layer.requested_size = request.placement.size;
-                let grid = grids
-                    .grid_mut(target.grid_id)
-                    .ok_or(CompositorError::InvalidLayerState)?;
-                request.placement.publish_origin(grid);
+                layer.placement = request.placement;
                 None
             };
             self.layers = Some(layers);
@@ -902,7 +919,7 @@ impl Compositor {
             (insertion_index, plan)
         };
 
-        layers.try_append(target.grid_id, request.placement.size)?;
+        layers.try_append(target.grid_id, request.placement)?;
         layers.place_appended_layer(grids, insertion_index, request.placement)?;
         self.layers = Some(layers);
         Ok(CompositorGridPlacementPreparation {
@@ -915,7 +932,6 @@ impl Compositor {
     /// recomposed.
     fn finish_grid_placement(
         &mut self,
-        grids: &mut impl GridAccess,
         completion: CompositorGridPlacementCompletion,
     ) -> CompositorResult<()> {
         let mut layers = self.layer_snapshot()?;
@@ -928,11 +944,7 @@ impl Compositor {
         if layer.grid_id != completion.grid_id {
             return Err(CompositorError::InvalidLayerState);
         }
-        let grid = grids
-            .grid_mut(completion.grid_id)
-            .ok_or(CompositorError::InvalidLayerState)?;
-        completion.placement.publish_origin(grid);
-        layer.requested_size = completion.placement.size;
+        layer.placement = completion.placement;
         layer.disabled = false;
         self.layers = Some(layers);
         Ok(())
@@ -974,14 +986,15 @@ impl Compositor {
 
         let mut layers = self.layer_snapshot()?;
         let recompose_area = if self.should_draw() {
-            let grid_id = layers
-                .layer_id(layer_index)
+            let layer = layers
+                .get(layer_index)
                 .ok_or(CompositorError::InvalidLayerState)?;
+            let grid_id = layer.grid_id;
             let grid = grids
                 .grid(grid_id)
                 .ok_or(CompositorError::InvalidLayerState)?;
             Some(
-                CompositorRecomposeArea::try_from_grid(grid)
+                CompositorRecomposeArea::try_from_grid(grid, layer.placement.origin)
                     .ok_or(CompositorError::InvalidLayerState)?,
             )
         } else {
@@ -1000,7 +1013,7 @@ impl Compositor {
         grids: &impl GridAccess,
         point: ComposedPosition,
         hit_test: LayerHitTest,
-    ) -> CompositorResult<Option<GridId>> {
+    ) -> CompositorResult<Option<CompositorGridHit>> {
         let layers = self.layers()?.layer_stack(grids)?;
         Ok(layers.topmost_grid_at(point, hit_test))
     }
@@ -1126,9 +1139,15 @@ impl Compositor {
                     .layer_index_with_id(message_grid.id())
                     .and_then(|index| layers.layer(index))
                     .or_else(|| {
-                        let requested_size =
-                            GridSize::try_new(message_grid.rows, message_grid.cols)?;
-                        CompositorLayer::try_from_grid(message_grid, requested_size, false)
+                        let size = GridSize::try_new(message_grid.rows, message_grid.cols)?;
+                        CompositorLayer::try_from_grid(
+                            message_grid,
+                            CompositorGridPlacement {
+                                origin: ComposedPosition::new(self.message.current_row, 0),
+                                size,
+                            },
+                            false,
+                        )
                     })
                     .ok_or(CompositorError::InvalidLayerState)?;
                 Some(MessageSeparator {
@@ -1173,13 +1192,20 @@ impl Compositor {
         grids: &impl GridAccess,
         grid_id: GridId,
     ) -> CompositorResult<CompositorRecomposeArea> {
-        self.layers()?
+        let layer_index = self
+            .layers()?
             .index_of(grid_id)
             .ok_or(CompositorError::InvalidLayerState)?;
+        let placement = self
+            .layers()?
+            .get(layer_index)
+            .ok_or(CompositorError::InvalidLayerState)?
+            .placement;
         let grid = grids
             .grid(grid_id)
             .ok_or(CompositorError::InvalidLayerState)?;
-        CompositorRecomposeArea::try_from_grid(grid).ok_or(CompositorError::InvalidGeometry)
+        CompositorRecomposeArea::try_from_grid(grid, placement.origin)
+            .ok_or(CompositorError::InvalidGeometry)
     }
 
     /// Plans the line requests required to recompose one clipped screen area.
@@ -1527,20 +1553,19 @@ impl<'grid> CompositorLayer<'grid> {
     /// Constructs a validated layer view from grid and compositor-owned state.
     fn try_from_grid(
         grid: &'grid ScreenGrid,
-        requested_size: GridSize,
+        placement: CompositorGridPlacement,
         disabled: bool,
     ) -> Option<Self> {
-        let (origin_row, origin_column) = grid.compositor_position();
         let allocated_size = GridSize::try_new(grid.rows, grid.cols)?;
         let visible_size = GridSize {
-            height: allocated_size.height.min(requested_size.height),
-            width: allocated_size.width.min(requested_size.width),
+            height: allocated_size.height.min(placement.size.height),
+            width: allocated_size.width.min(placement.size.width),
         };
 
         Some(Self {
             grid,
-            origin: ComposedPosition::new(origin_row, origin_column),
-            requested_size,
+            origin: placement.origin,
+            requested_size: placement.size,
             visible_size,
             z_index: grid.z_index(),
             layer_index: grid.compositor_index(),
@@ -1898,12 +1923,16 @@ impl Layers<LayerState> {
     }
 
     /// Appends one previously unregistered grid identity.
-    fn try_append(&mut self, grid_id: GridId, requested_size: GridSize) -> CompositorResult<()> {
+    fn try_append(
+        &mut self,
+        grid_id: GridId,
+        placement: CompositorGridPlacement,
+    ) -> CompositorResult<()> {
         if self.index_of(grid_id).is_some() {
             return Err(CompositorError::InvalidLayerState);
         }
 
-        self.overlays.push(LayerState::new(grid_id, requested_size));
+        self.overlays.push(LayerState::new(grid_id, placement));
         Ok(())
     }
 
@@ -1946,9 +1975,7 @@ impl Layers<LayerState> {
             .map(|layer| {
                 let grid = grids.grid(layer.grid_id)?;
                 (grid.id() == layer.grid_id)
-                    .then(|| {
-                        CompositorLayer::try_from_grid(grid, layer.requested_size, layer.disabled)
-                    })
+                    .then(|| CompositorLayer::try_from_grid(grid, layer.placement, layer.disabled))
                     .flatten()
             })
             .collect::<Option<Vec<_>>>()
@@ -1998,10 +2025,13 @@ impl Layers<LayerState> {
         let grid_id = self
             .layer_id(insertion_index)
             .ok_or(CompositorError::InvalidLayerState)?;
-        let grid = grids
-            .grid_mut(grid_id)
+        let layer = self
+            .get_mut(insertion_index)
             .ok_or(CompositorError::InvalidLayerState)?;
-        placement.publish_origin(grid);
+        if layer.grid_id != grid_id {
+            return Err(CompositorError::InvalidLayerState);
+        }
+        layer.placement = placement;
         Ok(())
     }
 
@@ -2201,12 +2231,21 @@ impl<'grid> Layers<CompositorLayer<'grid>> {
     }
 
     /// Finds the topmost non-default grid containing one screen cell.
-    fn topmost_grid_at(&self, point: ComposedPosition, hit_test: LayerHitTest) -> Option<GridId> {
+    fn topmost_grid_at(
+        &self,
+        point: ComposedPosition,
+        hit_test: LayerHitTest,
+    ) -> Option<CompositorGridHit> {
         self.overlays.iter().rev().copied().find_map(|layer| {
-            layer
-                .positioned_grid()
-                .matches(point, hit_test)
-                .then_some(layer.grid.id())
+            let grid = layer.positioned_grid();
+            hit_test
+                .accepts(grid)
+                .then(|| grid.local_position(point))
+                .flatten()
+                .map(|local_position| CompositorGridHit {
+                    grid_id: layer.grid.id(),
+                    local_position,
+                })
         })
     }
 
@@ -2218,7 +2257,7 @@ impl<'grid> Layers<CompositorLayer<'grid>> {
         minimum_z_index_gap: u32,
     ) -> bool {
         self.topmost_grid_at(point, LayerHitTest::Any)
-            .and_then(|grid_id| self.layer_index_with_id(grid_id))
+            .and_then(|hit| self.layer_index_with_id(hit.grid_id))
             .and_then(|index| self.layer(index))
             .is_some_and(|top_layer| {
                 top_layer.grid.id() != current_grid.grid_id
@@ -3066,7 +3105,7 @@ mod tests {
             let grid = grid_store
                 .grid(layer.grid_id)
                 .expect("test layer grid must be registered");
-            layer.requested_size = GridSize::try_new(grid.rows, grid.cols)
+            layer.placement.size = GridSize::try_new(grid.rows, grid.cols)
                 .expect("test layer dimensions must be valid");
         }
 
@@ -3113,6 +3152,20 @@ mod tests {
             .collect()
     }
 
+    /// Assigns one screen origin in the installed test compositor.
+    fn set_registered_test_layer_origin(grid_id: GridId, origin: ComposedPosition) {
+        let mut compositor = lock_compositor();
+        let layer_index = compositor.layer_index(grid_id).unwrap().unwrap();
+        compositor
+            .layers
+            .as_mut()
+            .unwrap()
+            .get_mut(layer_index)
+            .unwrap()
+            .placement
+            .origin = origin;
+    }
+
     fn grid_with_row(characters: &[VimSCharT], attributes: &[VimSAttrT]) -> ScreenGrid {
         assert_eq!(characters.len(), attributes.len());
         let mut line_buffer = LineBuffer::new(characters.len());
@@ -3132,6 +3185,17 @@ mod tests {
         assign_test_grid_id(ScreenGrid::new(rows, columns, true, &mut line_buffer))
     }
 
+    /// Creates zero-origin compositor state for one test grid.
+    fn test_layer_state(grid: &ScreenGrid) -> LayerState {
+        LayerState::new(
+            grid.id(),
+            CompositorGridPlacement {
+                origin: ComposedPosition::new(0, 0),
+                size: GridSize::try_new(grid.rows, grid.cols).unwrap(),
+            },
+        )
+    }
+
     #[test]
     fn layers_separate_the_default_from_unique_overlays() {
         let first = GridId::new(1);
@@ -3145,10 +3209,13 @@ mod tests {
         let mut layers = Layers::<LayerState>::try_new(vec![first, second, third]).unwrap();
         assert_eq!(layers.default().grid_id, first);
         assert_eq!(
-            layers.default().requested_size,
-            GridSize {
-                height: 0,
-                width: 0,
+            layers.default().placement,
+            CompositorGridPlacement {
+                origin: ComposedPosition::new(0, 0),
+                size: GridSize {
+                    height: 0,
+                    width: 0,
+                },
             }
         );
         assert!(!layers.default().disabled);
@@ -3306,7 +3373,7 @@ mod tests {
             })
         );
         assert_eq!(compositor.display.screen_size, Some(size));
-        assert_eq!(compositor.layers().unwrap().default().requested_size, size);
+        assert_eq!(compositor.layers().unwrap().default().placement.size, size);
     }
 
     #[test]
@@ -3314,6 +3381,10 @@ mod tests {
         let mut compositor = Compositor::new();
         let mut message_grid = grid_with_size(10, 20);
         let default_grid = grid_with_size(10, 18);
+        compositor.layers = Some(Layers {
+            default: test_layer_state(&default_grid),
+            overlays: vec![test_layer_state(&message_grid)],
+        });
         assert_eq!(
             compositor.set_message_position(
                 &mut message_grid,
@@ -3342,7 +3413,16 @@ mod tests {
                 }),
             }
         );
-        assert_eq!(message_grid.compositor_position(), (7, 0));
+        assert_eq!(
+            compositor
+                .layers()
+                .unwrap()
+                .get(1)
+                .unwrap()
+                .placement
+                .origin,
+            ComposedPosition::new(7, 0)
+        );
     }
 
     #[test]
@@ -3350,6 +3430,10 @@ mod tests {
         let mut compositor = Compositor::new();
         let mut message_grid = grid_with_size(10, 20);
         let default_grid = grid_with_size(10, 18);
+        compositor.layers = Some(Layers {
+            default: test_layer_state(&default_grid),
+            overlays: vec![test_layer_state(&message_grid)],
+        });
         compositor
             .set_message_position(
                 &mut message_grid,
@@ -3394,7 +3478,7 @@ mod tests {
         let default_grid = grid_with_size(10, 18);
         state
             .update_position(
-                &mut message_grid,
+                &message_grid,
                 &default_grid,
                 message_position_request(5, false),
                 false,
@@ -3424,11 +3508,10 @@ mod tests {
 
     #[test]
     fn grid_recomposition_area_uses_position_and_allocated_size() {
-        let mut grid = grid_with_size(3, 4);
-        grid.set_compositor_position(2, 5);
+        let grid = grid_with_size(3, 4);
 
         assert_eq!(
-            CompositorRecomposeArea::try_from_grid(&grid),
+            CompositorRecomposeArea::try_from_grid(&grid, ComposedPosition::new(2, 5)),
             Some(CompositorRecomposeArea {
                 rows: 2..5,
                 columns: 5..9,
@@ -3438,10 +3521,15 @@ mod tests {
 
     #[test]
     fn grid_recomposition_area_rejects_overflowing_edges() {
-        let mut grid = grid_with_size(1, 1);
-        grid.set_compositor_position(i32::MAX, i32::MAX);
+        let grid = grid_with_size(1, 1);
 
-        assert_eq!(CompositorRecomposeArea::try_from_grid(&grid), None);
+        assert_eq!(
+            CompositorRecomposeArea::try_from_grid(
+                &grid,
+                ComposedPosition::new(i32::MAX, i32::MAX),
+            ),
+            None
+        );
     }
 
     #[test]
@@ -3463,8 +3551,7 @@ mod tests {
 
     #[test]
     fn registered_recomposition_areas_use_grid_geometry() {
-        let mut grid = grid_with_size(3, 4);
-        grid.set_compositor_position(2, 5);
+        let grid = grid_with_size(3, 4);
         let grid_id = grid.id();
 
         // SAFETY: This conversion transfers the grid allocation to its C
@@ -3477,6 +3564,7 @@ mod tests {
             // SAFETY: The array contains one valid, exclusively accessible
             // grid for the duration of the operation.
             let _registry = unsafe { register_test_compositor_layers(&cgrids) };
+            set_registered_test_layer_origin(grid_id, ComposedPosition::new(2, 5));
             let grid_store = LegacyGridStore::try_take_registered().unwrap();
             let compositor = lock_compositor();
 
@@ -3821,11 +3909,11 @@ mod tests {
         let default_grid = grid_with_size(10, 12);
         let mut selected_grid = grid_with_size(2, 2);
         selected_grid.handle = 7;
-        selected_grid.set_compositor_position(2, 3);
         selected_grid.set_compositor_index(1);
         let mut upper_grid = grid_with_size(2, 2);
-        upper_grid.set_compositor_position(2, 3);
         upper_grid.set_compositor_index(2);
+        let selected_grid_id = selected_grid.id();
+        let upper_grid_id = upper_grid.id();
 
         // SAFETY: Each conversion transfers its grid allocations to a distinct
         // C representation.
@@ -3843,6 +3931,8 @@ mod tests {
 
         // SAFETY: The array contains distinct, exclusively accessible grids.
         let _registry = unsafe { register_test_compositor_layers(&cgrids) };
+        set_registered_test_layer_origin(selected_grid_id, ComposedPosition::new(2, 3));
+        set_registered_test_layer_origin(upper_grid_id, ComposedPosition::new(2, 3));
 
         assert_eq!(
             apply_cursor_update_to_registered_grids(CompositorCursorRequest {
@@ -3971,15 +4061,14 @@ mod tests {
         };
         assert_eq!(default_grid.compositor_index(), 0);
         assert_eq!(moving_grid.compositor_index(), 1);
-        assert_eq!(moving_grid.compositor_position(), (1, 2));
         assert_eq!(
             lock_compositor()
                 .layers()
                 .unwrap()
                 .get(1)
                 .unwrap()
-                .requested_size,
-            GridSize::try_new(2, 2).unwrap()
+                .placement,
+            CompositorGridPlacement::try_new(1, 2, 2, 2).unwrap()
         );
         assert!(!lock_compositor().layers().unwrap().get(1).unwrap().disabled);
     }
@@ -4065,15 +4154,14 @@ mod tests {
         assert_eq!(default_grid.compositor_index(), 0);
         assert_eq!(appended_grid.compositor_index(), 1);
         assert_eq!(current_grid.compositor_index(), 2);
-        assert_eq!(appended_grid.compositor_position(), (1, 2));
         assert_eq!(
             lock_compositor()
                 .layers()
                 .unwrap()
                 .get(1)
                 .unwrap()
-                .requested_size,
-            GridSize::try_new(2, 2).unwrap()
+                .placement,
+            CompositorGridPlacement::try_new(1, 2, 2, 2).unwrap()
         );
     }
 
@@ -4287,7 +4375,6 @@ mod tests {
     fn registered_layer_removal_returns_area_and_restores_ownership() {
         let default_grid = grid_with_size(4, 4);
         let mut removed_grid = grid_with_size(2, 2);
-        removed_grid.set_compositor_position(1, 1);
         removed_grid.set_compositor_index(1);
         let mut remaining_grid = grid_with_size(2, 2);
         remaining_grid.set_compositor_index(2);
@@ -4310,6 +4397,7 @@ mod tests {
 
         // SAFETY: The array contains distinct, exclusively accessible grids.
         let _registry = unsafe { register_test_compositor_layers(&registry_cgrids) };
+        set_registered_test_layer_origin(removed_grid_id, ComposedPosition::new(1, 1));
         let _compositor = attach_test_compositor();
 
         let grid_store = LegacyGridStore::try_take_registered().unwrap();
@@ -4363,7 +4451,10 @@ mod tests {
 
         assert_eq!(
             layers.topmost_grid_at(ComposedPosition::new(2, 2), LayerHitTest::Any,),
-            Some(upper_grid.id())
+            Some(CompositorGridHit {
+                grid_id: upper_grid.id(),
+                local_position: GridPosition::new(1, 1),
+            })
         );
     }
 
@@ -4371,9 +4462,9 @@ mod tests {
     fn registered_hit_testing_returns_the_bound_c_grid() {
         let default_grid = grid_with_size(4, 4);
         let mut overlay_grid = grid_with_size(2, 2);
-        overlay_grid.set_compositor_position(1, 1);
         overlay_grid.set_compositor_index(1);
         overlay_grid.set_accepts_mouse_input(false);
+        let overlay_grid_id = overlay_grid.id();
 
         // SAFETY: Each conversion transfers its grid allocations to a
         // distinct C representation.
@@ -4387,10 +4478,21 @@ mod tests {
             // SAFETY: The array contains distinct, exclusively accessible
             // grids for the duration of the registered operations.
             let _registry = unsafe { register_test_compositor_layers(&cgrids) };
+            set_registered_test_layer_origin(overlay_grid_id, ComposedPosition::new(1, 1));
+            let mut grid_row = -1;
+            let mut grid_column = -1;
 
-            assert_eq!(ui_comp_find_grid_at_coord(1, 1, false), overlay_pointer);
-            assert!(ui_comp_find_grid_at_coord(1, 1, true).is_null());
-            assert!(ui_comp_find_grid_at_coord(0, 0, false).is_null());
+            assert_eq!(
+                ui_comp_find_grid_at_coord(1, 1, false, &mut grid_row, &mut grid_column,),
+                overlay_pointer
+            );
+            assert_eq!((grid_row, grid_column), (0, 0));
+            assert!(
+                ui_comp_find_grid_at_coord(1, 1, true, &mut grid_row, &mut grid_column,).is_null()
+            );
+            assert!(
+                ui_comp_find_grid_at_coord(0, 0, false, &mut grid_row, &mut grid_column,).is_null()
+            );
         }
 
         // SAFETY: Hit-testing restored both grid allocations.
@@ -4415,16 +4517,20 @@ mod tests {
     }
 
     #[test]
-    fn positioned_grid_uses_stored_compositor_position() {
-        let mut grid = grid_with_size(2, 3);
-        grid.set_compositor_position(4, 5);
-        let positioned = PositionedGrid::try_from_compositor_position(&grid).unwrap();
+    fn positioned_grid_translates_screen_positions_to_local_coordinates() {
+        let grid = grid_with_size(2, 3);
+        let positioned = PositionedGrid::try_new(&grid, ComposedPosition::new(4, 5)).unwrap();
 
         assert!(positioned.contains(ComposedPosition::new(4, 5)));
         assert!(positioned.contains(ComposedPosition::new(5, 7)));
         assert!(!positioned.contains(ComposedPosition::new(3, 5)));
         assert!(!positioned.contains(ComposedPosition::new(6, 5)));
         assert!(!positioned.contains(ComposedPosition::new(5, 8)));
+        assert_eq!(
+            positioned.local_position(ComposedPosition::new(5, 7)),
+            Some(GridPosition::new(1, 2))
+        );
+        assert_eq!(positioned.local_position(ComposedPosition::new(6, 5)), None);
     }
 
     #[test]
@@ -4454,11 +4560,17 @@ mod tests {
 
         assert_eq!(
             layers.topmost_grid_at(point, LayerHitTest::Any),
-            Some(upper_grid.id())
+            Some(CompositorGridHit {
+                grid_id: upper_grid.id(),
+                local_position: GridPosition::new(0, 0),
+            })
         );
         assert_eq!(
             layers.topmost_grid_at(point, LayerHitTest::MouseEnabled),
-            Some(lower_grid.id())
+            Some(CompositorGridHit {
+                grid_id: lower_grid.id(),
+                local_position: GridPosition::new(0, 0),
+            })
         );
     }
 
@@ -4508,10 +4620,8 @@ mod tests {
     fn registered_bindings_support_cursor_coverage_queries() {
         let default_grid = grid_with_size(4, 4);
         let mut current_grid = grid_with_size(2, 2);
-        current_grid.set_compositor_position(0, 0);
         current_grid.set_compositor_index(1);
         let mut upper_grid = grid_with_size(2, 2);
-        upper_grid.set_compositor_position(0, 0);
         upper_grid.set_compositor_index(2);
         let external_grid = grid_with_size(2, 2);
         let current_cursor_grid = CompositorCursorGrid::from(&current_grid);

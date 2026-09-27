@@ -877,12 +877,6 @@ void ui_ext_win_position(win_T *wp, bool validate)
 {
   wp->w_pos_changed = false;
   if (!wp->w_floating) {
-    if (ui_has(kUIMultigrid)) {
-      // Windows on the default grid don't necessarily have comp_col and comp_row set
-      // But the rest of the calculations relies on it
-      wp->w_grid_alloc.comp_col = wp->w_wincol;
-      wp->w_grid_alloc.comp_row = wp->w_winrow;
-    }
     ui_call_win_pos(wp->w_grid_alloc.handle, wp->handle, wp->w_winrow,
                     wp->w_wincol, wp->w_width, wp->w_height);
     return;
@@ -893,6 +887,8 @@ void ui_ext_win_position(win_T *wp, bool validate)
     ScreenGrid *grid = &default_grid;
     Float row = c.row;
     Float col = c.col;
+    int anchor_grid_row = 0;
+    int anchor_grid_col = 0;
     if (c.relative == kFloatRelativeWindow) {
       Error dummy = ERROR_INIT;
       win_T *win = find_window_by_handle(c.window, &dummy);
@@ -910,6 +906,12 @@ void ui_ext_win_position(win_T *wp, bool validate)
         grid = grid_adjust(&win->w_grid, &row_off, &col_off);
         row += row_off;
         col += col_off;
+        if (grid != &default_grid) {
+          if (!ui_comp_grid_origin(grid->handle, &anchor_grid_row, &anchor_grid_col)) {
+            anchor_grid_row = win->w_winrow;
+            anchor_grid_col = win->w_wincol;
+          }
+        }
         if (c.bufpos.lnum >= 0) {
           int lnum = MIN(c.bufpos.lnum + 1, win->w_buffer->b_ml.ml_line_count);
           pos_T pos = { lnum, c.bufpos.col, 0 };
@@ -945,8 +947,8 @@ void ui_ext_win_position(win_T *wp, bool validate)
     int comp_row = (int)row - (south ? wp->w_height_outer : 0);
     int comp_col = (int)col - (east ? wp->w_width_outer : 0);
     int above_ch = wp->w_config.zindex < kZIndexMessages ? (int)p_ch : 0;
-    comp_row += grid->comp_row;
-    comp_col += grid->comp_col;
+    comp_row += anchor_grid_row;
+    comp_col += anchor_grid_col;
     comp_row = MAX(MIN(comp_row, Rows - wp->w_height_outer - above_ch), 0);
     if (!c.fixed || east) {
       comp_col = MAX(MIN(comp_col, Columns - wp->w_width_outer), 0);
@@ -963,8 +965,7 @@ void ui_ext_win_position(win_T *wp, bool validate)
         ui_call_win_float_pos(wp->w_grid_alloc.handle, wp->handle, anchor,
                               grid->handle, row, col, c.mouse,
                               wp->w_grid_alloc.zindex, (int)wp->w_grid_alloc.comp_index,
-                              wp->w_winrow,
-                              wp->w_wincol);
+                              wp->w_winrow, wp->w_wincol);
       }
       ui_check_cursor_grid(wp->w_grid_alloc.handle);
       wp->w_grid_alloc.mouse_enabled = wp->w_config.mouse;

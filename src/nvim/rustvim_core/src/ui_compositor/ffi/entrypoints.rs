@@ -265,9 +265,7 @@ pub(in crate::ui_compositor) fn place_grid_in_registered_layers(
         .try_for_each(&mut recompose_area);
 
     if let Some(completion) = preparation.deferred_completion {
-        let mut grid_store =
-            LegacyGridStore::try_take_registered().ok_or(CompositorError::InvalidLayerState)?;
-        lock_compositor().finish_grid_placement(&mut grid_store, completion)?;
+        lock_compositor().finish_grid_placement(completion)?;
     }
 
     exposed_areas_result?;
@@ -523,7 +521,14 @@ pub extern "C" fn ui_comp_find_grid_at_coord(
     row: libc::c_int,
     column: libc::c_int,
     require_mouse_input: bool,
+    grid_row: *mut libc::c_int,
+    grid_column: *mut libc::c_int,
 ) -> *mut CScreenGrid {
+    let (Some(mut grid_row), Some(mut grid_column)) =
+        (NonNull::new(grid_row), NonNull::new(grid_column))
+    else {
+        return std::ptr::null_mut();
+    };
     let hit_test = if require_mouse_input {
         LayerHitTest::MouseEnabled
     } else {
@@ -533,32 +538,51 @@ pub extern "C" fn ui_comp_find_grid_at_coord(
     let Some(grid_store) = LegacyGridStore::try_take_registered() else {
         return std::ptr::null_mut();
     };
-    let Ok(grid_id) =
+    let Ok(hit) =
         lock_compositor().grid_at(&grid_store, ComposedPosition::new(row, column), hit_test)
     else {
         return std::ptr::null_mut();
     };
-    let Some(cgrid) = grid_id.and_then(|grid_id| grid_store.cgrid_by_id(grid_id)) else {
+    let Some(hit) = hit else {
         return std::ptr::null_mut();
     };
+    let Some(cgrid) = grid_store.cgrid_by_id(hit.grid_id) else {
+        return std::ptr::null_mut();
+    };
+    // SAFETY: Both output pointers were checked for null above. C callers
+    // provide writable integer objects for the duration of this call.
+    unsafe {
+        *grid_row.as_mut() = hit.local_position.row;
+        *grid_column.as_mut() = hit.local_position.column;
+    }
 
     cgrid
 }
 
 /// Reports whether one grid contains a composed-screen coordinate.
 ///
-/// The grid is positioned using its stored compositor origin.
+/// The grid is positioned using the supplied screen origin.
 ///
 /// # Safety
 ///
 /// `grid` must point to a valid, exclusively accessible `CScreenGrid` whose
 /// buffers satisfy the ownership and layout requirements of `ScreenGrid`.
+/// `grid_row` and `grid_column` must point to writable integers.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ui_comp_grid_contains_at(
     grid: *mut CScreenGrid,
+    origin_row: libc::c_int,
+    origin_column: libc::c_int,
     row: libc::c_int,
     column: libc::c_int,
+    grid_row: *mut libc::c_int,
+    grid_column: *mut libc::c_int,
 ) -> bool {
+    let (Some(mut grid_row), Some(mut grid_column)) =
+        (NonNull::new(grid_row), NonNull::new(grid_column))
+    else {
+        return false;
+    };
     if grid.is_null() {
         return false;
     }
@@ -566,8 +590,19 @@ pub unsafe extern "C" fn ui_comp_grid_contains_at(
     // SAFETY: The caller transfers exclusive ownership of the grid buffers
     // into the guard for the duration of this operation.
     let grid = unsafe { ScreenGridGuard::take(grid) };
-    PositionedGrid::try_from_compositor_position(&grid)
-        .is_some_and(|grid| grid.contains(ComposedPosition::new(row, column)))
+    let Some(local_position) =
+        PositionedGrid::try_new(&grid, ComposedPosition::new(origin_row, origin_column))
+            .and_then(|grid| grid.local_position(ComposedPosition::new(row, column)))
+    else {
+        return false;
+    };
+    // SAFETY: Both output pointers were checked for null above. The caller
+    // guarantees that they point to writable integers.
+    unsafe {
+        *grid_row.as_mut() = local_position.row;
+        *grid_column.as_mut() = local_position.column;
+    }
+    true
 }
 
 /// Reports whether one window grid accepts mouse input at a screen coordinate.
@@ -579,6 +614,7 @@ pub unsafe extern "C" fn ui_comp_grid_contains_at(
 ///
 /// `grid` must point to a valid, exclusively accessible `CScreenGrid` whose
 /// buffers satisfy the ownership and layout requirements of `ScreenGrid`.
+/// `grid_row` and `grid_column` must point to writable integers.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ui_comp_grid_accepts_mouse_at(
     grid: *mut CScreenGrid,
@@ -586,7 +622,14 @@ pub unsafe extern "C" fn ui_comp_grid_accepts_mouse_at(
     origin_column: libc::c_int,
     row: libc::c_int,
     column: libc::c_int,
+    grid_row: *mut libc::c_int,
+    grid_column: *mut libc::c_int,
 ) -> bool {
+    let (Some(mut grid_row), Some(mut grid_column)) =
+        (NonNull::new(grid_row), NonNull::new(grid_column))
+    else {
+        return false;
+    };
     if grid.is_null() {
         return false;
     }
@@ -594,14 +637,56 @@ pub unsafe extern "C" fn ui_comp_grid_accepts_mouse_at(
     // SAFETY: The caller transfers exclusive ownership of the grid buffers
     // into the guard for the duration of this operation.
     let grid = unsafe { ScreenGridGuard::take(grid) };
-    PositionedGrid::try_new(&grid, ComposedPosition::new(origin_row, origin_column)).is_some_and(
-        |grid| {
-            grid.matches(
-                ComposedPosition::new(row, column),
-                LayerHitTest::MouseEnabled,
-            )
-        },
-    )
+    let Some(positioned_grid) =
+        PositionedGrid::try_new(&grid, ComposedPosition::new(origin_row, origin_column))
+    else {
+        return false;
+    };
+    if !LayerHitTest::MouseEnabled.accepts(positioned_grid) {
+        return false;
+    }
+    let Some(local_position) = positioned_grid.local_position(ComposedPosition::new(row, column))
+    else {
+        return false;
+    };
+    // SAFETY: Both output pointers were checked for null above. The caller
+    // guarantees that they point to writable integers.
+    unsafe {
+        *grid_row.as_mut() = local_position.row;
+        *grid_column.as_mut() = local_position.column;
+    }
+    true
+}
+
+/// Returns the composed-screen origin of one registered grid.
+///
+/// # Safety
+///
+/// `row` and `column` must point to writable integers.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ui_comp_grid_origin(
+    grid_handle: Integer,
+    row: *mut libc::c_int,
+    column: *mut libc::c_int,
+) -> bool {
+    let (Ok(grid_handle), Some(mut row), Some(mut column)) = (
+        i32::try_from(grid_handle),
+        NonNull::new(row),
+        NonNull::new(column),
+    ) else {
+        return false;
+    };
+    let Ok(Some(origin)) = lock_compositor().grid_origin(GridId::new(grid_handle)) else {
+        return false;
+    };
+
+    // SAFETY: Both output pointers were checked for null above. The caller
+    // guarantees that they point to writable integers.
+    unsafe {
+        *row.as_mut() = origin.row;
+        *column.as_mut() = origin.column;
+    }
+    true
 }
 
 /// Checks cursor coverage after acquiring the registered legacy grids.

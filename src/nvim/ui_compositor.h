@@ -35,14 +35,18 @@ extern void ui_comp_msg_set_pos(
   Integer grid, Integer row, Boolean scrolled, String separator_character,
   Integer z_index, Integer compositor_index);
 extern ScreenGrid *ui_comp_find_grid_at_coord(
-  int row, int column, bool require_mouse_input);
+  int row, int column, bool require_mouse_input,
+  int *grid_row, int *grid_column);
 
 extern bool ui_comp_grid_contains_at(
-  ScreenGrid *grid, int row, int column);
+  ScreenGrid *grid, int origin_row, int origin_column,
+  int row, int column, int *grid_row, int *grid_column);
 
 extern bool ui_comp_grid_accepts_mouse_at(
   ScreenGrid *grid, int origin_row, int origin_column,
-  int row, int column);
+  int row, int column, int *grid_row, int *grid_column);
+
+extern bool ui_comp_grid_origin(Integer grid_handle, int *row, int *column);
 
 extern bool ui_comp_cursor_is_covered_by_higher_layer(
   ScreenGrid *current_grid, int row, int column,

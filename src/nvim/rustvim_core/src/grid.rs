@@ -283,13 +283,6 @@ pub struct ScreenGrid {
     /// z-index: the order in the stack of grids.
     zindex: i32,
 
-    /// Below is state owned by the compositor. Should generally not be set/read
-    /// outside this module, except for specific compatibility hacks
-
-    /// position of the grid on the composed screen.
-    comp_row: i32,
-    comp_col: i32,
-
     /// z-index of the grid. Grids with higher index is draw on top.
     /// default_grid.comp_index is always zero.
     comp_index: usize,
@@ -316,8 +309,6 @@ impl ScreenGrid {
             blending: false,
             mouse_enabled: true,
             zindex: 0,
-            comp_row: 0,
-            comp_col: 0,
             comp_index: 0,
             pending_comp_index_update: true,
         };
@@ -354,17 +345,6 @@ impl ScreenGrid {
     /// Controls whether this grid accepts mouse input.
     pub(crate) fn set_accepts_mouse_input(&mut self, accepts_mouse_input: bool) {
         self.mouse_enabled = accepts_mouse_input;
-    }
-
-    /// Returns this grid's position in the composed screen.
-    pub(crate) fn compositor_position(&self) -> (i32, i32) {
-        (self.comp_row, self.comp_col)
-    }
-
-    /// Updates this grid's position in the composed screen.
-    pub(crate) fn set_compositor_position(&mut self, row: i32, column: i32) {
-        self.comp_row = row;
-        self.comp_col = column;
     }
 
     /// Returns this grid's z-index in the compositor stack.
@@ -522,8 +502,6 @@ impl ScreenGrid {
             blending: cgrid.blending,
             mouse_enabled: cgrid.mouse_enabled,
             zindex: cgrid.zindex,
-            comp_row: cgrid.comp_row,
-            comp_col: cgrid.comp_col,
             comp_index: cgrid.comp_index,
             pending_comp_index_update: cgrid.pending_comp_index_update,
         }
@@ -554,8 +532,6 @@ impl ScreenGrid {
             blending: self.blending,
             mouse_enabled: self.mouse_enabled,
             zindex: self.zindex,
-            comp_row: self.comp_row,
-            comp_col: self.comp_col,
             comp_index: self.comp_index,
             pending_comp_index_update: self.pending_comp_index_update,
         }
@@ -2725,9 +2701,6 @@ pub struct CScreenGrid {
     mouse_enabled: bool,
 
     zindex: libc::c_int,
-
-    comp_row: libc::c_int,
-    comp_col: libc::c_int,
 
     comp_index: libc::size_t,
 
@@ -5038,8 +5011,6 @@ mod tests {
             blending: false,
             mouse_enabled: true,
             zindex: 0,
-            comp_row: 0,
-            comp_col: 0,
             comp_index: 0,
             pending_comp_index_update: true,
         };
