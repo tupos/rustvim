@@ -212,11 +212,10 @@ void msg_grid_validate(void)
     msg_grid.throttled = false;  // don't throttle in 'cmdheight' area
     msg_grid_set_pos(pos, msg_scrolled);
     ui_comp_put_grid(&msg_grid, pos, 0, msg_grid.rows, msg_grid.cols,
-                     false, true, curwin ? curwin->w_grid_alloc.handle : 0);
+                     false, true, false, curwin ? curwin->w_grid_alloc.handle : 0);
     ui_call_grid_resize(msg_grid.handle, msg_grid.cols, msg_grid.rows);
 
     msg_scrolled_at_flush = msg_scrolled;
-    msg_grid.mouse_enabled = false;
     msg_grid_adj.target = &msg_grid;
   } else if (!should_alloc && grid_is_allocated(&msg_grid)) {
     ui_comp_remove_grid(&msg_grid);

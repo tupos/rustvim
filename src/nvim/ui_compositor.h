@@ -16,7 +16,8 @@ extern void ui_comp_detach(void);
 extern void ui_comp_layers_adjust(ScreenGrid *grid, bool raise);
 extern bool ui_comp_put_grid(
   ScreenGrid *grid, int row, int column, int height, int width,
-  bool valid, bool on_top, Integer current_window_grid_handle);
+  bool valid, bool on_top, bool accepts_mouse_input,
+  Integer current_window_grid_handle);
 extern void ui_comp_remove_grid(ScreenGrid *grid);
 extern void ui_comp_compose_grid(ScreenGrid *grid);
 
@@ -39,10 +40,6 @@ extern ScreenGrid *ui_comp_find_grid_at_coord(
   int *grid_row, int *grid_column);
 
 extern bool ui_comp_grid_contains_at(
-  ScreenGrid *grid, int origin_row, int origin_column,
-  int row, int column, int *grid_row, int *grid_column);
-
-extern bool ui_comp_grid_accepts_mouse_at(
   ScreenGrid *grid, int origin_row, int origin_column,
   int row, int column, int *grid_row, int *grid_column);
 

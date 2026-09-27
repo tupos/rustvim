@@ -1861,7 +1861,8 @@ static win_T *mouse_find_grid_win(int *gridp, int *rowp, int *colp)
     if (grid == NULL && ui_has(kUIMultigrid)) {
       FOR_ALL_WINDOWS_IN_TAB(wp, curtab) {
         ScreenGrid *window_grid = &wp->w_grid_alloc;
-        if (ui_comp_grid_accepts_mouse_at(
+        if (wp->w_config.mouse
+            && ui_comp_grid_contains_at(
               window_grid, wp->w_winrow, wp->w_wincol, *rowp, *colp,
               &grid_row, &grid_col)) {
           grid = window_grid;

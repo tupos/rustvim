@@ -959,7 +959,7 @@ void ui_ext_win_position(win_T *wp, bool validate)
     if (!c.hide) {
       ui_comp_put_grid(&wp->w_grid_alloc, comp_row, comp_col,
                        wp->w_height_outer, wp->w_width_outer, valid, false,
-                       curwin ? curwin->w_grid_alloc.handle : 0);
+                       c.mouse, curwin ? curwin->w_grid_alloc.handle : 0);
       if (ui_has(kUIMultigrid)) {
         String anchor = cstr_as_string(float_anchor_str[c.anchor]);
         ui_call_win_float_pos(wp->w_grid_alloc.handle, wp->handle, anchor,
@@ -968,7 +968,6 @@ void ui_ext_win_position(win_T *wp, bool validate)
                               wp->w_winrow, wp->w_wincol);
       }
       ui_check_cursor_grid(wp->w_grid_alloc.handle);
-      wp->w_grid_alloc.mouse_enabled = wp->w_config.mouse;
       if (!valid) {
         wp->w_grid_alloc.valid = false;
         redraw_later(wp, UPD_NOT_VALID);
@@ -5493,8 +5492,6 @@ win_T *win_alloc(win_T *after, bool hidden)
 
   new_wp->handle = ++last_win_id;
   pmap_put(int)(&window_handles, new_wp->handle, new_wp);
-
-  new_wp->w_grid_alloc.mouse_enabled = true;
 
   grid_assign_handle(&new_wp->w_grid_alloc);
 

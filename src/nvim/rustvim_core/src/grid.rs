@@ -277,9 +277,6 @@ pub struct ScreenGrid {
     /// whether the compositor should blend the grid with the background grid
     blending: bool,
 
-    /// whether the grid interacts with mouse events.
-    mouse_enabled: bool,
-
     /// z-index: the order in the stack of grids.
     zindex: i32,
 
@@ -307,7 +304,6 @@ impl ScreenGrid {
             valid: false,
             throttled: false,
             blending: false,
-            mouse_enabled: true,
             zindex: 0,
             comp_index: 0,
             pending_comp_index_update: true,
@@ -335,16 +331,6 @@ impl ScreenGrid {
     /// Controls whether this grid blends with the default-grid background.
     pub(crate) fn set_blends_with_background(&mut self, blends: bool) {
         self.blending = blends;
-    }
-
-    /// Reports whether this grid accepts mouse input.
-    pub(crate) fn accepts_mouse_input(&self) -> bool {
-        self.mouse_enabled
-    }
-
-    /// Controls whether this grid accepts mouse input.
-    pub(crate) fn set_accepts_mouse_input(&mut self, accepts_mouse_input: bool) {
-        self.mouse_enabled = accepts_mouse_input;
     }
 
     /// Returns this grid's z-index in the compositor stack.
@@ -500,7 +486,6 @@ impl ScreenGrid {
             valid: cgrid.valid,
             throttled: cgrid.throttled,
             blending: cgrid.blending,
-            mouse_enabled: cgrid.mouse_enabled,
             zindex: cgrid.zindex,
             comp_index: cgrid.comp_index,
             pending_comp_index_update: cgrid.pending_comp_index_update,
@@ -530,7 +515,6 @@ impl ScreenGrid {
             valid: self.valid,
             throttled: self.throttled,
             blending: self.blending,
-            mouse_enabled: self.mouse_enabled,
             zindex: self.zindex,
             comp_index: self.comp_index,
             pending_comp_index_update: self.pending_comp_index_update,
@@ -2697,8 +2681,6 @@ pub struct CScreenGrid {
     throttled: bool,
 
     blending: bool,
-
-    mouse_enabled: bool,
 
     zindex: libc::c_int,
 
@@ -5009,7 +4991,6 @@ mod tests {
             valid: false,
             throttled: false,
             blending: false,
-            mouse_enabled: true,
             zindex: 0,
             comp_index: 0,
             pending_comp_index_update: true,

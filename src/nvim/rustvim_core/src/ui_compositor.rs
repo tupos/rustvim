@@ -103,11 +103,6 @@ impl<'grid> PositionedGrid<'grid> {
             )
         })
     }
-
-    /// Applies one compositor hit-test policy to this grid.
-    fn matches(self, point: ComposedPosition, hit_test: LayerHitTest) -> bool {
-        self.contains(point) && hit_test.accepts(self)
-    }
 }
 
 /// One compositor hit with coordinates relative to the selected grid.
@@ -281,6 +276,7 @@ struct CompositorGridPlacementRequest {
     placement: CompositorGridPlacement,
     valid: bool,
     on_top: bool,
+    accepts_mouse_input: bool,
 }
 
 impl CompositorGridPlacementRequest {
@@ -292,11 +288,13 @@ impl CompositorGridPlacementRequest {
         width: i32,
         valid: bool,
         on_top: bool,
+        accepts_mouse_input: bool,
     ) -> Option<Self> {
         Some(Self {
             placement: CompositorGridPlacement::try_new(row, column, height, width)?,
             valid,
             on_top,
+            accepts_mouse_input,
         })
     }
 }
@@ -664,15 +662,21 @@ struct LayerState {
     grid_id: GridId,
     placement: CompositorGridPlacement,
     disabled: bool,
+    accepts_mouse_input: bool,
 }
 
 impl LayerState {
     /// Creates enabled state for one grid with its requested dimensions.
-    const fn new(grid_id: GridId, placement: CompositorGridPlacement) -> Self {
+    const fn new(
+        grid_id: GridId,
+        placement: CompositorGridPlacement,
+        accepts_mouse_input: bool,
+    ) -> Self {
         Self {
             grid_id,
             placement,
             disabled: false,
+            accepts_mouse_input,
         }
     }
 
@@ -687,6 +691,7 @@ impl LayerState {
                     width: 0,
                 },
             },
+            true,
         )
     }
 }
@@ -880,6 +885,7 @@ impl Compositor {
             if layer.grid_id != target.grid_id {
                 return Err(CompositorError::InvalidLayerState);
             }
+            layer.accepts_mouse_input = request.accepts_mouse_input;
             let deferred_completion = if should_draw {
                 layer.disabled = true;
                 Some(CompositorGridPlacementCompletion {
@@ -919,7 +925,11 @@ impl Compositor {
             (insertion_index, plan)
         };
 
-        layers.try_append(target.grid_id, request.placement)?;
+        layers.try_append(
+            target.grid_id,
+            request.placement,
+            request.accepts_mouse_input,
+        )?;
         layers.place_appended_layer(grids, insertion_index, request.placement)?;
         self.layers = Some(layers);
         Ok(CompositorGridPlacementPreparation {
@@ -1146,6 +1156,7 @@ impl Compositor {
                                 origin: ComposedPosition::new(self.message.current_row, 0),
                                 size,
                             },
+                            false,
                             false,
                         )
                     })
@@ -1546,6 +1557,7 @@ struct CompositorLayer<'grid> {
     z_index: i32,
     layer_index: usize,
     blending: bool,
+    accepts_mouse_input: bool,
     disabled: bool,
 }
 
@@ -1554,6 +1566,7 @@ impl<'grid> CompositorLayer<'grid> {
     fn try_from_grid(
         grid: &'grid ScreenGrid,
         placement: CompositorGridPlacement,
+        accepts_mouse_input: bool,
         disabled: bool,
     ) -> Option<Self> {
         let allocated_size = GridSize::try_new(grid.rows, grid.cols)?;
@@ -1570,6 +1583,7 @@ impl<'grid> CompositorLayer<'grid> {
             z_index: grid.z_index(),
             layer_index: grid.compositor_index(),
             blending: grid.blends_with_background(),
+            accepts_mouse_input,
             disabled,
         })
     }
@@ -1794,11 +1808,11 @@ enum LayerHitTest {
 }
 
 impl LayerHitTest {
-    /// Reports whether one positioned grid participates in this hit test.
-    fn accepts(self, grid: PositionedGrid<'_>) -> bool {
+    /// Reports whether one compositor layer participates in this hit test.
+    fn accepts(self, layer: CompositorLayer<'_>) -> bool {
         match self {
             Self::Any => true,
-            Self::MouseEnabled => grid.grid.accepts_mouse_input(),
+            Self::MouseEnabled => layer.accepts_mouse_input,
         }
     }
 }
@@ -1927,12 +1941,14 @@ impl Layers<LayerState> {
         &mut self,
         grid_id: GridId,
         placement: CompositorGridPlacement,
+        accepts_mouse_input: bool,
     ) -> CompositorResult<()> {
         if self.index_of(grid_id).is_some() {
             return Err(CompositorError::InvalidLayerState);
         }
 
-        self.overlays.push(LayerState::new(grid_id, placement));
+        self.overlays
+            .push(LayerState::new(grid_id, placement, accepts_mouse_input));
         Ok(())
     }
 
@@ -1975,7 +1991,14 @@ impl Layers<LayerState> {
             .map(|layer| {
                 let grid = grids.grid(layer.grid_id)?;
                 (grid.id() == layer.grid_id)
-                    .then(|| CompositorLayer::try_from_grid(grid, layer.placement, layer.disabled))
+                    .then(|| {
+                        CompositorLayer::try_from_grid(
+                            grid,
+                            layer.placement,
+                            layer.accepts_mouse_input,
+                            layer.disabled,
+                        )
+                    })
                     .flatten()
             })
             .collect::<Option<Vec<_>>>()
@@ -2237,10 +2260,12 @@ impl<'grid> Layers<CompositorLayer<'grid>> {
         hit_test: LayerHitTest,
     ) -> Option<CompositorGridHit> {
         self.overlays.iter().rev().copied().find_map(|layer| {
-            let grid = layer.positioned_grid();
             hit_test
-                .accepts(grid)
-                .then(|| grid.local_position(point))
+                .accepts(layer)
+                .then(|| {
+                    let grid = layer.positioned_grid();
+                    grid.local_position(point)
+                })
                 .flatten()
                 .map(|local_position| CompositorGridHit {
                     grid_id: layer.grid.id(),
@@ -3166,6 +3191,19 @@ mod tests {
             .origin = origin;
     }
 
+    /// Sets mouse-input policy for one layer in the installed test compositor.
+    fn set_registered_test_layer_mouse_input(grid_id: GridId, accepts_mouse_input: bool) {
+        let mut compositor = lock_compositor();
+        let layer_index = compositor.layer_index(grid_id).unwrap().unwrap();
+        compositor
+            .layers
+            .as_mut()
+            .unwrap()
+            .get_mut(layer_index)
+            .unwrap()
+            .accepts_mouse_input = accepts_mouse_input;
+    }
+
     fn grid_with_row(characters: &[VimSCharT], attributes: &[VimSAttrT]) -> ScreenGrid {
         assert_eq!(characters.len(), attributes.len());
         let mut line_buffer = LineBuffer::new(characters.len());
@@ -3193,6 +3231,7 @@ mod tests {
                 origin: ComposedPosition::new(0, 0),
                 size: GridSize::try_new(grid.rows, grid.cols).unwrap(),
             },
+            true,
         )
     }
 
@@ -3279,6 +3318,7 @@ mod tests {
             z_index: 0,
             layer_index,
             blending: false,
+            accepts_mouse_input: true,
             disabled,
         }
     }
@@ -4023,6 +4063,7 @@ mod tests {
                     placement: CompositorGridPlacement::try_new(1, 2, 2, 2).unwrap(),
                     valid: true,
                     on_top: false,
+                    accepts_mouse_input: true,
                 },
                 |area| {
                     recomposed_areas.push(area);
@@ -4126,6 +4167,7 @@ mod tests {
                     placement: CompositorGridPlacement::try_new(1, 2, 2, 2).unwrap(),
                     valid: true,
                     on_top: false,
+                    accepts_mouse_input: true,
                 },
                 |area| {
                     recomposed_areas.push(area);
@@ -4463,7 +4505,6 @@ mod tests {
         let default_grid = grid_with_size(4, 4);
         let mut overlay_grid = grid_with_size(2, 2);
         overlay_grid.set_compositor_index(1);
-        overlay_grid.set_accepts_mouse_input(false);
         let overlay_grid_id = overlay_grid.id();
 
         // SAFETY: Each conversion transfers its grid allocations to a
@@ -4479,6 +4520,7 @@ mod tests {
             // grids for the duration of the registered operations.
             let _registry = unsafe { register_test_compositor_layers(&cgrids) };
             set_registered_test_layer_origin(overlay_grid_id, ComposedPosition::new(1, 1));
+            set_registered_test_layer_mouse_input(overlay_grid_id, false);
             let mut grid_row = -1;
             let mut grid_column = -1;
 
@@ -4534,24 +4576,13 @@ mod tests {
     }
 
     #[test]
-    fn positioned_grid_hit_testing_uses_external_half_open_bounds() {
-        let grid = grid_with_size(2, 3);
-        let positioned = PositionedGrid::try_new(&grid, ComposedPosition::new(4, 5)).unwrap();
-
-        assert!(positioned.matches(ComposedPosition::new(4, 5), LayerHitTest::MouseEnabled,));
-        assert!(positioned.matches(ComposedPosition::new(5, 7), LayerHitTest::MouseEnabled,));
-        assert!(!positioned.matches(ComposedPosition::new(6, 5), LayerHitTest::MouseEnabled,));
-        assert!(!positioned.matches(ComposedPosition::new(5, 8), LayerHitTest::MouseEnabled,));
-    }
-
-    #[test]
     fn mouse_hit_testing_skips_layers_that_reject_mouse_input() {
         let default_grid = grid_with_size(3, 3);
         let lower_grid = grid_with_size(2, 2);
-        let mut upper_grid = grid_with_size(2, 2);
-        upper_grid.set_accepts_mouse_input(false);
+        let upper_grid = grid_with_size(2, 2);
         let lower_layer = compositor_layer(&lower_grid, 1, 2, 1, false);
-        let upper_layer = compositor_layer(&upper_grid, 1, 2, 2, false);
+        let mut upper_layer = compositor_layer(&upper_grid, 1, 2, 2, false);
+        upper_layer.accepts_mouse_input = false;
         let layers = compositor_layers(
             compositor_layer(&default_grid, 0, 3, 0, false),
             vec![lower_layer, upper_layer],

@@ -297,12 +297,20 @@ pub unsafe extern "C" fn ui_comp_put_grid(
     width: libc::c_int,
     valid: bool,
     on_top: bool,
+    accepts_mouse_input: bool,
     current_window_grid_handle: Integer,
 ) -> bool {
     let grid = NonNull::new(grid).expect("grid to place must not be null");
-    let request =
-        CompositorGridPlacementRequest::try_new(row, column, height, width, valid, on_top)
-            .expect("grid placement dimensions must be nonnegative");
+    let request = CompositorGridPlacementRequest::try_new(
+        row,
+        column,
+        height,
+        width,
+        valid,
+        on_top,
+        accepts_mouse_input,
+    )
+    .expect("grid placement dimensions must be nonnegative");
     let runtime = compositor_runtime_snapshot().expect("compositor runtime must be valid");
     let current_window_grid_id = match i32::try_from(current_window_grid_handle) {
         Ok(0) => None,
@@ -593,59 +601,6 @@ pub unsafe extern "C" fn ui_comp_grid_contains_at(
     let Some(local_position) =
         PositionedGrid::try_new(&grid, ComposedPosition::new(origin_row, origin_column))
             .and_then(|grid| grid.local_position(ComposedPosition::new(row, column)))
-    else {
-        return false;
-    };
-    // SAFETY: Both output pointers were checked for null above. The caller
-    // guarantees that they point to writable integers.
-    unsafe {
-        *grid_row.as_mut() = local_position.row;
-        *grid_column.as_mut() = local_position.column;
-    }
-    true
-}
-
-/// Reports whether one window grid accepts mouse input at a screen coordinate.
-///
-/// Unlike compositor layers, multigrid window fallbacks use the window's
-/// screen origin supplied by C.
-///
-/// # Safety
-///
-/// `grid` must point to a valid, exclusively accessible `CScreenGrid` whose
-/// buffers satisfy the ownership and layout requirements of `ScreenGrid`.
-/// `grid_row` and `grid_column` must point to writable integers.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn ui_comp_grid_accepts_mouse_at(
-    grid: *mut CScreenGrid,
-    origin_row: libc::c_int,
-    origin_column: libc::c_int,
-    row: libc::c_int,
-    column: libc::c_int,
-    grid_row: *mut libc::c_int,
-    grid_column: *mut libc::c_int,
-) -> bool {
-    let (Some(mut grid_row), Some(mut grid_column)) =
-        (NonNull::new(grid_row), NonNull::new(grid_column))
-    else {
-        return false;
-    };
-    if grid.is_null() {
-        return false;
-    }
-
-    // SAFETY: The caller transfers exclusive ownership of the grid buffers
-    // into the guard for the duration of this operation.
-    let grid = unsafe { ScreenGridGuard::take(grid) };
-    let Some(positioned_grid) =
-        PositionedGrid::try_new(&grid, ComposedPosition::new(origin_row, origin_column))
-    else {
-        return false;
-    };
-    if !LayerHitTest::MouseEnabled.accepts(positioned_grid) {
-        return false;
-    }
-    let Some(local_position) = positioned_grid.local_position(ComposedPosition::new(row, column))
     else {
         return false;
     };
