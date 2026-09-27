@@ -49,6 +49,7 @@
 #include "nvim/strings.h"
 #include "nvim/types_defs.h"
 #include "nvim/ui.h"
+#include "nvim/ui_compositor.h"
 #include "nvim/ui_defs.h"
 #include "nvim/vim_defs.h"
 
@@ -2310,7 +2311,8 @@ void highlight_changed(void)
       if (hlf == HLF_MSG) {
         clear_cmdline = true;
         HlAttrs attrs = syn_attr2entry(highlight_attr[hlf]);
-        msg_grid.blending = attrs.hl_blend > -1;
+        ui_comp_update_grid_layer(
+          msg_grid.handle, kZIndexMessages, attrs.hl_blend > -1, false);
       }
       ui_call_hl_group_set(cstr_as_string(hlf_names[hlf]),
                            highlight_attr[hlf]);

@@ -299,6 +299,7 @@ pub unsafe extern "C" fn ui_comp_put_grid(
     height: libc::c_int,
     width: libc::c_int,
     z_index: libc::c_int,
+    blending: bool,
     valid: bool,
     on_top: bool,
     accepts_mouse_input: bool,
@@ -307,8 +308,14 @@ pub unsafe extern "C" fn ui_comp_put_grid(
     let grid = NonNull::new(grid).expect("grid to place must not be null");
     let placement = CompositorGridPlacement::try_new(row, column, height, width)
         .expect("grid placement dimensions must be nonnegative");
-    let request =
-        CompositorGridPlacementRequest::new(placement, z_index, valid, on_top, accepts_mouse_input);
+    let request = CompositorGridPlacementRequest::new(
+        placement,
+        z_index,
+        blending,
+        valid,
+        on_top,
+        accepts_mouse_input,
+    );
     let runtime = compositor_runtime_snapshot().expect("compositor runtime must be valid");
     let current_window_grid_id = match i32::try_from(current_window_grid_handle) {
         Ok(0) => None,
@@ -423,21 +430,33 @@ pub extern "C" fn ui_comp_grid_cursor_goto(grid_handle: Integer, row: Integer, c
         .expect("cursor update must preserve compositor invariants");
 }
 
-/// Updates a registered grid's z-index and layer order.
-pub(in crate::ui_compositor) fn update_registered_layer_z_index(
+/// Updates a registered grid's compositor policy and layer order.
+pub(in crate::ui_compositor) fn update_registered_layer_policy(
     grid_id: GridId,
     z_index: i32,
+    blending: bool,
+    accepts_mouse_input: bool,
 ) -> CompositorResult<()> {
-    lock_compositor().update_layer_z_index(grid_id, z_index)
+    lock_compositor().update_layer_policy(grid_id, z_index, blending, accepts_mouse_input)
 }
 
-/// Updates one compositor grid's z-index and layer position.
+/// Updates one compositor grid's complete layer policy.
 #[unsafe(no_mangle)]
-pub extern "C" fn ui_comp_update_grid_zindex(grid_handle: Integer, z_index: libc::c_int) {
+pub extern "C" fn ui_comp_update_grid_layer(
+    grid_handle: Integer,
+    z_index: libc::c_int,
+    blending: bool,
+    accepts_mouse_input: bool,
+) {
     let grid_handle =
         i32::try_from(grid_handle).expect("grid handle must fit the compositor grid identity");
-    update_registered_layer_z_index(GridId::new(grid_handle), z_index)
-        .expect("layer adjustment must preserve compositor invariants");
+    update_registered_layer_policy(
+        GridId::new(grid_handle),
+        z_index,
+        blending,
+        accepts_mouse_input,
+    )
+    .expect("layer policy update must preserve compositor invariants");
 }
 
 /// Removes one registered grid and publishes the reduced C bindings.

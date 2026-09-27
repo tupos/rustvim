@@ -209,8 +209,9 @@ void msg_grid_validate(void)
     int pos = (State & MODE_ASKMORE) ? 0 : MAX(max_rows - msg_scrolled, 0);
     msg_grid.throttled = false;  // don't throttle in 'cmdheight' area
     msg_grid_set_pos(pos, msg_scrolled);
+    bool blending = syn_attr2entry(highlight_attr[HLF_MSG]).hl_blend > -1;
     ui_comp_put_grid(&msg_grid, pos, 0, msg_grid.rows, msg_grid.cols,
-                     kZIndexMessages, false, true, false,
+                     kZIndexMessages, blending, false, true, false,
                      curwin ? curwin->w_grid_alloc.handle : 0);
     ui_call_grid_resize(msg_grid.handle, msg_grid.cols, msg_grid.rows);
 

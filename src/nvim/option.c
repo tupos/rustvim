@@ -111,6 +111,7 @@
 #include "nvim/terminal.h"
 #include "nvim/types_defs.h"
 #include "nvim/ui.h"
+#include "nvim/ui_compositor.h"
 #include "nvim/undo.h"
 #include "nvim/undo_defs.h"
 #include "nvim/vim_defs.h"
@@ -1986,8 +1987,10 @@ bool valid_name(const char *val, const char *allowed)
 
 void check_blending(win_T *wp)
 {
-  wp->w_grid_alloc.blending =
-    wp->w_p_winbl > 0 || (wp->w_floating && wp->w_config.shadow);
+  ui_comp_update_grid_layer(
+    wp->w_grid_alloc.handle, wp->w_config.zindex,
+    wp->w_p_winbl > 0 || (wp->w_floating && wp->w_config.shadow),
+    wp->w_config.mouse);
 }
 
 /// Handle setting `winhighlight' in window "wp"
@@ -5757,7 +5760,6 @@ void didset_window_options(win_T *wp, bool valid_cursor)
   check_blending(wp);
   set_winbar_win(wp, false, valid_cursor);
   check_signcolumn(NULL, wp);
-  wp->w_grid_alloc.blending = wp->w_p_winbl > 0;
 }
 
 #define COPY_OPT_SCTX(buf, bv) buf->b_p_script_ctx[bv] = options[buf_opt_idx[bv]].script_ctx

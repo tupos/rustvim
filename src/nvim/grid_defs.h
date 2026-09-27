@@ -65,13 +65,10 @@ struct ScreenGrid {
   // only draw internally and don't send updates yet to the compositor or
   // external UI.
   bool throttled;
-
-  // whether the compositor should blend the grid with the background grid
-  bool blending;
 };
 
 #define SCREEN_GRID_INIT { 0, NULL, NULL, NULL, NULL, NULL, 0, 0, false, \
-                           false, false }
+                           false }
 
 /// Represents the position of a viewport within a ScreenGrid
 typedef struct {

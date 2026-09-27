@@ -28,7 +28,7 @@ use ffi::{
     apply_cursor_update_to_registered_grids, cursor_is_covered_by_registered_layers,
     grid_store::{LegacyGridStore, lock_compositor_grid_bindings},
     place_grid_in_registered_layers, remove_registered_layer, ui_comp_find_grid_at_coord,
-    update_registered_layer_z_index,
+    update_registered_layer_policy,
 };
 
 #[cfg(test)]
@@ -274,6 +274,7 @@ struct CompositorGridPlacement {
 struct CompositorGridPlacementRequest {
     placement: CompositorGridPlacement,
     z_index: i32,
+    blending: bool,
     valid: bool,
     on_top: bool,
     accepts_mouse_input: bool,
@@ -284,6 +285,7 @@ impl CompositorGridPlacementRequest {
     const fn new(
         placement: CompositorGridPlacement,
         z_index: i32,
+        blending: bool,
         valid: bool,
         on_top: bool,
         accepts_mouse_input: bool,
@@ -291,6 +293,7 @@ impl CompositorGridPlacementRequest {
         Self {
             placement,
             z_index,
+            blending,
             valid,
             on_top,
             accepts_mouse_input,
@@ -516,6 +519,7 @@ impl CompositorDrawState {
 struct MessageCompositorState {
     current_row: i32,
     z_index: i32,
+    blending: bool,
     was_scrolled: bool,
     separator_row: Option<i32>,
     separator_character: VimSCharT,
@@ -527,6 +531,7 @@ impl MessageCompositorState {
         Self {
             current_row: i32::MAX,
             z_index: 0,
+            blending: false,
             was_scrolled: false,
             separator_row: None,
             separator_character: VimSCharT::from_ne_bytes([b' ', 0, 0, 0]),
@@ -537,7 +542,6 @@ impl MessageCompositorState {
     fn plan_redraw(
         &self,
         request: CompositorMessagePositionRequest,
-        message_grid: &ScreenGrid,
         default_grid: &ScreenGrid,
         should_draw: bool,
     ) -> CompositorResult<CompositorMessagePositionPlan> {
@@ -570,7 +574,7 @@ impl MessageCompositorState {
             .current_row
             .checked_sub(request.row)
             .ok_or(CompositorError::InvalidGeometry)?;
-        if message_grid.blends_with_background() {
+        if self.blending {
             let separator_offset = if request.scrolled { 1 } else { 0 };
             return Ok(CompositorMessagePositionPlan {
                 scroll: None,
@@ -617,7 +621,6 @@ impl MessageCompositorState {
     /// Updates the message grid and records its new compositor state.
     fn update_position(
         &mut self,
-        message_grid: &ScreenGrid,
         default_grid: &ScreenGrid,
         request: CompositorMessagePositionRequest,
         should_draw: bool,
@@ -632,7 +635,7 @@ impl MessageCompositorState {
         } else {
             None
         };
-        let plan = self.plan_redraw(request, message_grid, default_grid, should_draw)?;
+        let plan = self.plan_redraw(request, default_grid, should_draw)?;
 
         if separator_row.is_some()
             && let Some(character) = request.separator_character
@@ -667,6 +670,7 @@ struct LayerState {
     grid_id: GridId,
     placement: CompositorGridPlacement,
     z_index: i32,
+    blending: bool,
     disabled: bool,
     accepts_mouse_input: bool,
     publication_pending: bool,
@@ -678,12 +682,14 @@ impl LayerState {
         grid_id: GridId,
         placement: CompositorGridPlacement,
         z_index: i32,
+        blending: bool,
         accepts_mouse_input: bool,
     ) -> Self {
         Self {
             grid_id,
             placement,
             z_index,
+            blending,
             disabled: false,
             accepts_mouse_input,
             publication_pending: true,
@@ -702,6 +708,7 @@ impl LayerState {
                 },
             },
             0,
+            false,
             true,
         )
     }
@@ -870,9 +877,17 @@ impl Compositor {
         request: CompositorMessagePositionRequest,
     ) -> CompositorResult<CompositorMessagePositionPlan> {
         let should_draw = self.should_draw();
-        let plan =
-            self.message
-                .update_position(message_grid, default_grid, request, should_draw)?;
+        if let Some(blending) = self.layers.as_ref().and_then(|layers| {
+            layers
+                .index_of(message_grid.id())
+                .and_then(|layer_index| layers.get(layer_index))
+                .map(|layer| layer.blending)
+        }) {
+            self.message.blending = blending;
+        }
+        let plan = self
+            .message
+            .update_position(default_grid, request, should_draw)?;
         if let Some(layer) = self.layers.as_mut().and_then(|layers| {
             layers
                 .index_of(message_grid.id())
@@ -915,6 +930,7 @@ impl Compositor {
             }
             layer.accepts_mouse_input = request.accepts_mouse_input;
             layer.z_index = request.z_index;
+            layer.blending = request.blending;
             layer.publication_pending = true;
             let deferred_completion = if should_draw {
                 layer.disabled = true;
@@ -958,6 +974,7 @@ impl Compositor {
             target.grid_id,
             request.placement,
             request.z_index,
+            request.blending,
             request.accepts_mouse_input,
         )?;
         layers.place_appended_layer(insertion_index, request.placement)?;
@@ -990,12 +1007,20 @@ impl Compositor {
         Ok(())
     }
 
-    /// Updates one registered grid's z-index and adjusts its layer position.
+    /// Updates one registered grid's policy and adjusts its layer position.
     ///
     /// A grid that is not currently registered is accepted as a no-op,
     /// matching the previous C-side `comp_index == 0` check.
-    fn update_layer_z_index(&mut self, grid_id: GridId, z_index: i32) -> CompositorResult<()> {
-        let mut layers = self.layer_snapshot()?;
+    fn update_layer_policy(
+        &mut self,
+        grid_id: GridId,
+        z_index: i32,
+        blending: bool,
+        accepts_mouse_input: bool,
+    ) -> CompositorResult<()> {
+        let Some(mut layers) = self.layers.clone() else {
+            return Ok(());
+        };
         let Some(layer_index) = layers.index_of(grid_id) else {
             return Ok(());
         };
@@ -1003,17 +1028,22 @@ impl Compositor {
             .get(layer_index)
             .ok_or(CompositorError::InvalidLayerState)?
             .z_index;
+        {
+            let layer = layers
+                .get_mut(layer_index)
+                .ok_or(CompositorError::InvalidLayerState)?;
+            layer.z_index = z_index;
+            layer.blending = blending;
+            layer.accepts_mouse_input = accepts_mouse_input;
+        }
         let adjustment = if z_index > previous_z_index {
             CompositorLayerAdjustment::Raise
         } else if z_index < previous_z_index {
             CompositorLayerAdjustment::Lower
         } else {
+            self.layers = Some(layers);
             return Ok(());
         };
-        layers
-            .get_mut(layer_index)
-            .ok_or(CompositorError::InvalidLayerState)?
-            .z_index = z_index;
         let movement = layers.plan_layer_adjustment(layer_index, adjustment)?;
 
         layers.move_layer(movement)?;
@@ -1195,6 +1225,7 @@ impl Compositor {
                                 size,
                             },
                             self.message.z_index,
+                            self.message.blending,
                             false,
                             false,
                         )
@@ -1607,6 +1638,7 @@ impl<'grid> CompositorLayer<'grid> {
         layer_index: usize,
         placement: CompositorGridPlacement,
         z_index: i32,
+        blending: bool,
         accepts_mouse_input: bool,
         disabled: bool,
     ) -> Option<Self> {
@@ -1623,7 +1655,7 @@ impl<'grid> CompositorLayer<'grid> {
             visible_size,
             z_index,
             layer_index,
-            blending: grid.blends_with_background(),
+            blending,
             accepts_mouse_input,
             disabled,
         })
@@ -2099,6 +2131,7 @@ impl Layers<LayerState> {
         grid_id: GridId,
         placement: CompositorGridPlacement,
         z_index: i32,
+        blending: bool,
         accepts_mouse_input: bool,
     ) -> CompositorResult<()> {
         if self.index_of(grid_id).is_some() {
@@ -2109,6 +2142,7 @@ impl Layers<LayerState> {
             grid_id,
             placement,
             z_index,
+            blending,
             accepts_mouse_input,
         ));
         Ok(())
@@ -2160,6 +2194,7 @@ impl Layers<LayerState> {
                             layer_index,
                             layer.placement,
                             layer.z_index,
+                            layer.blending,
                             layer.accepts_mouse_input,
                             layer.disabled,
                         )
@@ -3306,6 +3341,7 @@ mod tests {
                 size: GridSize::try_new(grid.rows, grid.cols).unwrap(),
             },
             0,
+            false,
             true,
         )
     }
@@ -3589,25 +3625,14 @@ mod tests {
     #[test]
     fn moving_a_blended_message_grid_up_recomposes_instead_of_scrolling() {
         let mut state = MessageCompositorState::new();
-        let mut message_grid = grid_with_size(10, 20);
-        message_grid.set_blends_with_background(true);
         let default_grid = grid_with_size(10, 18);
+        state.blending = true;
         state
-            .update_position(
-                &message_grid,
-                &default_grid,
-                message_position_request(5, false),
-                false,
-            )
+            .update_position(&default_grid, message_position_request(5, false), false)
             .unwrap();
 
         let plan = state
-            .plan_redraw(
-                message_position_request(2, true),
-                &message_grid,
-                &default_grid,
-                true,
-            )
+            .plan_redraw(message_position_request(2, true), &default_grid, true)
             .unwrap();
 
         assert_eq!(
@@ -3786,7 +3811,7 @@ mod tests {
     }
 
     #[test]
-    fn registered_layer_adjustment_updates_rust_order_and_publication() {
+    fn registered_layer_policy_update_updates_rust_state_and_publication() {
         let default_grid = grid_with_size(1, 1);
         let moving_grid = grid_with_size(1, 1);
         let lower_grid = grid_with_size(1, 1);
@@ -3830,8 +3855,20 @@ mod tests {
             set_registered_test_layer_z_index(equal_grid_id, 30);
 
             clear_registered_test_layer_publications();
-            assert_eq!(update_registered_layer_z_index(moving_grid_id, 30), Ok(()));
+            assert_eq!(
+                update_registered_layer_policy(moving_grid_id, 30, true, false),
+                Ok(())
+            );
             assert_eq!(compositor_layer_ids(), expected_registry);
+            {
+                let compositor = lock_compositor();
+                let layers = compositor.layers().unwrap();
+                let moving_layer = layers
+                    .get(layers.index_of(moving_grid_id).unwrap())
+                    .unwrap();
+                assert!(moving_layer.blending);
+                assert!(!moving_layer.accepts_mouse_input);
+            }
             assert_eq!(
                 cgrids,
                 [
@@ -4156,6 +4193,7 @@ mod tests {
                 CompositorGridPlacementRequest {
                     placement: CompositorGridPlacement::try_new(1, 2, 2, 2).unwrap(),
                     z_index: 0,
+                    blending: false,
                     valid: true,
                     on_top: false,
                     accepts_mouse_input: true,
@@ -4264,6 +4302,7 @@ mod tests {
                 CompositorGridPlacementRequest {
                     placement: CompositorGridPlacement::try_new(1, 2, 2, 2).unwrap(),
                     z_index: 0,
+                    blending: false,
                     valid: true,
                     on_top: false,
                     accepts_mouse_input: true,

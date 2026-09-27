@@ -273,9 +273,6 @@ pub struct ScreenGrid {
     /// only draw internally and don't send updates yet to the compositor or
     /// external UI.
     throttled: bool,
-
-    /// whether the compositor should blend the grid with the background grid
-    blending: bool,
 }
 
 impl ScreenGrid {
@@ -293,7 +290,6 @@ impl ScreenGrid {
             cols,
             valid: false,
             throttled: false,
-            blending: false,
         };
         for i in 0..rows {
             let offset = i as usize * cols as usize;
@@ -308,16 +304,6 @@ impl ScreenGrid {
     /// Returns this grid's stable Rust identity.
     pub(crate) fn id(&self) -> GridId {
         GridId::new(self.handle)
-    }
-
-    /// Returns whether this grid blends with the default-grid background.
-    pub(crate) fn blends_with_background(&self) -> bool {
-        self.blending
-    }
-
-    /// Controls whether this grid blends with the default-grid background.
-    pub(crate) fn set_blends_with_background(&mut self, blends: bool) {
-        self.blending = blends;
     }
 
     pub fn from_grid(
@@ -441,7 +427,6 @@ impl ScreenGrid {
             cols: cgrid.cols,
             valid: cgrid.valid,
             throttled: cgrid.throttled,
-            blending: cgrid.blending,
         }
     }
 
@@ -467,7 +452,6 @@ impl ScreenGrid {
             cols: self.cols,
             valid: self.valid,
             throttled: self.throttled,
-            blending: self.blending,
         }
     }
 
@@ -2629,8 +2613,6 @@ pub struct CScreenGrid {
     valid: bool,
 
     throttled: bool,
-
-    blending: bool,
 }
 
 impl CScreenGrid {
@@ -4934,7 +4916,6 @@ mod tests {
             cols: 23,
             valid: false,
             throttled: false,
-            blending: false,
         };
 
         let allocator = GridHandleAllocator::new(DEFAULT_GRID_HANDLE);

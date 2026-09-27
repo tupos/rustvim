@@ -13,10 +13,12 @@ extern void ui_comp_free_all_mem(void);
 extern void ui_comp_syn_init(void);
 extern void ui_comp_attach(void);
 extern void ui_comp_detach(void);
-extern void ui_comp_update_grid_zindex(Integer grid_handle, int z_index);
+extern void ui_comp_update_grid_layer(
+  Integer grid_handle, int z_index, bool blending, bool accepts_mouse_input);
 extern bool ui_comp_put_grid(
   ScreenGrid *grid, int row, int column, int height, int width,
-  int z_index, bool valid, bool on_top, bool accepts_mouse_input,
+  int z_index, bool blending, bool valid, bool on_top,
+  bool accepts_mouse_input,
   Integer current_window_grid_handle);
 extern void ui_comp_remove_grid(ScreenGrid *grid);
 extern void ui_comp_compose_grid(ScreenGrid *grid);
