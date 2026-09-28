@@ -203,6 +203,21 @@ impl MessageGridScrollFlushPlan {
     }
 }
 
+/// Grid work selected while scrolling the message display upward.
+enum MessageGridScrollUpPlan {
+    /// Move the message grid before optionally clearing its first row.
+    Reposition {
+        position: i32,
+        scrolled: bool,
+        clear_first_row: bool,
+    },
+    /// Shift the message-grid rows in their existing position.
+    ShiftRows {
+        target: GridOutputTarget,
+        scroll: Option<UiCommand<LocalGridSpace>>,
+    },
+}
+
 /// C callback used to publish a message-grid position.
 type CMessageGridPositionEmitter = unsafe extern "C" fn(row: libc::c_int, scrolled: bool);
 
@@ -546,6 +561,45 @@ impl ScreenGrid {
     fn release_message(&mut self) {
         self.release_storage();
         self.throttled = false;
+    }
+
+    /// Starts one upward message-grid scroll.
+    ///
+    /// Repositioning is returned as a separate action because its callback
+    /// must run after the current grid borrow ends and before a possible
+    /// zero-`cmdheight` row clear.
+    fn scroll_message_up(
+        &mut self,
+        current_position: i32,
+        enable_throttling: bool,
+        zero_cmdheight: bool,
+    ) -> MessageGridScrollUpPlan {
+        if enable_throttling {
+            self.throttled = true;
+        }
+
+        if current_position > 0 {
+            return MessageGridScrollUpPlan::Reposition {
+                position: current_position - 1,
+                scrolled: !zero_cmdheight,
+                clear_first_row: zero_cmdheight,
+            };
+        }
+
+        let target = GridOutputTarget::new(self.id(), self.cols);
+        let scroll = self.del_lines(0, 1, self.rows, 0, self.cols);
+        self.scroll_dirty_columns();
+        MessageGridScrollUpPlan::ShiftRows { target, scroll }
+    }
+
+    /// Clears the first message-grid row when storage is allocated.
+    fn clear_first_message_row(&mut self) {
+        if !self.is_allocated() {
+            return;
+        }
+        let width =
+            usize::try_from(self.cols).expect("allocated message-grid width must be nonnegative");
+        self.clear_row(0, width, false);
     }
 
     /// Finishes one throttled message-grid update.
@@ -4164,6 +4218,61 @@ pub unsafe extern "C" fn grid_release_message(grid: *mut CScreenGrid) {
     grid.release_message();
 }
 
+/// Scrolls the message grid upward by one row.
+///
+/// Position callbacks and scroll events are emitted only after the grid guard
+/// has restored ownership to the C representation.
+///
+/// # Safety
+///
+/// `grid` must point to a valid, exclusively accessible `CScreenGrid`. Its
+/// buffers must satisfy the ownership and layout requirements of `ScreenGrid`.
+/// `set_position` must remain callable for the duration of this operation.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn grid_scroll_message_up(
+    grid: *mut CScreenGrid,
+    current_position: libc::c_int,
+    enable_throttling: bool,
+    zero_cmdheight: bool,
+    set_position: CMessageGridPositionEmitter,
+) {
+    if grid.is_null() {
+        return;
+    }
+    let plan = {
+        // SAFETY: The caller transfers exclusive ownership of the grid and
+        // its allocations to the guard for the duration of this operation.
+        let mut grid = unsafe { ScreenGridGuard::take(grid) };
+        grid.scroll_message_up(current_position, enable_throttling, zero_cmdheight)
+    };
+
+    match plan {
+        MessageGridScrollUpPlan::Reposition {
+            position,
+            scrolled,
+            clear_first_row,
+        } => {
+            // SAFETY: The caller guarantees that the callback is valid. The
+            // grid guard was dropped before this callback can reenter editor
+            // code.
+            unsafe {
+                set_position(position, scrolled);
+            }
+            if clear_first_row {
+                // SAFETY: The callback has returned, and the caller guarantees
+                // continued exclusive access to this grid.
+                let mut grid = unsafe { ScreenGridGuard::take(grid) };
+                grid.clear_first_message_row();
+            }
+        }
+        MessageGridScrollUpPlan::ShiftRows { target, scroll } => {
+            if let Some(scroll) = scroll {
+                target.emit(scroll);
+            }
+        }
+    }
+}
+
 /// Flushes pending throttled message-grid scrolling and row updates.
 ///
 /// The message-position callback and UI commands are emitted only after the
@@ -4276,24 +4385,6 @@ pub unsafe extern "C" fn grid_reset_dirty_columns(grid: *mut CScreenGrid) {
     // into the guard for the duration of this function.
     let mut grid = unsafe { ScreenGridGuard::take(grid) };
     grid.reset_dirty_columns();
-}
-
-/// Scrolls dirty-column state upward by one row.
-///
-/// # Safety
-///
-/// `grid` must point to a valid, exclusively accessible `CScreenGrid`. Its
-/// buffers must satisfy the ownership and layout requirements of `ScreenGrid`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn grid_scroll_dirty_columns(grid: *mut CScreenGrid) {
-    if grid.is_null() {
-        return;
-    }
-
-    // SAFETY: The caller transfers exclusive ownership of the grid buffers
-    // into the guard for the duration of this function.
-    let mut grid = unsafe { ScreenGridGuard::take(grid) };
-    grid.scroll_dirty_columns();
 }
 
 /// # Safety
@@ -5011,6 +5102,64 @@ mod tests {
 
         assert!(grid.ins_lines(0, 1, 2, 0, 3).is_none());
         assert!(grid.del_lines(0, 1, 2, 0, 3).is_none());
+    }
+
+    #[test]
+    fn message_scroll_up_returns_reposition_before_zero_cmdheight_clear() {
+        let mut line_buffer = LineBuffer::new(3);
+        let mut grid = ScreenGrid::new(2, 3, true, &mut line_buffer);
+
+        let plan = grid.scroll_message_up(2, true, true);
+
+        let MessageGridScrollUpPlan::Reposition {
+            position,
+            scrolled,
+            clear_first_row,
+        } = plan
+        else {
+            panic!("positive message-grid position must be moved");
+        };
+        assert_eq!(position, 1);
+        assert!(!scrolled);
+        assert!(clear_first_row);
+        assert!(grid.throttled);
+    }
+
+    #[test]
+    fn message_scroll_up_shifts_rows_and_dirty_columns() {
+        let mut line_buffer = LineBuffer::new(2);
+        let mut grid = ScreenGrid::new(3, 2, true, &mut line_buffer);
+        grid.handle = 7;
+        grid.reset_dirty_columns();
+        grid.mark_dirty_column(1, 2);
+        let first = grid.line_offset[0];
+        let second = grid.line_offset[1];
+        let third = grid.line_offset[2];
+        grid.chars[first] = schar_from_ascii('a');
+        grid.chars[second] = schar_from_ascii('b');
+        grid.chars[third] = schar_from_ascii('c');
+
+        let plan = grid.scroll_message_up(0, false, false);
+
+        let MessageGridScrollUpPlan::ShiftRows {
+            scroll: Some(scroll),
+            ..
+        } = plan
+        else {
+            panic!("stationary message grid must shift its rows");
+        };
+        let UiCommand::GridScroll { region, delta } = scroll else {
+            panic!("unthrottled row shift must emit a scroll command");
+        };
+        assert_eq!(region, GridRegion::try_new(0..3, 0..2).unwrap());
+        assert_eq!(delta, GridDelta::new(1, 0));
+        assert_eq!(grid.get_char_and_attr(0, 0).0, schar_from_ascii('b'));
+        assert_eq!(grid.get_char_and_attr(1, 0).0, schar_from_ascii('c'));
+        assert_eq!(grid.get_char_and_attr(2, 0).0, schar_from_ascii(' '));
+        assert_eq!(
+            grid.dirty_columns.as_ref().map(|columns| &*columns.columns),
+            Some([2, 0, 0].as_slice())
+        );
     }
 
     #[test]

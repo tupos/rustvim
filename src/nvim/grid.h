@@ -99,12 +99,14 @@ extern bool grid_configure_for_popup_menu(ScreenGrid *grid, int rows, int column
 extern MessageGridTransition grid_prepare_for_messages(ScreenGrid *grid, int rows, int columns,
                                                        bool should_allocate);
 extern void grid_release_message(ScreenGrid *grid);
+extern void grid_scroll_message_up(ScreenGrid *grid, int current_position,
+                                   bool enable_throttling, bool zero_cmdheight,
+                                   MessageGridPositionEmitter set_position);
 extern void grid_flush_message_scroll(ScreenGrid *grid, MessageGridScrollFlushRequest request,
                                       MessageGridPositionEmitter emit_position);
 extern void grid_free(ScreenGrid *grid);
 extern void grid_free_all_mem(void);
 extern void grid_reset_dirty_columns(ScreenGrid *grid);
-extern void grid_scroll_dirty_columns(ScreenGrid *grid);
 extern void grid_clear_row(ScreenGrid *grid, int row, int width, bool valid);
 extern ScreenGrid *grid_adjust(GridView *grid, int *row_off, int *col_off);
 extern void grid_invalidate(ScreenGrid *grid);

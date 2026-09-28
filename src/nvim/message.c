@@ -2619,23 +2619,10 @@ bool msg_do_throttle(void)
 /// Scroll the screen up one line for displaying the next message line.
 void msg_scroll_up(bool may_throttle, bool zerocmd)
 {
-  if (may_throttle && msg_do_throttle()) {
-    msg_grid.throttled = true;
-  }
   msg_did_scroll = true;
-  if (msg_grid_pos > 0) {
-    msg_grid_set_pos(msg_grid_pos - 1, !zerocmd);
-
-    // When displaying the first line with cmdheight=0, we need to draw over
-    // the existing last line of the screen.
-    if (zerocmd && grid_is_allocated(&msg_grid)) {
-      grid_clear_row(&msg_grid, 0, msg_grid.cols, false);
-    }
-  } else {
-    grid_del_lines(&msg_grid, 0, 1, msg_grid.rows, 0, msg_grid.cols);
-    grid_scroll_dirty_columns(&msg_grid);
-  }
-
+  grid_scroll_message_up(&msg_grid, msg_grid_pos,
+                         may_throttle && msg_do_throttle(), zerocmd,
+                         msg_grid_set_pos);
   grid_clear(&msg_grid_adj, Rows - 1, Rows, 0, Columns, HL_ATTR(HLF_MSG));
 }
 
