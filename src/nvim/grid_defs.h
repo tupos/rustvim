@@ -67,6 +67,13 @@ struct ScreenGrid {
   bool throttled;
 };
 
+/// Complete contents of one rendered screen cell.
+typedef struct {
+  schar_T character;
+  sattr_T attribute;
+  colnr_T virtual_column;
+} GridCell;
+
 #define SCREEN_GRID_INIT { 0, NULL, NULL, NULL, NULL, NULL, 0, 0, false, \
                            false }
 

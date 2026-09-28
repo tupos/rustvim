@@ -11,9 +11,9 @@ use std::ptr::NonNull;
 use crate::{
     generated::enums::RdbFlags,
     grid::{
-        ComposedGridSpace, ComposedPosition, ComposedRegion, GridDelta, GridId, GridPosition,
-        GridRegion, GridRow, GridRowSegment, GridSize, Highlight, ScreenGrid, VimSAttrT, VimSCharT,
-        schar_from_ascii, schar_from_char,
+        ComposedGridSpace, ComposedPosition, ComposedRegion, GridCell, GridDelta, GridId,
+        GridPosition, GridRegion, GridRow, GridRowSegment, GridSize, Highlight, ScreenGrid,
+        VimSAttrT, VimSCharT, schar_from_ascii, schar_from_char,
     },
     ui::{
         LineFlags,
@@ -28,11 +28,11 @@ use ffi::{
     apply_cursor_update_to_registered_grids, cursor_is_covered_by_registered_layers,
     grid_store::{LegacyGridStore, lock_compositor_grid_bindings},
     place_grid_in_registered_layers, remove_registered_layer, ui_comp_find_grid_at_coord,
-    update_registered_layer_policy,
+    ui_comp_get_cell_at_coord, update_registered_layer_policy,
 };
 
 #[cfg(test)]
-use crate::grid::CScreenGrid;
+use crate::grid::{CGridCell, CScreenGrid};
 
 /// Result of composing one foreground segment over its background.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -101,6 +101,14 @@ impl<'grid> PositionedGrid<'grid> {
                 point.column - self.origin.column,
             )
         })
+    }
+
+    /// Reads the cell at one contained composed-screen position.
+    fn cell(self, point: ComposedPosition) -> Option<GridCell> {
+        let position = self.local_position(point)?;
+        let row = usize::try_from(position.row).ok()?;
+        let column = usize::try_from(position.column).ok()?;
+        self.grid.cell(row, column)
     }
 }
 
@@ -1093,6 +1101,27 @@ impl Compositor {
     ) -> CompositorResult<Option<CompositorGridHit>> {
         let layers = self.layers()?.layer_stack(grids)?;
         Ok(layers.topmost_grid_at(point, hit_test))
+    }
+
+    /// Reads the cell from the topmost non-default grid at one screen point.
+    fn cell_at(
+        &self,
+        grids: &impl GridAccess,
+        point: ComposedPosition,
+    ) -> CompositorResult<Option<GridCell>> {
+        let Some(hit) = self.grid_at(grids, point, LayerHitTest::Any)? else {
+            return Ok(None);
+        };
+        let grid = grids
+            .grid(hit.grid_id)
+            .ok_or(CompositorError::InvalidLayerState)?;
+        let row = usize::try_from(hit.local_position.row)
+            .map_err(|_| CompositorError::InvalidGeometry)?;
+        let column = usize::try_from(hit.local_position.column)
+            .map_err(|_| CompositorError::InvalidGeometry)?;
+        grid.cell(row, column)
+            .map(Some)
+            .ok_or(CompositorError::InvalidLayerState)
     }
 
     /// Reports whether a sufficiently higher layer covers a grid's cursor.
@@ -4661,8 +4690,12 @@ mod tests {
     #[test]
     fn registered_hit_testing_returns_the_bound_c_grid() {
         let default_grid = grid_with_size(4, 4);
-        let overlay_grid = grid_with_size(2, 2);
+        let mut overlay_grid = grid_with_size(2, 2);
+        overlay_grid.chars[0] = schar_from_ascii('x');
+        overlay_grid.attrs[0] = 7;
+        overlay_grid.vcols[0] = 9;
         let overlay_grid_id = overlay_grid.id();
+        let expected_cell = CGridCell::from(overlay_grid.cell(0, 0).unwrap());
 
         // SAFETY: Each conversion transfers its grid allocations to a
         // distinct C representation.
@@ -4680,6 +4713,7 @@ mod tests {
             set_registered_test_layer_mouse_input(overlay_grid_id, false);
             let mut grid_row = -1;
             let mut grid_column = -1;
+            let mut cell = CGridCell::default();
 
             assert_eq!(
                 ui_comp_find_grid_at_coord(1, 1, false, &mut grid_row, &mut grid_column,),
@@ -4689,9 +4723,14 @@ mod tests {
             assert!(
                 ui_comp_find_grid_at_coord(1, 1, true, &mut grid_row, &mut grid_column,).is_null()
             );
+            // SAFETY: `cell` is valid writable storage for this call.
+            assert!(unsafe { ui_comp_get_cell_at_coord(1, 1, &mut cell) });
+            assert_eq!(cell, expected_cell);
             assert!(
                 ui_comp_find_grid_at_coord(0, 0, false, &mut grid_row, &mut grid_column,).is_null()
             );
+            // SAFETY: `cell` is valid writable storage for this call.
+            assert!(!unsafe { ui_comp_get_cell_at_coord(0, 0, &mut cell) });
         }
 
         // SAFETY: Hit-testing restored both grid allocations.
@@ -4729,7 +4768,12 @@ mod tests {
             positioned.local_position(ComposedPosition::new(5, 7)),
             Some(GridPosition::new(1, 2))
         );
+        assert_eq!(
+            positioned.cell(ComposedPosition::new(5, 7)),
+            grid.cell(1, 2)
+        );
         assert_eq!(positioned.local_position(ComposedPosition::new(6, 5)), None);
+        assert_eq!(positioned.cell(ComposedPosition::new(6, 5)), None);
     }
 
     #[test]

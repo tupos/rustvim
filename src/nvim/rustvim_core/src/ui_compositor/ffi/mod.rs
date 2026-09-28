@@ -9,7 +9,7 @@ mod runtime;
 pub(in crate::ui_compositor) use entrypoints::{
     apply_cursor_update_to_registered_grids, cursor_is_covered_by_registered_layers,
     place_grid_in_registered_layers, remove_registered_layer, ui_comp_find_grid_at_coord,
-    update_registered_layer_policy,
+    ui_comp_get_cell_at_coord, update_registered_layer_policy,
 };
 pub(in crate::ui_compositor) use nvim_output::NvimOutput;
 pub(in crate::ui_compositor) use runtime::{

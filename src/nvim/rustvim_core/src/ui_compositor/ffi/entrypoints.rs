@@ -5,8 +5,8 @@ use std::{ptr::NonNull, slice};
 use crate::{
     defines::{CVimString, Integer},
     grid::{
-        CScreenGrid, GridId, ScreenGridGuard, VimSAttrT, VimSCharT, default_grid as c_default_grid,
-        msg_grid as c_msg_grid, schar_from_buf,
+        CGridCell, CScreenGrid, GridId, ScreenGridGuard, VimSAttrT, VimSCharT,
+        default_grid as c_default_grid, msg_grid as c_msg_grid, schar_from_buf,
     },
 };
 
@@ -519,6 +519,41 @@ pub unsafe extern "C" fn ui_comp_remove_grid(grid: *mut CScreenGrid) {
     }
 }
 
+/// Reads the cell from the topmost non-default compositor grid at one screen
+/// coordinate.
+///
+/// Returns `false` when no overlay contains the coordinate or compositor state
+/// is unavailable. Every temporarily owned grid is restored before this
+/// function returns.
+///
+/// # Safety
+///
+/// `output` must point to valid, properly aligned writable `CGridCell` storage.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ui_comp_get_cell_at_coord(
+    row: libc::c_int,
+    column: libc::c_int,
+    output: *mut CGridCell,
+) -> bool {
+    let Some(output) = NonNull::new(output) else {
+        return false;
+    };
+    let Some(grid_store) = LegacyGridStore::try_take_registered() else {
+        return false;
+    };
+    let Ok(Some(cell)) = lock_compositor().cell_at(&grid_store, ComposedPosition::new(row, column))
+    else {
+        return false;
+    };
+
+    // SAFETY: The output pointer was checked for null above and the caller
+    // guarantees valid writable storage.
+    unsafe {
+        output.as_ptr().write(CGridCell::from(cell));
+    }
+    true
+}
+
 /// Finds the topmost non-default compositor grid at one screen coordinate.
 ///
 /// Returns null when no matching grid exists or the registered state is
@@ -565,6 +600,50 @@ pub extern "C" fn ui_comp_find_grid_at_coord(
     }
 
     cgrid
+}
+
+/// Reads one positioned grid's cell at a composed-screen coordinate.
+///
+/// Returns `false` when the grid does not contain the coordinate or cell
+/// storage is unavailable.
+///
+/// # Safety
+///
+/// `grid` must point to a valid, exclusively accessible `CScreenGrid` whose
+/// buffers satisfy the ownership and layout requirements of `ScreenGrid`.
+/// `output` must point to valid, properly aligned writable `CGridCell` storage.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ui_comp_grid_get_cell_at(
+    grid: *mut CScreenGrid,
+    origin_row: libc::c_int,
+    origin_column: libc::c_int,
+    row: libc::c_int,
+    column: libc::c_int,
+    output: *mut CGridCell,
+) -> bool {
+    let Some(output) = NonNull::new(output) else {
+        return false;
+    };
+    if grid.is_null() {
+        return false;
+    }
+
+    // SAFETY: The caller transfers exclusive ownership of the grid buffers
+    // into the guard for the duration of this operation.
+    let grid = unsafe { ScreenGridGuard::take(grid) };
+    let Some(cell) =
+        PositionedGrid::try_new(&grid, ComposedPosition::new(origin_row, origin_column))
+            .and_then(|grid| grid.cell(ComposedPosition::new(row, column)))
+    else {
+        return false;
+    };
+
+    // SAFETY: The output pointer was checked for null above and the caller
+    // guarantees valid writable storage.
+    unsafe {
+        output.as_ptr().write(CGridCell::from(cell));
+    }
+    true
 }
 
 /// Reports whether one grid contains a composed-screen coordinate.

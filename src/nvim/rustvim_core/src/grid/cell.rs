@@ -2,7 +2,7 @@ use super::{VimColNrT, VimSAttrT, VimSCharT};
 
 /// Complete contents of one rendered screen cell.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(super) struct GridCell {
+pub(crate) struct GridCell {
     pub(super) character: VimSCharT,
     pub(super) attribute: VimSAttrT,
     pub(super) virtual_column: VimColNrT,

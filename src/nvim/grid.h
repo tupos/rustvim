@@ -137,8 +137,7 @@ extern char schar_get_ascii(schar_T sc);
 extern int schar_cells(schar_T sc);
 extern void line_do_arabic_shape(schar_T *buf, int cols);
 extern bool grid_get_cell(ScreenGrid *grid, int64_t row, int64_t col,
-                          schar_T *character, sattr_T *attribute,
-                          colnr_T *virtual_column);
+                          GridCell *cell);
 extern schar_T schar_from_char(int c);
 
 extern void grid_line_start(GridView *view, int row);

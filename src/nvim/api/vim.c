@@ -2084,20 +2084,19 @@ Array nvim__inspect_cell(Integer grid, Integer row, Integer col, Arena *arena, E
     g = &wp->w_grid_alloc;
   }
 
-  schar_T character;
-  sattr_T attr;
-  if (!grid_get_cell(g, row, col, &character, &attr, NULL)) {
+  GridCell cell;
+  if (!grid_get_cell(g, row, col, &cell)) {
     return ret;
   }
 
   ret = arena_array(arena, 3);
   char *sc_buf = arena_alloc(arena, MAX_SCHAR_SIZE, false);
-  schar_get(sc_buf, character);
+  schar_get(sc_buf, cell.character);
   ADD_C(ret, CSTR_AS_OBJ(sc_buf));
-  ADD_C(ret, DICT_OBJ(hl_get_attr_by_id(attr, true, arena, err)));
+  ADD_C(ret, DICT_OBJ(hl_get_attr_by_id(cell.attribute, true, arena, err)));
   // will not work first time
   if (!highlight_use_hlstate()) {
-    ADD_C(ret, ARRAY_OBJ(hl_inspect(attr, arena)));
+    ADD_C(ret, ARRAY_OBJ(hl_inspect(cell.attribute, arena)));
   }
   return ret;
 }

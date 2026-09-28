@@ -28,7 +28,7 @@ use std::{
     },
 };
 
-use cell::GridCell;
+pub(crate) use cell::GridCell;
 pub(crate) use coordinates::{
     ComposedGridSpace, ComposedPosition, ComposedRegion, GridDelta, GridPosition, GridRegion,
     GridSize, LocalGridSpace, Position, Region,
@@ -1000,7 +1000,7 @@ impl ScreenGrid {
     }
 
     /// Returns the complete contents of one logical grid cell.
-    fn cell(&self, row: usize, col: usize) -> Option<GridCell> {
+    pub(crate) fn cell(&self, row: usize, col: usize) -> Option<GridCell> {
         let width = usize::try_from(self.cols).ok()?;
         if col >= width {
             return None;
@@ -3099,6 +3099,25 @@ fn schar_in_arabic_block_impl(sc: VimSCharT, glyph_map: &GlyphMapping) -> bool {
     first_byte & 0xFE == 0xD8
 }
 
+/// C representation of one complete rendered screen cell.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct CGridCell {
+    character: VimSCharT,
+    attribute: VimSAttrT,
+    virtual_column: VimColNrT,
+}
+
+impl From<GridCell> for CGridCell {
+    fn from(cell: GridCell) -> Self {
+        Self {
+            character: cell.character,
+            attribute: cell.attribute,
+            virtual_column: cell.virtual_column,
+        }
+    }
+}
+
 #[repr(C)]
 #[derive(Debug)]
 pub struct CScreenGrid {
@@ -4983,24 +5002,21 @@ pub unsafe extern "C" fn grid_invalidate_row(grid: *mut CScreenGrid, row: libc::
 /// Reads one complete logical grid cell.
 ///
 /// Returns `false` for a null grid, invalid coordinates, or unavailable cell
-/// storage. Non-null output pointers are written only when the cell exists.
+/// storage. The output is written only when the cell exists.
 ///
 /// # Safety
 ///
 /// `grid` must point to a valid, exclusively accessible `CScreenGrid` whose
 /// buffers satisfy the ownership and layout requirements of `ScreenGrid`.
-/// Every non-null output pointer must point to valid, properly aligned writable
-/// memory for its corresponding value.
+/// `output` must point to valid, properly aligned writable `CGridCell` storage.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn grid_get_cell(
     grid: *mut CScreenGrid,
     row: i64,
     col: i64,
-    character: *mut VimSCharT,
-    attribute: *mut VimSAttrT,
-    virtual_column: *mut VimColNrT,
+    output: *mut CGridCell,
 ) -> bool {
-    if grid.is_null() {
+    if grid.is_null() || output.is_null() {
         return false;
     }
     let (Ok(row), Ok(col)) = (usize::try_from(row), usize::try_from(col)) else {
@@ -5014,20 +5030,10 @@ pub unsafe extern "C" fn grid_get_cell(
         return false;
     };
 
-    if !character.is_null() {
-        unsafe {
-            character.write(cell.character);
-        }
-    }
-    if !attribute.is_null() {
-        unsafe {
-            attribute.write(cell.attribute);
-        }
-    }
-    if !virtual_column.is_null() {
-        unsafe {
-            virtual_column.write(cell.virtual_column);
-        }
+    // SAFETY: The output pointer was checked for null above and the caller
+    // guarantees valid writable storage.
+    unsafe {
+        output.write(CGridCell::from(cell));
     }
     true
 }

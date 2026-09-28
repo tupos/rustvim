@@ -2022,20 +2022,20 @@ static void mouse_check_grid(colnr_T *vcolp, int *flagsp)
   click_row += start_row;
   click_col += start_col;
 
-  colnr_T col_from_screen;
-  if (!grid_get_cell(gp, click_row, click_col, NULL, NULL, &col_from_screen)) {
+  GridCell cell;
+  if (!grid_get_cell(gp, click_row, click_col, &cell)) {
     return;
   }
 
-  if (col_from_screen >= 0) {
+  if (cell.virtual_column >= 0) {
     // Use the virtual column from vcols[], it is accurate also after
     // concealed characters.
-    *vcolp = col_from_screen;
+    *vcolp = cell.virtual_column;
   }
 
-  if (col_from_screen == -2) {
+  if (cell.virtual_column == -2) {
     *flagsp |= MOUSE_FOLD_OPEN;
-  } else if (col_from_screen == -3) {
+  } else if (cell.virtual_column == -3) {
     *flagsp |= MOUSE_FOLD_CLOSE;
   }
 }
