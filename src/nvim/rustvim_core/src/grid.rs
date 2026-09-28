@@ -151,7 +151,7 @@ enum WindowGridMode {
 
 /// State transition performed while configuring one window grid.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum WindowGridChange {
+enum GridLifecycleChange {
     Unchanged,
     Resized,
     Released,
@@ -373,7 +373,7 @@ impl ScreenGrid {
         &mut self,
         mode: WindowGridMode,
         line_buffer: &mut LineBuffer,
-    ) -> WindowGridChange {
+    ) -> GridLifecycleChange {
         match mode {
             WindowGridMode::Dedicated(size)
                 if !self.is_allocated() || self.rows != size.height || self.cols != size.width =>
@@ -388,21 +388,44 @@ impl ScreenGrid {
                     line_buffer,
                 );
                 self.valid = true;
-                WindowGridChange::Resized
+                GridLifecycleChange::Resized
             }
             WindowGridMode::Dedicated(_) if !self.valid => {
                 self.invalidate();
                 self.valid = true;
-                WindowGridChange::Revalidated
+                GridLifecycleChange::Revalidated
             }
-            WindowGridMode::Dedicated(_) => WindowGridChange::Unchanged,
+            WindowGridMode::Dedicated(_) => GridLifecycleChange::Unchanged,
             WindowGridMode::Shared if self.is_allocated() => {
                 self.release_storage();
                 self.valid = false;
-                WindowGridChange::Released
+                GridLifecycleChange::Released
             }
-            WindowGridMode::Shared => WindowGridChange::Unchanged,
+            WindowGridMode::Shared => GridLifecycleChange::Unchanged,
         }
+    }
+
+    /// Assigns the reserved identity used by the default screen grid.
+    fn initialize_as_default(&mut self) {
+        self.handle = DEFAULT_GRID_HANDLE;
+    }
+
+    /// Resizes the default grid when its configured dimensions have changed.
+    fn configure_as_default(
+        &mut self,
+        size: GridSize,
+        line_buffer: &mut LineBuffer,
+    ) -> GridLifecycleChange {
+        if size.height == 0
+            || size.width == 0
+            || (self.is_allocated() && self.rows == size.height && self.cols == size.width)
+        {
+            return GridLifecycleChange::Unchanged;
+        }
+
+        *self = Self::from_grid(self, size.height, size.width, true, true, line_buffer);
+        self.initialize_as_default();
+        GridLifecycleChange::Resized
     }
 
     /// Reports whether this grid currently owns cell storage.
@@ -3770,6 +3793,54 @@ pub unsafe extern "C" fn grid_alloc(
     *grid = resized_grid;
 }
 
+/// Assigns the reserved identity to the default screen grid.
+///
+/// # Safety
+///
+/// `grid` must point to a valid, exclusively accessible `CScreenGrid`. Any
+/// existing buffers and dimensions must satisfy the ownership and layout
+/// requirements of `ScreenGrid`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn grid_initialize_default(grid: *mut CScreenGrid) {
+    if grid.is_null() {
+        return;
+    }
+
+    // SAFETY: The caller transfers exclusive ownership of the C grid and its
+    // allocations to the guard for the duration of this function.
+    let mut grid = unsafe { ScreenGridGuard::take(grid) };
+    grid.initialize_as_default();
+}
+
+/// Resizes the default screen grid when its configured dimensions changed.
+///
+/// Returns whether a resize was performed.
+///
+/// # Safety
+///
+/// `grid` must point to a valid, exclusively accessible `CScreenGrid`. Any
+/// existing buffers and dimensions must satisfy the ownership and layout
+/// requirements of `ScreenGrid`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn grid_configure_default(
+    grid: *mut CScreenGrid,
+    rows: libc::c_int,
+    columns: libc::c_int,
+) -> bool {
+    if grid.is_null() {
+        return false;
+    }
+    let Some(size) = GridSize::try_new(rows, columns) else {
+        return false;
+    };
+
+    let mut line_buffer = LineBufferGuard::acquire();
+    // SAFETY: The caller transfers exclusive ownership of the C grid and its
+    // allocations to the guard for the duration of this function.
+    let mut grid = unsafe { ScreenGridGuard::take(grid) };
+    grid.configure_as_default(size, &mut line_buffer) == GridLifecycleChange::Resized
+}
+
 /// Applies the complete allocation and validity transition for one window
 /// grid.
 ///
@@ -3804,7 +3875,7 @@ pub unsafe extern "C" fn grid_configure_for_window(
     // SAFETY: The caller transfers exclusive ownership of the C grid and its
     // allocations to the guard for the duration of this function.
     let mut grid = unsafe { ScreenGridGuard::take(grid) };
-    grid.configure_for_window(mode, &mut line_buffer) == WindowGridChange::Resized
+    grid.configure_for_window(mode, &mut line_buffer) == GridLifecycleChange::Resized
 }
 
 /// Enables dirty-column tracking and resets all rows to clean.
@@ -4390,7 +4461,7 @@ mod tests {
             &mut line_buffer,
         );
 
-        assert_eq!(change, WindowGridChange::Resized);
+        assert_eq!(change, GridLifecycleChange::Resized);
         assert_eq!(grid.handle, 7);
         assert_eq!((grid.rows, grid.cols), (2, 3));
         assert!(grid.valid);
@@ -4412,7 +4483,7 @@ mod tests {
             &mut line_buffer,
         );
 
-        assert_eq!(change, WindowGridChange::Resized);
+        assert_eq!(change, GridLifecycleChange::Resized);
         assert!(grid.valid);
         assert_eq!(grid.chars[0], schar_from_ascii(' '));
         assert_eq!(grid.attrs[0], -1);
@@ -4429,7 +4500,7 @@ mod tests {
             &mut line_buffer,
         );
 
-        assert_eq!(change, WindowGridChange::Revalidated);
+        assert_eq!(change, GridLifecycleChange::Revalidated);
         assert!(grid.valid);
         assert_eq!(grid.attrs, [-1, -1]);
     }
@@ -4443,13 +4514,38 @@ mod tests {
 
         let change = grid.configure_for_window(WindowGridMode::Shared, &mut line_buffer);
 
-        assert_eq!(change, WindowGridChange::Released);
+        assert_eq!(change, GridLifecycleChange::Released);
         assert_eq!(grid.handle, 7);
         assert!(!grid.is_allocated());
         assert!(!grid.valid);
         assert_eq!(
             grid.configure_for_window(WindowGridMode::Shared, &mut line_buffer),
-            WindowGridChange::Unchanged
+            GridLifecycleChange::Unchanged
+        );
+    }
+
+    #[test]
+    fn default_grid_configuration_owns_identity_and_resize_decisions() {
+        let mut line_buffer = LineBuffer::new(2);
+        let mut grid = ScreenGrid::new(1, 2, true, &mut line_buffer);
+        grid.chars[0] = schar_from_ascii('x');
+        grid.attrs[0] = 12;
+
+        grid.initialize_as_default();
+        let change = grid.configure_as_default(GridSize::try_new(2, 3).unwrap(), &mut line_buffer);
+
+        assert_eq!(change, GridLifecycleChange::Resized);
+        assert_eq!(grid.handle, DEFAULT_GRID_HANDLE);
+        assert_eq!((grid.rows, grid.cols), (2, 3));
+        assert_eq!(grid.chars[0], schar_from_ascii('x'));
+        assert_eq!(grid.attrs[0], 12);
+        assert_eq!(
+            grid.configure_as_default(GridSize::try_new(2, 3).unwrap(), &mut line_buffer,),
+            GridLifecycleChange::Unchanged
+        );
+        assert_eq!(
+            grid.configure_as_default(GridSize::try_new(0, 3).unwrap(), &mut line_buffer,),
+            GridLifecycleChange::Unchanged
         );
     }
 

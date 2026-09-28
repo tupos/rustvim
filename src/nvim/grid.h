@@ -71,6 +71,8 @@ typedef struct {
 
 extern void grid_alloc(ScreenGrid *grid, int rows, int columns, bool copy, bool valid);
 extern bool grid_is_allocated(const ScreenGrid *grid);
+extern void grid_initialize_default(ScreenGrid *grid);
+extern bool grid_configure_default(ScreenGrid *grid, int rows, int columns);
 extern bool grid_configure_for_window(ScreenGrid *grid, int rows, int columns,
                                       bool use_dedicated_grid);
 extern void grid_free(ScreenGrid *grid);

@@ -182,17 +182,7 @@ bool default_grid_alloc(void)
   }
   resizing = true;
 
-  // Allocation of the screen buffers is done only when the size changes and
-  // when Rows and Columns have been set.
-  if ((grid_is_allocated(&default_grid)
-       && Rows == default_grid.rows
-       && Columns == default_grid.cols)
-      || Rows == 0 || Columns == 0) {
-    resizing = false;
-    return false;
-  }
-
-  // We're changing the size of the screen.
+  // Resize the screen buffers only when the configured dimensions changed.
   // - Allocate new arrays for default_grid
   // - Move lines from the old arrays into the new arrays, clear extra
   //   lines (unless the screen is going to be cleared).
@@ -201,15 +191,15 @@ bool default_grid_alloc(void)
   // If anything fails, make grid arrays NULL, so we don't do anything!
   // Continuing with the old arrays may result in a crash, because the
   // size is wrong.
-
-  grid_alloc(&default_grid, Rows, Columns, true, true);
+  bool resized = grid_configure_default(&default_grid, Rows, Columns);
+  if (!resized) {
+    resizing = false;
+    return false;
+  }
 
   stl_clear_click_defs(tab_page_click_defs, tab_page_click_defs_size);
   tab_page_click_defs = stl_alloc_click_defs(tab_page_click_defs, Columns,
                                              &tab_page_click_defs_size);
-
-  default_grid.handle = DEFAULT_GRID_HANDLE;
-
   resizing = false;
   return true;
 }
