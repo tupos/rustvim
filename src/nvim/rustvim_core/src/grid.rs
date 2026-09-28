@@ -1431,6 +1431,80 @@ impl ScreenGrid {
     }
 } // impl
 
+/// Grid selected for an explicit cell-inspection request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GridInspectionTarget {
+    Default,
+    PopupMenu,
+    Window(GridId),
+}
+
+impl GridInspectionTarget {
+    /// Interprets an API grid handle using the popup-menu-first selection
+    /// order of `nvim__inspect_cell()`.
+    fn from_requested_handle(
+        requested_handle: i64,
+        popup_grid_id: GridId,
+    ) -> Result<Self, InvalidGridId> {
+        let requested_grid_id = i32::try_from(requested_handle).ok().map(GridId::new);
+        if requested_grid_id == Some(popup_grid_id) {
+            return Ok(Self::PopupMenu);
+        }
+        if requested_handle <= i64::from(DEFAULT_GRID_HANDLE) {
+            return Ok(Self::Default);
+        }
+        requested_grid_id.map(Self::Window).ok_or(InvalidGridId)
+    }
+}
+
+/// Indicates that no allocated window grid matches an inspection request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct InvalidGridId;
+
+/// Safe grid set used by one explicit cell-inspection operation.
+struct GridCellInspector<'grid> {
+    default_grid: &'grid ScreenGrid,
+    popup_grid: &'grid ScreenGrid,
+    window_grid: Option<&'grid ScreenGrid>,
+}
+
+impl<'grid> GridCellInspector<'grid> {
+    /// Creates an inspector over the grids available to the API request.
+    fn new(
+        default: &'grid ScreenGrid,
+        popup_grid: &'grid ScreenGrid,
+        window_grid: Option<&'grid ScreenGrid>,
+    ) -> Self {
+        Self {
+            default_grid: default,
+            popup_grid,
+            window_grid,
+        }
+    }
+
+    /// Reads one cell while distinguishing an invalid grid from an invalid
+    /// coordinate.
+    fn cell(
+        &self,
+        target: GridInspectionTarget,
+        row: i64,
+        column: i64,
+    ) -> Result<Option<GridCell>, InvalidGridId> {
+        let grid = match target {
+            GridInspectionTarget::Default => self.default_grid,
+            GridInspectionTarget::PopupMenu => self.popup_grid,
+            GridInspectionTarget::Window(grid_id) => self
+                .window_grid
+                .filter(|grid| grid.id() == grid_id && grid.is_allocated())
+                .ok_or(InvalidGridId)?,
+        };
+        let (Ok(row), Ok(column)) = (usize::try_from(row), usize::try_from(column)) else {
+            return Ok(None);
+        };
+        Ok(grid.cell(row, column))
+    }
+}
+
 /// Temporary Rust ownership of the allocations exposed by a C screen grid.
 ///
 /// The C structure remains at a stable address while this guard exists so
@@ -3116,6 +3190,15 @@ impl From<GridCell> for CGridCell {
             virtual_column: cell.virtual_column,
         }
     }
+}
+
+/// C representation of an explicit grid-cell inspection result.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CGridCellInspectionResult {
+    InvalidGrid = 0,
+    MissingCell = 1,
+    Found = 2,
 }
 
 #[repr(C)]
@@ -5038,6 +5121,64 @@ pub unsafe extern "C" fn grid_get_cell(
     true
 }
 
+/// Selects the requested API grid and reads one complete logical cell.
+///
+/// An invalid window-grid identity is distinct from a valid grid whose
+/// coordinates do not identify a cell.
+///
+/// # Safety
+///
+/// `default_grid` and `popup_grid` must point to distinct, valid, exclusively
+/// accessible `CScreenGrid` values whose buffers satisfy the ownership and
+/// layout requirements of `ScreenGrid`. `window_grid` must be null or point to
+/// a third such grid. `output` must point to valid, properly aligned writable
+/// `CGridCell` storage that does not alias any grid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn grid_inspect_cell(
+    default_grid_ptr: *mut CScreenGrid,
+    popup_grid: *mut CScreenGrid,
+    window_grid: *mut CScreenGrid,
+    requested_grid: i64,
+    row: i64,
+    column: i64,
+    output: *mut CGridCell,
+) -> CGridCellInspectionResult {
+    if default_grid_ptr.is_null() || popup_grid.is_null() || output.is_null() {
+        return CGridCellInspectionResult::InvalidGrid;
+    }
+
+    // SAFETY: The caller transfers exclusive ownership of each distinct grid's
+    // buffers into its guard for the duration of this operation.
+    let default_guard = unsafe { ScreenGridGuard::take(default_grid_ptr) };
+    // SAFETY: The caller guarantees that the popup grid is valid and distinct
+    // from the default grid.
+    let popup_grid = unsafe { ScreenGridGuard::take(popup_grid) };
+    let window_grid = std::ptr::NonNull::new(window_grid).map(|window_grid| {
+        // SAFETY: The caller guarantees that a non-null window grid is valid
+        // and distinct from the default and popup grids.
+        unsafe { ScreenGridGuard::take(window_grid.as_ptr()) }
+    });
+
+    let target = match GridInspectionTarget::from_requested_handle(requested_grid, popup_grid.id())
+    {
+        Ok(target) => target,
+        Err(InvalidGridId) => return CGridCellInspectionResult::InvalidGrid,
+    };
+    let inspector = GridCellInspector::new(&default_guard, &popup_grid, window_grid.as_deref());
+    match inspector.cell(target, row, column) {
+        Err(InvalidGridId) => CGridCellInspectionResult::InvalidGrid,
+        Ok(None) => CGridCellInspectionResult::MissingCell,
+        Ok(Some(cell)) => {
+            // SAFETY: The output pointer was checked for null above and the
+            // caller guarantees valid writable storage.
+            unsafe {
+                output.write(CGridCell::from(cell));
+            }
+            CGridCellInspectionResult::Found
+        }
+    }
+}
+
 /// Put a unicode character in a screen cell.
 #[unsafe(no_mangle)]
 pub extern "C" fn schar_from_char(mut c: libc::c_int) -> VimSCharT {
@@ -6196,6 +6337,77 @@ mod tests {
         );
         assert_eq!(grid.cell(2, 0), None);
         assert_eq!(grid.cell(0, 3), None);
+    }
+
+    #[test]
+    fn cell_inspection_selects_default_popup_and_window_grids() {
+        let mut line_buffer = LineBuffer::new(1);
+        let mut default = ScreenGrid::new(1, 1, true, &mut line_buffer);
+        default.handle = DEFAULT_GRID_HANDLE;
+        default.chars[0] = schar_from_ascii('d');
+
+        let mut popup_grid = ScreenGrid::new(1, 1, true, &mut line_buffer);
+        popup_grid.handle = 7;
+        popup_grid.chars[0] = schar_from_ascii('p');
+
+        let mut window_grid = ScreenGrid::new(1, 1, true, &mut line_buffer);
+        window_grid.handle = 8;
+        window_grid.chars[0] = schar_from_ascii('w');
+
+        let inspector = GridCellInspector::new(&default, &popup_grid, Some(&window_grid));
+
+        let default_target =
+            GridInspectionTarget::from_requested_handle(1, popup_grid.id()).unwrap();
+        let popup_target = GridInspectionTarget::from_requested_handle(7, popup_grid.id()).unwrap();
+        let window_target =
+            GridInspectionTarget::from_requested_handle(8, popup_grid.id()).unwrap();
+
+        assert_eq!(
+            inspector
+                .cell(default_target, 0, 0)
+                .unwrap()
+                .unwrap()
+                .character,
+            schar_from_ascii('d')
+        );
+        assert_eq!(
+            inspector
+                .cell(popup_target, 0, 0)
+                .unwrap()
+                .unwrap()
+                .character,
+            schar_from_ascii('p')
+        );
+        assert_eq!(
+            inspector
+                .cell(window_target, 0, 0)
+                .unwrap()
+                .unwrap()
+                .character,
+            schar_from_ascii('w')
+        );
+        assert_eq!(inspector.cell(default_target, -1, 0), Ok(None));
+        assert_eq!(inspector.cell(default_target, 0, 1), Ok(None));
+    }
+
+    #[test]
+    fn cell_inspection_rejects_unknown_or_unallocated_window_grids() {
+        let mut line_buffer = LineBuffer::new(1);
+        let default = ScreenGrid::new(1, 1, true, &mut line_buffer);
+        let mut popup_grid = ScreenGrid::new(1, 1, true, &mut line_buffer);
+        popup_grid.handle = 7;
+        let mut window_grid = ScreenGrid::new(1, 1, true, &mut line_buffer);
+        window_grid.handle = 8;
+        window_grid.release_storage();
+
+        let inspector = GridCellInspector::new(&default, &popup_grid, Some(&window_grid));
+        let unallocated_window =
+            GridInspectionTarget::from_requested_handle(8, popup_grid.id()).unwrap();
+        let unknown_window =
+            GridInspectionTarget::from_requested_handle(9, popup_grid.id()).unwrap();
+
+        assert_eq!(inspector.cell(unallocated_window, 0, 0), Err(InvalidGridId));
+        assert_eq!(inspector.cell(unknown_window, 0, 0), Err(InvalidGridId));
     }
 
     #[test]

@@ -74,6 +74,12 @@ typedef struct {
   colnr_T virtual_column;
 } GridCell;
 
+typedef enum {
+  kGridCellInspectionInvalidGrid = 0,
+  kGridCellInspectionMissingCell = 1,
+  kGridCellInspectionFound = 2,
+} GridCellInspectionResult;
+
 #define SCREEN_GRID_INIT { 0, NULL, NULL, NULL, NULL, NULL, 0, 0, false, \
                            false }
 

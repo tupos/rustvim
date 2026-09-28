@@ -2071,21 +2071,16 @@ Array nvim__inspect_cell(Integer grid, Integer row, Integer col, Arena *arena, E
 {
   Array ret = ARRAY_DICT_INIT;
 
-  // TODO(bfredl): if grid == 0 we should read from the compositor's buffer.
-  // The only problem is that it does not yet exist.
-  ScreenGrid *g = &default_grid;
-  if (grid == pum_grid.handle) {
-    g = &pum_grid;
-  } else if (grid > 1) {
-    win_T *wp = win_find_by_grid_handle((handle_T)grid);
-    VALIDATE_INT((wp != NULL && grid_is_allocated(&wp->w_grid_alloc)), "grid handle", grid, {
-      return ret;
-    });
-    g = &wp->w_grid_alloc;
-  }
+  win_T *wp = grid > 1 ? win_find_by_grid_handle((handle_T)grid) : NULL;
+  ScreenGrid *window_grid = wp == NULL ? NULL : &wp->w_grid_alloc;
 
   GridCell cell;
-  if (!grid_get_cell(g, row, col, &cell)) {
+  GridCellInspectionResult inspection = grid_inspect_cell(
+    &default_grid, &pum_grid, window_grid, grid, row, col, &cell);
+  VALIDATE_INT(inspection != kGridCellInspectionInvalidGrid, "grid handle", grid, {
+    return ret;
+  });
+  if (inspection != kGridCellInspectionFound) {
     return ret;
   }
 
