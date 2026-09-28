@@ -195,37 +195,32 @@ bool msg_use_grid(void)
 
 void msg_grid_validate(void)
 {
-  grid_assign_handle(&msg_grid);
   bool should_alloc = msg_use_grid();
   int max_rows = Rows - (int)p_ch;
-  if (should_alloc && (msg_grid.rows != Rows || msg_grid.cols != Columns
-                       || !grid_is_allocated(&msg_grid))) {
+  MessageGridTransition transition = grid_prepare_for_messages(
+    &msg_grid, Rows, Columns, should_alloc);
+  if (transition == kMessageGridResized) {
     // TODO(bfredl): eventually should be set to "invalid". I e all callers
     // will use the grid including clear to EOS if necessary.
-    grid_alloc(&msg_grid, Rows, Columns, false, true);
-    grid_reset_dirty_columns(&msg_grid);
-
     // Tricky: allow resize while pager or ex mode is active
     int pos = (State & MODE_ASKMORE) ? 0 : MAX(max_rows - msg_scrolled, 0);
-    msg_grid.throttled = false;  // don't throttle in 'cmdheight' area
     msg_grid_set_pos(pos, msg_scrolled);
     bool blending = syn_attr2entry(highlight_attr[HLF_MSG]).hl_blend > -1;
-    ui_comp_put_grid(&msg_grid, pos, 0, msg_grid.rows, msg_grid.cols,
+    ui_comp_put_grid(&msg_grid, pos, 0, Rows, Columns,
                      kZIndexMessages, blending, false, true, false,
                      curwin ? curwin->w_grid_alloc.handle : 0);
-    ui_call_grid_resize(msg_grid.handle, msg_grid.cols, msg_grid.rows);
+    ui_call_grid_resize(msg_grid.handle, Columns, Rows);
 
     msg_scrolled_at_flush = msg_scrolled;
     msg_grid_adj.target = &msg_grid;
-  } else if (!should_alloc && grid_is_allocated(&msg_grid)) {
+  } else if (transition == kMessageGridReleaseRequired) {
     ui_comp_remove_grid(&msg_grid);
-    grid_free(&msg_grid);
+    grid_release_message(&msg_grid);
     ui_call_grid_destroy(msg_grid.handle);
-    msg_grid.throttled = false;
     msg_grid_adj.row_offset = 0;
     msg_grid_adj.target = &default_grid;
     redraw_cmdline = true;
-  } else if (grid_is_allocated(&msg_grid) && !msg_scrolled && msg_grid_pos != max_rows) {
+  } else if (should_alloc && !msg_scrolled && msg_grid_pos != max_rows) {
     int diff = msg_grid_pos - max_rows;
     msg_grid_set_pos(max_rows, false);
     if (diff > 0) {
@@ -233,7 +228,7 @@ void msg_grid_validate(void)
     }
   }
 
-  if (grid_is_allocated(&msg_grid) && !msg_scrolled && cmdline_row < msg_grid_pos) {
+  if (should_alloc && !msg_scrolled && cmdline_row < msg_grid_pos) {
     // TODO(bfredl): this should already be the case, but fails in some
     // "batched" executions where compute_cmdrow() use stale positions or
     // something.

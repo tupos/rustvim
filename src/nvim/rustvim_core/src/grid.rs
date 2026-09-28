@@ -149,6 +149,22 @@ enum WindowGridMode {
     Shared,
 }
 
+/// Storage mode requested for the message grid.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MessageGridMode {
+    Visible(GridSize),
+    Hidden,
+}
+
+/// Transition prepared for the message-grid owner.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MessageGridTransition {
+    Unchanged,
+    Resized,
+    /// The compositor must remove the layer before storage is released.
+    ReleaseRequired,
+}
+
 /// State transition performed while configuring one window grid.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum GridLifecycleChange {
@@ -455,6 +471,40 @@ impl ScreenGrid {
         } else {
             GridLifecycleChange::Unchanged
         }
+    }
+
+    /// Prepares storage for the requested message-grid mode.
+    ///
+    /// A hidden grid with allocated storage returns `ReleaseRequired` without
+    /// releasing it, so the compositor can first recompose the covered area.
+    fn prepare_for_messages(
+        &mut self,
+        mode: MessageGridMode,
+        handle_allocator: &GridHandleAllocator,
+        line_buffer: &mut LineBuffer,
+    ) -> MessageGridTransition {
+        handle_allocator.assign(&mut self.handle);
+        match mode {
+            MessageGridMode::Visible(size)
+                if !self.is_allocated() || self.rows != size.height || self.cols != size.width =>
+            {
+                *self = Self::from_grid(self, size.height, size.width, true, false, line_buffer);
+                self.reset_dirty_columns();
+                self.throttled = false;
+                MessageGridTransition::Resized
+            }
+            MessageGridMode::Visible(_) => MessageGridTransition::Unchanged,
+            MessageGridMode::Hidden if self.is_allocated() => {
+                MessageGridTransition::ReleaseRequired
+            }
+            MessageGridMode::Hidden => MessageGridTransition::Unchanged,
+        }
+    }
+
+    /// Releases message-grid storage after its compositor layer was removed.
+    fn release_message(&mut self) {
+        self.release_storage();
+        self.throttled = false;
     }
 
     /// Reports whether this grid currently owns cell storage.
@@ -2740,6 +2790,25 @@ pub struct CScreenGrid {
     throttled: bool,
 }
 
+/// C representation of a pending message-grid lifecycle transition.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CMessageGridTransition {
+    Unchanged = 0,
+    Resized = 1,
+    ReleaseRequired = 2,
+}
+
+impl From<MessageGridTransition> for CMessageGridTransition {
+    fn from(transition: MessageGridTransition) -> Self {
+        match transition {
+            MessageGridTransition::Unchanged => Self::Unchanged,
+            MessageGridTransition::Resized => Self::Resized,
+            MessageGridTransition::ReleaseRequired => Self::ReleaseRequired,
+        }
+    }
+}
+
 impl CScreenGrid {
     fn is_allocated(&self) -> bool {
         !self.chars.is_null()
@@ -3902,6 +3971,62 @@ pub unsafe extern "C" fn grid_configure_for_popup_menu(
         == GridLifecycleChange::Resized
 }
 
+/// Prepares the message grid for its requested visibility and size.
+///
+/// A `ReleaseRequired` result leaves storage intact so C can remove the
+/// compositor layer before calling `grid_release_message`.
+///
+/// # Safety
+///
+/// `grid` must point to a valid, exclusively accessible `CScreenGrid`. Any
+/// existing buffers and dimensions must satisfy the ownership and layout
+/// requirements of `ScreenGrid`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn grid_prepare_for_messages(
+    grid: *mut CScreenGrid,
+    rows: libc::c_int,
+    columns: libc::c_int,
+    should_allocate: bool,
+) -> CMessageGridTransition {
+    if grid.is_null() {
+        return CMessageGridTransition::Unchanged;
+    }
+    let mode = if should_allocate {
+        let Some(size) = GridSize::try_new(rows, columns) else {
+            return CMessageGridTransition::Unchanged;
+        };
+        MessageGridMode::Visible(size)
+    } else {
+        MessageGridMode::Hidden
+    };
+
+    let mut line_buffer = LineBufferGuard::acquire();
+    // SAFETY: The caller transfers exclusive ownership of the C grid and its
+    // allocations to the guard for the duration of this function.
+    let mut grid = unsafe { ScreenGridGuard::take(grid) };
+    grid.prepare_for_messages(mode, &GRID_HANDLE_ALLOCATOR, &mut line_buffer)
+        .into()
+}
+
+/// Releases message-grid storage after compositor removal.
+///
+/// # Safety
+///
+/// `grid` must point to a valid, exclusively accessible `CScreenGrid`. Any
+/// existing buffers and dimensions must satisfy the ownership and layout
+/// requirements of `ScreenGrid`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn grid_release_message(grid: *mut CScreenGrid) {
+    if grid.is_null() {
+        return;
+    }
+
+    // SAFETY: The caller transfers exclusive ownership of the C grid and its
+    // allocations to the guard for the duration of this function.
+    let mut grid = unsafe { ScreenGridGuard::take(grid) };
+    grid.release_message();
+}
+
 /// Applies the complete allocation and validity transition for one window
 /// grid.
 ///
@@ -4652,6 +4777,57 @@ mod tests {
                 &mut line_buffer,
             ),
             GridLifecycleChange::Unchanged
+        );
+    }
+
+    #[test]
+    fn message_grid_preparation_allocates_clean_tracked_storage() {
+        let mut line_buffer = LineBuffer::new(2);
+        let mut grid = ScreenGrid::new(1, 2, false, &mut line_buffer);
+        grid.chars[0] = schar_from_ascii('x');
+        grid.attrs[0] = 12;
+        grid.throttled = true;
+        let allocator = GridHandleAllocator::new(DEFAULT_GRID_HANDLE);
+
+        let transition = grid.prepare_for_messages(
+            MessageGridMode::Visible(GridSize::try_new(2, 3).unwrap()),
+            &allocator,
+            &mut line_buffer,
+        );
+
+        assert_eq!(transition, MessageGridTransition::Resized);
+        assert_eq!(grid.handle, DEFAULT_GRID_HANDLE + 1);
+        assert_eq!((grid.rows, grid.cols), (2, 3));
+        assert_eq!(grid.chars[0], schar_from_ascii(' '));
+        assert_eq!(grid.attrs, [0; 6]);
+        assert_eq!(
+            grid.dirty_columns.as_ref().map(|columns| &*columns.columns),
+            Some([0, 0].as_slice())
+        );
+        assert!(!grid.throttled);
+    }
+
+    #[test]
+    fn message_grid_release_waits_for_compositor_removal() {
+        let mut line_buffer = LineBuffer::new(2);
+        let mut grid = ScreenGrid::new(1, 2, true, &mut line_buffer);
+        grid.throttled = true;
+        let allocator = GridHandleAllocator::new(DEFAULT_GRID_HANDLE);
+
+        let transition =
+            grid.prepare_for_messages(MessageGridMode::Hidden, &allocator, &mut line_buffer);
+
+        assert_eq!(transition, MessageGridTransition::ReleaseRequired);
+        assert!(grid.is_allocated());
+        assert!(grid.throttled);
+
+        grid.release_message();
+
+        assert!(!grid.is_allocated());
+        assert!(!grid.throttled);
+        assert_eq!(
+            grid.prepare_for_messages(MessageGridMode::Hidden, &allocator, &mut line_buffer,),
+            MessageGridTransition::Unchanged
         );
     }
 

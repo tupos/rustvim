@@ -69,6 +69,12 @@ typedef struct {
   bool color_cols_exhausted;
 } LinebufRenderTextResult;
 
+typedef enum {
+  kMessageGridUnchanged = 0,
+  kMessageGridResized = 1,
+  kMessageGridReleaseRequired = 2,
+} MessageGridTransition;
+
 extern void grid_alloc(ScreenGrid *grid, int rows, int columns, bool copy, bool valid);
 extern bool grid_is_allocated(const ScreenGrid *grid);
 extern void grid_initialize_default(ScreenGrid *grid);
@@ -77,6 +83,9 @@ extern bool grid_configure_for_window(ScreenGrid *grid, int rows, int columns,
                                       bool use_dedicated_grid);
 extern bool grid_configure_for_popup_menu(ScreenGrid *grid, int rows, int columns,
                                           bool contents_invalid);
+extern MessageGridTransition grid_prepare_for_messages(ScreenGrid *grid, int rows, int columns,
+                                                       bool should_allocate);
+extern void grid_release_message(ScreenGrid *grid);
 extern void grid_free(ScreenGrid *grid);
 extern void grid_free_all_mem(void);
 extern void grid_reset_dirty_columns(ScreenGrid *grid);
