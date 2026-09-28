@@ -5803,13 +5803,9 @@ static void f_screenattr(typval_T *argvars, typval_T *rettv, EvalFuncData fptr)
   ScreenGrid *grid;
   screenchar_adjust(&grid, &row, &col);
 
-  int c;
-  if (row < 0 || row >= grid->rows || col < 0 || col >= grid->cols) {
-    c = -1;
-  } else {
-    grid_getchar(grid, row, col, &c);
-  }
-  rettv->vval.v_number = c;
+  sattr_T attribute;
+  rettv->vval.v_number = grid_get_cell(grid, row, col, NULL, &attribute, NULL)
+                         ? attribute : -1;
 }
 
 /// "screenchar()" function
@@ -5821,8 +5817,10 @@ static void f_screenchar(typval_T *argvars, typval_T *rettv, EvalFuncData fptr)
   ScreenGrid *grid;
   screenchar_adjust(&grid, &row, &col);
 
-  rettv->vval.v_number = (row < 0 || row >= grid->rows || col < 0 || col >= grid->cols)
-                         ? -1 : schar_get_first_codepoint(grid_getchar(grid, row, col, NULL));
+  schar_T character;
+  rettv->vval.v_number = grid_get_cell(grid, row, col, &character, NULL, NULL)
+                         ? schar_get_first_codepoint(character)
+                         : -1;
 }
 
 /// "screenchars()" function
@@ -5835,12 +5833,13 @@ static void f_screenchars(typval_T *argvars, typval_T *rettv, EvalFuncData fptr)
   screenchar_adjust(&grid, &row, &col);
 
   tv_list_alloc_ret(rettv, kListLenMayKnow);
-  if (row < 0 || row >= grid->rows || col < 0 || col >= grid->cols) {
+  schar_T character;
+  if (!grid_get_cell(grid, row, col, &character, NULL, NULL)) {
     return;
   }
 
   char buf[MAX_SCHAR_SIZE + 1];
-  schar_get(buf, grid_getchar(grid, row, col, NULL));
+  schar_get(buf, character);
 
   // schar values are already processed chars which are always NUL-terminated.
   // A single [0] is expected when char is NUL.
@@ -5878,12 +5877,13 @@ static void f_screenstring(typval_T *argvars, typval_T *rettv, EvalFuncData fptr
 
   screenchar_adjust(&grid, &row, &col);
 
-  if (row < 0 || row >= grid->rows || col < 0 || col >= grid->cols) {
+  schar_T character;
+  if (!grid_get_cell(grid, row, col, &character, NULL, NULL)) {
     return;
   }
 
   char buf[MAX_SCHAR_SIZE + 1];
-  schar_get(buf, grid_getchar(grid, row, col, NULL));
+  schar_get(buf, character);
   rettv->vval.v_string = xstrdup(buf);
 }
 

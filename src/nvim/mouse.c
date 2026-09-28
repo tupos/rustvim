@@ -2010,17 +2010,16 @@ static void mouse_check_grid(colnr_T *vcolp, int *flagsp)
   int start_row = 0;
   int start_col = 0;
   ScreenGrid *gp = grid_adjust(&curwin->w_grid, &start_row, &start_col);
-  if (gp->handle != click_grid || !grid_is_allocated(gp)) {
+  if (gp->handle != click_grid) {
     return;
   }
   click_row += start_row;
   click_col += start_col;
-  if (click_row < 0 || click_row >= gp->rows
-      || click_col < 0 || click_col >= gp->cols) {
+
+  colnr_T col_from_screen;
+  if (!grid_get_cell(gp, click_row, click_col, NULL, NULL, &col_from_screen)) {
     return;
   }
-
-  colnr_T col_from_screen = grid_get_vcol(gp, click_row, click_col);
 
   if (col_from_screen >= 0) {
     // Use the virtual column from vcols[], it is accurate also after

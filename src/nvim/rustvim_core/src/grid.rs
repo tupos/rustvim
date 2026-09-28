@@ -957,21 +957,18 @@ impl ScreenGrid {
         }
     }
 
-    fn get_char_and_attr(&self, row: usize, col: usize) -> (VimSCharT, VimSAttrT) {
-        if self.attrs.is_empty() || row >= self.rows as usize || col >= self.cols as usize {
-            return (NULL_TERMINATOR as VimSCharT, 0);
-        }
-        let offset = self.line_offset[row] + col;
-        (self.chars[offset], self.attrs[offset])
-    }
-
-    /// Returns the virtual column stored for a logical grid cell.
-    fn get_vcol(&self, row: usize, col: usize) -> Option<VimColNrT> {
-        if col >= usize::try_from(self.cols).ok()? {
+    /// Returns the complete contents of one logical grid cell.
+    fn cell(&self, row: usize, col: usize) -> Option<GridCell> {
+        let width = usize::try_from(self.cols).ok()?;
+        if col >= width {
             return None;
         }
         let offset = self.line_offset.get(row)?.checked_add(col)?;
-        self.vcols.get(offset).copied()
+        Some(GridCell::new(
+            *self.chars.get(offset)?,
+            *self.attrs.get(offset)?,
+            *self.vcols.get(offset)?,
+        ))
     }
 
     fn is_invalid_row(&self, row: usize) -> bool {
@@ -4895,57 +4892,56 @@ pub unsafe extern "C" fn grid_invalidate_row(grid: *mut CScreenGrid, row: libc::
     grid.invalidate_row(row);
 }
 
-/// Get a single character directly from grid.chars
+/// Reads one complete logical grid cell.
 ///
-/// @param[out] attrp  set to the character's attribute (optional)
-///
-/// # Safety
-///
-/// `grid` must point to a valid, exclusively accessible `CScreenGrid`, and
-/// `row` and `col` must identify a valid cell. `attrp` must be null or point
-/// to valid, properly aligned writable memory.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn grid_getchar(
-    grid: *mut CScreenGrid,
-    row: libc::c_int,
-    col: libc::c_int,
-    attrp: *mut libc::c_int,
-) -> VimSCharT {
-    let grid = unsafe { ScreenGridGuard::take(grid) };
-    let (sc, at) = grid.get_char_and_attr(row as usize, col as usize);
-    if !attrp.is_null() {
-        unsafe {
-            *attrp = at;
-        }
-    }
-    sc
-}
-
-/// Returns the virtual column stored for a logical grid cell.
-///
-/// Returns `-1` if the grid pointer or cell coordinates are invalid.
+/// Returns `false` for a null grid, invalid coordinates, or unavailable cell
+/// storage. Non-null output pointers are written only when the cell exists.
 ///
 /// # Safety
 ///
 /// `grid` must point to a valid, exclusively accessible `CScreenGrid` whose
 /// buffers satisfy the ownership and layout requirements of `ScreenGrid`.
+/// Every non-null output pointer must point to valid, properly aligned writable
+/// memory for its corresponding value.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn grid_get_vcol(
+pub unsafe extern "C" fn grid_get_cell(
     grid: *mut CScreenGrid,
-    row: libc::c_int,
-    col: libc::c_int,
-) -> VimColNrT {
+    row: i64,
+    col: i64,
+    character: *mut VimSCharT,
+    attribute: *mut VimSAttrT,
+    virtual_column: *mut VimColNrT,
+) -> bool {
     if grid.is_null() {
-        return -1;
+        return false;
     }
     let (Ok(row), Ok(col)) = (usize::try_from(row), usize::try_from(col)) else {
-        return -1;
+        return false;
     };
 
     // SAFETY: The caller transfers exclusive ownership of the grid buffers to
     // the guard.
     let grid = unsafe { ScreenGridGuard::take(grid) };
-    grid.get_vcol(row, col).unwrap_or(-1)
+    let Some(cell) = grid.cell(row, col) else {
+        return false;
+    };
+
+    if !character.is_null() {
+        unsafe {
+            character.write(cell.character);
+        }
+    }
+    if !attribute.is_null() {
+        unsafe {
+            attribute.write(cell.attribute);
+        }
+    }
+    if !virtual_column.is_null() {
+        unsafe {
+            virtual_column.write(cell.virtual_column);
+        }
+    }
+    true
 }
 
 /// Put a unicode character in a screen cell.
@@ -5445,9 +5441,9 @@ mod tests {
         };
         assert_eq!(region, GridRegion::try_new(0..3, 0..2).unwrap());
         assert_eq!(delta, GridDelta::new(1, 0));
-        assert_eq!(grid.get_char_and_attr(0, 0).0, schar_from_ascii('b'));
-        assert_eq!(grid.get_char_and_attr(1, 0).0, schar_from_ascii('c'));
-        assert_eq!(grid.get_char_and_attr(2, 0).0, schar_from_ascii(' '));
+        assert_eq!(grid.cell(0, 0).unwrap().character, schar_from_ascii('b'));
+        assert_eq!(grid.cell(1, 0).unwrap().character, schar_from_ascii('c'));
+        assert_eq!(grid.cell(2, 0).unwrap().character, schar_from_ascii(' '));
         assert_eq!(
             grid.dirty_columns.as_ref().map(|columns| &*columns.columns),
             Some([2, 0, 0].as_slice())
@@ -6067,16 +6063,24 @@ mod tests {
     }
 
     #[test]
-    fn getting_vcol_follows_logical_line_offsets() {
+    fn reading_cells_follows_logical_line_offsets_and_validates_coordinates() {
         let mut line_buffer = LineBuffer::new(3);
         let mut grid = ScreenGrid::new(2, 3, true, &mut line_buffer);
+        grid.chars = "abcdef".chars().map(schar_from_ascii).collect();
+        grid.attrs = vec![1, 2, 3, 4, 5, 6];
         grid.vcols = vec![10, 11, 12, 20, 21, 22];
         grid.line_offset.swap(0, 1);
 
-        assert_eq!(grid.get_vcol(0, 1), Some(21));
-        assert_eq!(grid.get_vcol(1, 2), Some(12));
-        assert_eq!(grid.get_vcol(2, 0), None);
-        assert_eq!(grid.get_vcol(0, 3), None);
+        assert_eq!(
+            grid.cell(0, 1),
+            Some(GridCell::new(schar_from_ascii('e'), 5, 21))
+        );
+        assert_eq!(
+            grid.cell(1, 2),
+            Some(GridCell::new(schar_from_ascii('c'), 3, 12))
+        );
+        assert_eq!(grid.cell(2, 0), None);
+        assert_eq!(grid.cell(0, 3), None);
     }
 
     #[test]

@@ -2084,14 +2084,15 @@ Array nvim__inspect_cell(Integer grid, Integer row, Integer col, Arena *arena, E
     g = &wp->w_grid_alloc;
   }
 
-  if (row < 0 || row >= g->rows
-      || col < 0 || col >= g->cols) {
+  schar_T character;
+  sattr_T attr;
+  if (!grid_get_cell(g, row, col, &character, &attr, NULL)) {
     return ret;
   }
+
   ret = arena_array(arena, 3);
   char *sc_buf = arena_alloc(arena, MAX_SCHAR_SIZE, false);
-  int attr;
-  schar_get(sc_buf, grid_getchar(g, (int)row, (int)col, &attr));
+  schar_get(sc_buf, character);
   ADD_C(ret, CSTR_AS_OBJ(sc_buf));
   ADD_C(ret, DICT_OBJ(hl_get_attr_by_id(attr, true, arena, err)));
   // will not work first time
