@@ -102,13 +102,3 @@ void grid_draw_border(ScreenGrid *grid, WinConfig *config, int *adj, int winbl, 
   };
   grid_draw_border_impl(grid, &border, adj, winbl, win_hl_attr_normal);
 }
-
-win_T *get_win_by_grid_handle(handle_T handle)
-{
-  FOR_ALL_WINDOWS_IN_TAB(wp, curtab) {
-    if (wp->w_grid_alloc.handle == handle) {
-      return wp;
-    }
-  }
-  return NULL;
-}

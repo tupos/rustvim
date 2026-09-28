@@ -717,7 +717,7 @@ void ui_grid_resize(handle_T grid_handle, int width, int height, Error *err)
     return;
   }
 
-  win_T *wp = get_win_by_grid_handle(grid_handle);
+  win_T *wp = win_find_by_grid_handle(grid_handle);
   VALIDATE_INT((wp != NULL), "window handle", (int64_t)grid_handle, {
     return;
   });

@@ -1412,7 +1412,7 @@ static void pum_position_at_mouse(int min_width)
     mouse_find_win_outer(&grid, &row, &col);
   }
   if (grid > 1) {
-    win_T *wp = get_win_by_grid_handle(grid);
+    win_T *wp = win_find_by_grid_handle(grid);
     if (wp != NULL) {
       row += wp->w_winrow;
       col += wp->w_wincol;

@@ -1852,7 +1852,7 @@ static win_T *mouse_find_grid_win(int *gridp, int *rowp, int *colp)
     *rowp += msg_grid_pos;
     *gridp = DEFAULT_GRID_HANDLE;
   } else if (*gridp > 1) {
-    win_T *wp = get_win_by_grid_handle(*gridp);
+    win_T *wp = win_find_by_grid_handle(*gridp);
     if (wp && grid_is_allocated(&wp->w_grid_alloc)
         && !(wp->w_floating && !wp->w_config.mouse)) {
       *rowp = MIN(*rowp - wp->w_grid.row_offset, wp->w_view_height - 1);

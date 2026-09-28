@@ -2077,7 +2077,7 @@ Array nvim__inspect_cell(Integer grid, Integer row, Integer col, Arena *arena, E
   if (grid == pum_grid.handle) {
     g = &pum_grid;
   } else if (grid > 1) {
-    win_T *wp = get_win_by_grid_handle((handle_T)grid);
+    win_T *wp = win_find_by_grid_handle((handle_T)grid);
     VALIDATE_INT((wp != NULL && grid_is_allocated(&wp->w_grid_alloc)), "grid handle", grid, {
       return ret;
     });

@@ -1775,6 +1775,20 @@ win_T *win_find_by_handle(handle_T handle)
   return NULL;
 }
 
+/// Finds the window owning a grid handle in the current tab page.
+///
+/// Returns NULL when no window owns the handle.
+win_T *win_find_by_grid_handle(handle_T handle)
+  FUNC_ATTR_PURE FUNC_ATTR_WARN_UNUSED_RESULT
+{
+  FOR_ALL_WINDOWS_IN_TAB(wp, curtab) {
+    if (wp->w_grid_alloc.handle == handle) {
+      return wp;
+    }
+  }
+  return NULL;
+}
+
 /// Check if "win" is a pointer to an existing window in any tabpage.
 ///
 /// @param  win  window to check
