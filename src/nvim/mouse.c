@@ -1486,8 +1486,14 @@ retnomove:
     }
 
     if (grid == 0) {
-      row -= curwin->w_winrow + curwin->w_grid.row_offset;
-      col -= curwin->w_wincol + curwin->w_grid.col_offset;
+      // Shared-grid view offsets already include the window origin. Dedicated
+      // grids only include offsets within the window.
+      if (grid_is_allocated(&curwin->w_grid_alloc)) {
+        row -= curwin->w_winrow;
+        col -= curwin->w_wincol;
+      }
+      row -= curwin->w_grid.row_offset;
+      col -= curwin->w_grid.col_offset;
     } else if (grid != DEFAULT_GRID_HANDLE) {
       row -= curwin->w_grid.row_offset;
       col -= curwin->w_grid.col_offset;
