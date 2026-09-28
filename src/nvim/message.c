@@ -156,8 +156,6 @@ static int msg_ext_last_hl_id;
 static bool msg_ext_history = false;  ///< message was added to history
 static bool msg_ext_append = false;  ///< message appended to previous message line
 
-static int msg_grid_pos_at_flush = 0;
-
 static int64_t msg_id_next = 1;           ///< message id to be allocated to next message
 
 /// Returns true if the given integer message-id was previously generated.
@@ -178,10 +176,8 @@ static void ui_ext_msg_set_pos(int row, bool scrolled)
 
 void msg_grid_set_pos(int row, bool scrolled)
 {
-  if (grid_set_message_position(&msg_grid, &msg_grid_adj, row, scrolled,
-                                ui_ext_msg_set_pos)) {
-    msg_grid_pos_at_flush = row;
-  }
+  grid_set_message_position(&msg_grid, &msg_grid_adj, row, scrolled,
+                            ui_ext_msg_set_pos);
   msg_grid_pos = row;
 }
 
@@ -195,7 +191,7 @@ void msg_grid_validate(void)
   bool should_alloc = msg_use_grid();
   int max_rows = Rows - (int)p_ch;
   MessageGridTransition transition = grid_prepare_for_messages(
-    &msg_grid, Rows, Columns, should_alloc);
+    &msg_grid, Rows, Columns, should_alloc, msg_scrolled);
   if (transition == kMessageGridResized) {
     // TODO(bfredl): eventually should be set to "invalid". I e all callers
     // will use the grid including clear to EOS if necessary.
@@ -208,7 +204,6 @@ void msg_grid_validate(void)
                      curwin ? curwin->w_grid_alloc.handle : 0);
     ui_call_grid_resize(msg_grid.handle, Columns, Rows);
 
-    msg_scrolled_at_flush = msg_scrolled;
     msg_grid_adj.target = &msg_grid;
   } else if (transition == kMessageGridReleaseRequired) {
     ui_comp_remove_grid(&msg_grid);
@@ -1412,7 +1407,7 @@ void wait_return(int redraw)
     // if cmdheight=0, we need to scroll in the first line of msg_grid upon the screen
     if (p_ch == 0 && !ui_has(kUIMessages) && !msg_scrolled) {
       msg_grid_validate();
-      msg_scroll_up(false, true);
+      msg_scroll_up(false, true, false);
       msg_scrolled++;
       cmdline_row = Rows - 1;
     }
@@ -1696,7 +1691,7 @@ void msg_start(void)
   // if cmdheight=0, we need to scroll in the first line of msg_grid upon the screen
   if (p_ch == 0 && !ui_has(kUIMessages) && !msg_scrolled) {
     msg_grid_validate();
-    msg_scroll_up(false, true);
+    msg_scroll_up(false, true, false);
     msg_scrolled++;
     cmdline_row = Rows - 1;
   }
@@ -2474,7 +2469,7 @@ static void msg_puts_display(const char *str, int maxlen, int hl_id, int recurse
         }
 
         // Scroll the screen up one line.
-        msg_scroll_up(true, false);
+        msg_scroll_up(true, false, false);
 
         inc_msg_scrolled();
         need_wait_return = true;       // may need wait_return() in main()
@@ -2614,15 +2609,12 @@ bool msg_do_throttle(void)
 }
 
 /// Scroll the screen up one line for displaying the next message line.
-bool msg_scroll_up(bool may_throttle, bool zerocmd)
+void msg_scroll_up(bool may_throttle, bool zerocmd, bool discount_first_scroll)
 {
-  msg_did_scroll = true;
-  bool started_throttling =
-    grid_scroll_message_up(&msg_grid, msg_grid_pos,
-                           may_throttle && msg_do_throttle(), zerocmd,
-                           msg_grid_set_pos);
+  grid_scroll_message_up(&msg_grid, msg_grid_pos,
+                         may_throttle && msg_do_throttle(), zerocmd,
+                         discount_first_scroll, msg_grid_set_pos);
   grid_clear(&msg_grid_adj, Rows - 1, Rows, 0, Columns, HL_ATTR(HLF_MSG));
-  return started_throttling;
 }
 
 /// Send throttled message output to UI clients
@@ -2648,18 +2640,12 @@ void msg_scroll_flush(void)
     &msg_grid,
     (MessageGridScrollFlushRequest){
       .position = msg_grid_pos,
-      .position_at_last_flush = msg_grid_pos_at_flush,
       .scrolled_lines = msg_scrolled,
-      .scrolled_lines_at_last_flush = msg_scrolled_at_flush,
-      .scroll_discount = msg_grid_scroll_discount,
       .screen_rows = Rows,
       .screen_columns = Columns,
       .clear_attribute = HL_ATTR(HLF_MSG),
     },
     ui_ext_msg_set_pos);
-  msg_scrolled_at_flush = msg_scrolled;
-  msg_grid_scroll_discount = 0;
-  msg_grid_pos_at_flush = msg_grid_pos;
 }
 
 void msg_reset_scroll(void)
@@ -2669,20 +2655,12 @@ void msg_reset_scroll(void)
   }
   // TODO(bfredl): some duplicate logic with update_screen(). Later on
   // we should properly disentangle message clear with full screen redraw.
-  msg_grid.throttled = false;
   // TODO(bfredl): risk for extra flicker i e with
   // "nvim -o has_swap also_has_swap"
-  msg_grid_set_pos(Rows - (int)p_ch, false);
+  grid_reset_message_scroll(&msg_grid, Rows - (int)p_ch, msg_scrollsize(),
+                            msg_grid_set_pos);
   clear_cmdline = true;
-  if (grid_is_allocated(&msg_grid)) {
-    // non-displayed part of msg_grid is considered invalid.
-    for (int i = 0; i < MIN(msg_scrollsize(), msg_grid.rows); i++) {
-      grid_clear_row(&msg_grid, i, msg_grid.cols, false);
-    }
-  }
   msg_scrolled = 0;
-  msg_scrolled_at_flush = 0;
-  msg_grid_scroll_discount = 0;
 }
 
 void msg_ui_refresh(void)
@@ -3166,17 +3144,12 @@ static bool do_more_prompt(int typed_char)
         // First display any text that we scrolled back.
         // if p_ch=0 we need to allocate a line for "press enter" messages!
         if (cmdline_row >= Rows && !ui_has(kUIMessages)) {
-          msg_scroll_up(true, false);
+          msg_scroll_up(true, false, false);
           msg_scrolled++;
         }
         while (toscroll > 0 && mp_last != NULL) {
           // scroll up, display line at bottom
-          if (msg_scroll_up(true, false)) {
-            // Tricky: we redraw at one line higher than usual. Therefore
-            // the non-flushed area is one line larger.
-            msg_scrolled_at_flush--;
-            msg_grid_scroll_discount++;
-          }
+          msg_scroll_up(true, false, true);
           inc_msg_scrolled();
           grid_clear(&msg_grid_adj, Rows - 2, Rows - 1, 0, Columns, HL_ATTR(HLF_MSG));
           mp_last = disp_sb_line(Rows - 2, mp_last);

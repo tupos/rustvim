@@ -647,7 +647,7 @@ static void redraw_wildmenu(expand_T *xp, int num_matches, char **matches, int m
         // Put the wildmenu just above the command line.  If there is
         // no room, scroll the screen one line up.
         if (cmdline_row == Rows - 1) {
-          msg_scroll_up(false, false);
+          msg_scroll_up(false, false, false);
           msg_scrolled++;
         } else {
           cmdline_row++;

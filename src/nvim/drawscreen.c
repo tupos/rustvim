@@ -482,13 +482,6 @@ int update_screen(void)
     type = MAX(type, UPD_CLEAR);
   }
 
-  // Tricky: vim code can reset msg_scrolled behind our back, so need
-  // separate bookkeeping for now.
-  if (msg_did_scroll) {
-    msg_did_scroll = false;
-    msg_scrolled_at_flush = 0;
-  }
-
   if (type >= UPD_CLEAR || !default_grid.valid) {
     ui_comp_set_screen_valid(false);
   }
@@ -532,8 +525,6 @@ int update_screen(void)
       ui_comp_set_screen_valid(true);
     }
     msg_scrolled = 0;
-    msg_scrolled_at_flush = 0;
-    msg_grid_scroll_discount = 0;
     need_wait_return = false;
   }
 

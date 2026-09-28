@@ -54,11 +54,6 @@ EXTERN int msg_grid_pos INIT( = 0);
 /// to use the correct positions already.
 EXTERN GridView msg_grid_adj INIT( = { 0 });
 
-/// value of msg_scrolled at latest msg_scroll_flush.
-EXTERN int msg_scrolled_at_flush INIT( = 0);
-
-EXTERN int msg_grid_scroll_discount INIT( = 0);
-
 EXTERN int msg_listdo_overwrite INIT( = 0);
 
 #include "message.h.generated.h"

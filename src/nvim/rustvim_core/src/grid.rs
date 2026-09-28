@@ -165,20 +165,74 @@ enum MessageGridTransition {
     ReleaseRequired,
 }
 
-/// Message-scroll counters captured when pending output is flushed.
+/// Persistent bookkeeping for throttled message-grid output.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct MessageScrollState {
-    position: i32,
     position_at_last_flush: i32,
-    scrolled_lines: i32,
     scrolled_lines_at_last_flush: i32,
     scroll_discount: i32,
+}
+
+impl MessageScrollState {
+    /// Creates initial message-scroll bookkeeping.
+    const fn new() -> Self {
+        Self {
+            position_at_last_flush: 0,
+            scrolled_lines_at_last_flush: 0,
+            scroll_discount: 0,
+        }
+    }
+
+    /// Records a message position that was published immediately.
+    fn record_position(&mut self, position: i32) {
+        self.position_at_last_flush = position;
+    }
+
+    /// Synchronizes the scroll baseline after allocating or resizing the grid.
+    fn record_resize(&mut self, scrolled_lines: i32) {
+        self.scrolled_lines_at_last_flush = scrolled_lines;
+    }
+
+    /// Accounts for the extra row redrawn by the message scrollback pager.
+    fn discount_first_scroll(&mut self) {
+        self.scrolled_lines_at_last_flush = self
+            .scrolled_lines_at_last_flush
+            .checked_sub(1)
+            .expect("message scroll baseline underflow");
+        self.scroll_discount = self
+            .scroll_discount
+            .checked_add(1)
+            .expect("message scroll discount overflow");
+    }
+
+    /// Records the state observed by a completed output flush.
+    fn finish_flush(&mut self, position: i32, scrolled_lines: i32) {
+        self.position_at_last_flush = position;
+        self.scrolled_lines_at_last_flush = scrolled_lines;
+        self.scroll_discount = 0;
+    }
+
+    /// Discards pending scrolling after a full message redraw or reset.
+    fn reset_progress(&mut self) {
+        self.scrolled_lines_at_last_flush = 0;
+        self.scroll_discount = 0;
+    }
+}
+
+static MESSAGE_GRID_SCROLL_STATE: Mutex<MessageScrollState> = Mutex::new(MessageScrollState::new());
+
+/// Acquires the persistent message-grid scrolling state.
+fn lock_message_scroll_state() -> MutexGuard<'static, MessageScrollState> {
+    MESSAGE_GRID_SCROLL_STATE
+        .try_lock()
+        .expect("message-grid scroll state is already borrowed")
 }
 
 /// Validated input for flushing pending message-grid output.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct MessageGridScrollFlushRequest {
-    scroll: MessageScrollState,
+    position: i32,
+    scrolled_lines: i32,
     screen_size: GridSize,
     clear_attribute: VimSAttrT,
 }
@@ -632,21 +686,31 @@ impl ScreenGrid {
         self.clear_row(0, width, false);
     }
 
+    /// Disables deferred message-grid output.
+    fn disable_message_throttling(&mut self) {
+        self.throttled = false;
+    }
+
+    /// Clears a prefix of complete message-grid rows.
+    fn clear_message_rows(&mut self, rows_to_clear: usize, valid_rows: usize) {
+        if !self.is_allocated() {
+            return;
+        }
+        let row_count = std::cmp::min(
+            rows_to_clear,
+            usize::try_from(self.rows).expect("allocated message-grid height must be nonnegative"),
+        );
+        let width =
+            usize::try_from(self.cols).expect("allocated message-grid width must be nonnegative");
+        for row in 0..row_count {
+            self.clear_row(row, width, row < valid_rows);
+        }
+    }
+
     /// Clears message rows before redrawing the screen and ends throttling.
     fn prepare_message_redraw(&mut self, rows_to_clear: usize, valid_rows: usize) {
-        if self.is_allocated() {
-            let row_count = std::cmp::min(
-                rows_to_clear,
-                usize::try_from(self.rows)
-                    .expect("allocated message-grid height must be nonnegative"),
-            );
-            let width = usize::try_from(self.cols)
-                .expect("allocated message-grid width must be nonnegative");
-            for row in 0..row_count {
-                self.clear_row(row, width, row < valid_rows);
-            }
-        }
-        self.throttled = false;
+        self.clear_message_rows(rows_to_clear, valid_rows);
+        self.disable_message_throttling();
     }
 
     /// Finishes one throttled message-grid update.
@@ -656,6 +720,7 @@ impl ScreenGrid {
     fn flush_message_scroll(
         &mut self,
         request: MessageGridScrollFlushRequest,
+        state: MessageScrollState,
     ) -> MessageGridScrollFlushPlan {
         let target = GridOutputTarget::new(self.id(), self.cols);
         let mut plan = MessageGridScrollFlushPlan::empty(target);
@@ -664,15 +729,14 @@ impl ScreenGrid {
         }
         self.throttled = false;
 
-        let scroll = request.scroll;
         assert!(
-            scroll.position >= 0 && scroll.position_at_last_flush >= scroll.position,
+            request.position >= 0 && state.position_at_last_flush >= request.position,
             "message-grid positions must be ordered and nonnegative"
         );
-        let position_delta = scroll.position_at_last_flush - scroll.position;
-        let scrolled_delta = scroll
+        let position_delta = state.position_at_last_flush - request.position;
+        let scrolled_delta = request
             .scrolled_lines
-            .checked_sub(scroll.scrolled_lines_at_last_flush)
+            .checked_sub(state.scrolled_lines_at_last_flush)
             .expect("message scroll delta overflow");
         assert!(
             scrolled_delta >= 0,
@@ -681,12 +745,12 @@ impl ScreenGrid {
         let line_delta = std::cmp::min(scrolled_delta, self.rows);
 
         if position_delta > 0 {
-            plan.position_update = Some(scroll.position);
+            plan.position_update = Some(request.position);
         }
 
         let rows_to_scroll = line_delta
             .checked_sub(position_delta)
-            .and_then(|rows| rows.checked_sub(scroll.scroll_discount))
+            .and_then(|rows| rows.checked_sub(state.scroll_discount))
             .expect("message scroll calculation overflow");
         assert!(
             rows_to_scroll >= 0,
@@ -695,7 +759,7 @@ impl ScreenGrid {
 
         // The position should normally already be zero when scrolling begins,
         // but headless message output does not always preserve that invariant.
-        if rows_to_scroll > 0 && scroll.position == 0 {
+        if rows_to_scroll > 0 && request.position == 0 {
             let region =
                 GridRegion::try_new(0..request.screen_size.height, 0..request.screen_size.width)
                     .expect("validated screen dimensions form a grid region");
@@ -711,7 +775,7 @@ impl ScreenGrid {
             .saturating_sub(line_delta.max(1))
             .max(0);
         for screen_row in first_screen_row..request.screen_size.height {
-            let row = screen_row - scroll.position;
+            let row = screen_row - request.position;
             assert!(
                 0 <= row && row < self.rows,
                 "dirty message row must belong to the message grid"
@@ -3028,10 +3092,7 @@ pub enum CMessageGridTransition {
 #[derive(Clone, Copy, Debug)]
 pub struct CMessageGridScrollFlushRequest {
     position: libc::c_int,
-    position_at_last_flush: libc::c_int,
     scrolled_lines: libc::c_int,
-    scrolled_lines_at_last_flush: libc::c_int,
-    scroll_discount: libc::c_int,
     screen_rows: libc::c_int,
     screen_columns: libc::c_int,
     clear_attribute: VimSAttrT,
@@ -4225,6 +4286,7 @@ pub unsafe extern "C" fn grid_prepare_for_messages(
     rows: libc::c_int,
     columns: libc::c_int,
     should_allocate: bool,
+    scrolled_lines: libc::c_int,
 ) -> CMessageGridTransition {
     if grid.is_null() {
         return CMessageGridTransition::Unchanged;
@@ -4238,12 +4300,17 @@ pub unsafe extern "C" fn grid_prepare_for_messages(
         MessageGridMode::Hidden
     };
 
-    let mut line_buffer = LineBufferGuard::acquire();
-    // SAFETY: The caller transfers exclusive ownership of the C grid and its
-    // allocations to the guard for the duration of this function.
-    let mut grid = unsafe { ScreenGridGuard::take(grid) };
-    grid.prepare_for_messages(mode, &GRID_HANDLE_ALLOCATOR, &mut line_buffer)
-        .into()
+    let transition = {
+        let mut line_buffer = LineBufferGuard::acquire();
+        // SAFETY: The caller transfers exclusive ownership of the C grid and
+        // its allocations to the guard for the duration of this function.
+        let mut grid = unsafe { ScreenGridGuard::take(grid) };
+        grid.prepare_for_messages(mode, &GRID_HANDLE_ALLOCATOR, &mut line_buffer)
+    };
+    if transition == MessageGridTransition::Resized {
+        lock_message_scroll_state().record_resize(scrolled_lines);
+    }
+    transition.into()
 }
 
 /// Releases message-grid storage after compositor removal.
@@ -4285,9 +4352,9 @@ pub unsafe extern "C" fn grid_set_message_position(
     row: libc::c_int,
     scrolled: bool,
     emit_position: CMessageGridPositionEmitter,
-) -> bool {
+) {
     if grid.is_null() || view.is_null() {
-        return false;
+        return;
     }
     let update = {
         // SAFETY: The caller transfers exclusive ownership of the grid and
@@ -4302,6 +4369,7 @@ pub unsafe extern "C" fn grid_set_message_position(
         unsafe {
             emit_position(row, scrolled);
         }
+        lock_message_scroll_state().record_position(row);
     }
     if let Some(row_offset) = update.view_row_offset {
         // SAFETY: The caller guarantees exclusive access to a valid view.
@@ -4309,7 +4377,6 @@ pub unsafe extern "C" fn grid_set_message_position(
             (*view).row_offset = row_offset;
         }
     }
-    update.publish
 }
 
 /// Scrolls the message grid upward by one row.
@@ -4328,10 +4395,11 @@ pub unsafe extern "C" fn grid_scroll_message_up(
     current_position: libc::c_int,
     enable_throttling: bool,
     zero_cmdheight: bool,
+    discount_first_scroll: bool,
     set_position: CMessageGridPositionEmitter,
-) -> bool {
+) {
     if grid.is_null() {
-        return false;
+        return;
     }
     let scroll_up = {
         // SAFETY: The caller transfers exclusive ownership of the grid and
@@ -4344,6 +4412,9 @@ pub unsafe extern "C" fn grid_scroll_message_up(
         action,
     } = scroll_up;
 
+    if started_throttling && discount_first_scroll {
+        lock_message_scroll_state().discount_first_scroll();
+    }
     match action {
         MessageGridScrollUpAction::Reposition {
             position,
@@ -4369,7 +4440,6 @@ pub unsafe extern "C" fn grid_scroll_message_up(
             }
         }
     }
-    started_throttling
 }
 
 /// Clears message-grid rows in preparation for a screen redraw.
@@ -4394,9 +4464,54 @@ pub unsafe extern "C" fn grid_prepare_message_redraw(
     };
 
     // SAFETY: The caller transfers exclusive ownership of the grid and its
-    // allocations to the guard for the duration of this operation.
-    let mut grid = unsafe { ScreenGridGuard::take(grid) };
-    grid.prepare_message_redraw(rows_to_clear, valid_rows);
+    // allocations to the guard within this scope.
+    {
+        let mut grid = unsafe { ScreenGridGuard::take(grid) };
+        grid.prepare_message_redraw(rows_to_clear, valid_rows);
+    }
+    lock_message_scroll_state().reset_progress();
+}
+
+/// Ends message scrolling, publishes its resting position, and clears hidden
+/// message rows.
+///
+/// The position callback runs after throttling is disabled and grid ownership
+/// is restored, but before hidden rows are cleared. This preserves the
+/// original event order.
+///
+/// # Safety
+///
+/// `grid` must point to a valid, exclusively accessible `CScreenGrid`. Its
+/// buffers must satisfy the ownership and layout requirements of `ScreenGrid`.
+/// `set_position` must remain callable for the duration of this operation.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn grid_reset_message_scroll(
+    grid: *mut CScreenGrid,
+    position: libc::c_int,
+    rows_to_clear: libc::c_int,
+    set_position: CMessageGridPositionEmitter,
+) {
+    if grid.is_null() {
+        return;
+    }
+    let Ok(rows_to_clear) = usize::try_from(rows_to_clear) else {
+        return;
+    };
+
+    // SAFETY: The caller transfers exclusive ownership of the grid and its
+    // allocations within each guard scope.
+    {
+        let mut grid = unsafe { ScreenGridGuard::take(grid) };
+        grid.disable_message_throttling();
+    }
+    unsafe {
+        set_position(position, false);
+    }
+    {
+        let mut grid = unsafe { ScreenGridGuard::take(grid) };
+        grid.clear_message_rows(rows_to_clear, 0);
+    }
+    lock_message_scroll_state().reset_progress();
 }
 
 /// Flushes pending throttled message-grid scrolling and row updates.
@@ -4422,21 +4537,17 @@ pub unsafe extern "C" fn grid_flush_message_scroll(
         return;
     };
     let request = MessageGridScrollFlushRequest {
-        scroll: MessageScrollState {
-            position: request.position,
-            position_at_last_flush: request.position_at_last_flush,
-            scrolled_lines: request.scrolled_lines,
-            scrolled_lines_at_last_flush: request.scrolled_lines_at_last_flush,
-            scroll_discount: request.scroll_discount,
-        },
+        position: request.position,
+        scrolled_lines: request.scrolled_lines,
         screen_size,
         clear_attribute: request.clear_attribute,
     };
+    let state = *lock_message_scroll_state();
     let plan = {
         // SAFETY: The caller transfers exclusive ownership of the grid and
         // its allocations to the guard for the duration of this operation.
         let mut grid = unsafe { ScreenGridGuard::take(grid) };
-        grid.flush_message_scroll(request)
+        grid.flush_message_scroll(request, state)
     };
 
     let MessageGridScrollFlushPlan {
@@ -4456,6 +4567,7 @@ pub unsafe extern "C" fn grid_flush_message_scroll(
         target.emit(scroll);
     }
     target.emit_lines(lines);
+    lock_message_scroll_state().finish_flush(request.position, request.scrolled_lines);
 }
 
 /// Applies the complete allocation and validity transition for one window
@@ -4529,6 +4641,8 @@ pub unsafe extern "C" fn grid_free_all_mem() {
         grid_free(&raw mut default_grid);
         grid_free(&raw mut msg_grid);
     }
+
+    *lock_message_scroll_state() = MessageScrollState::new();
 
     // The caller guarantees that no line-buffer user remains.
     let mut line_buffer = LineBufferGuard::acquire();
@@ -5366,17 +5480,19 @@ mod tests {
         grid.mark_dirty_column(1, 3);
         grid.mark_dirty_column(2, 2);
 
-        let plan = grid.flush_message_scroll(MessageGridScrollFlushRequest {
-            scroll: MessageScrollState {
+        let plan = grid.flush_message_scroll(
+            MessageGridScrollFlushRequest {
                 position: 0,
-                position_at_last_flush: 2,
                 scrolled_lines: 3,
+                screen_size: GridSize::try_new(3, 4).unwrap(),
+                clear_attribute: 9,
+            },
+            MessageScrollState {
+                position_at_last_flush: 2,
                 scrolled_lines_at_last_flush: 0,
                 scroll_discount: 0,
             },
-            screen_size: GridSize::try_new(3, 4).unwrap(),
-            clear_attribute: 9,
-        });
+        );
 
         assert!(!grid.throttled);
         assert_eq!(plan.position_update, Some(0));
@@ -5396,6 +5512,34 @@ mod tests {
         assert_eq!(
             grid.dirty_columns.as_ref().map(|columns| &*columns.columns),
             Some([0, 0, 0].as_slice())
+        );
+    }
+
+    #[test]
+    fn message_scroll_state_tracks_complete_throttling_lifecycle() {
+        let mut state = MessageScrollState::new();
+
+        state.record_position(4);
+        state.record_resize(3);
+        state.discount_first_scroll();
+        assert_eq!(
+            state,
+            MessageScrollState {
+                position_at_last_flush: 4,
+                scrolled_lines_at_last_flush: 2,
+                scroll_discount: 1,
+            }
+        );
+
+        state.finish_flush(0, 6);
+        state.reset_progress();
+        assert_eq!(
+            state,
+            MessageScrollState {
+                position_at_last_flush: 0,
+                scrolled_lines_at_last_flush: 0,
+                scroll_discount: 0,
+            }
         );
     }
 

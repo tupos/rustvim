@@ -154,9 +154,6 @@ EXTERN int msg_scrolled;  ///< Number of screen lines that messages have scrolle
 // when true don't set need_wait_return in msg_puts_attr()
 // when msg_scrolled is non-zero
 EXTERN bool msg_scrolled_ign INIT( = false);
-// Whether the screen is damaged due to scrolling. Sometimes msg_scrolled
-// is reset before the screen is redrawn, so we need to keep track of this.
-EXTERN bool msg_did_scroll INIT( = false);
 
 EXTERN char *keep_msg INIT( = NULL);         // msg to be shown after redraw
 EXTERN int keep_msg_hl_id INIT( = 0);        // highlight id for keep_msg
