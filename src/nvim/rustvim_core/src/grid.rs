@@ -149,6 +149,28 @@ enum WindowGridMode {
     Shared,
 }
 
+/// Grid selected as the backing storage for a window view.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WindowGridViewTarget {
+    Dedicated,
+    Shared,
+}
+
+/// Target and offset selected for a window's grid view.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct WindowGridViewSelection {
+    target: WindowGridViewTarget,
+    offset: GridPosition,
+}
+
+/// Complete result of configuring a window grid and its view.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct WindowGridUpdate {
+    grid_id: GridId,
+    lifecycle: GridLifecycleChange,
+    view: WindowGridViewSelection,
+}
+
 /// Storage mode requested for the message grid.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum MessageGridMode {
@@ -542,6 +564,26 @@ impl ScreenGrid {
                 GridLifecycleChange::Released
             }
             WindowGridMode::Shared => GridLifecycleChange::Unchanged,
+        }
+    }
+
+    /// Configures window-grid storage and selects its backing view.
+    fn configure_window_view(
+        &mut self,
+        mode: WindowGridMode,
+        offset: GridPosition,
+        line_buffer: &mut LineBuffer,
+    ) -> WindowGridUpdate {
+        let target = match mode {
+            WindowGridMode::Dedicated(_) => WindowGridViewTarget::Dedicated,
+            WindowGridMode::Shared => WindowGridViewTarget::Shared,
+        };
+        let lifecycle = self.configure_for_window(mode, line_buffer);
+
+        WindowGridUpdate {
+            grid_id: self.id(),
+            lifecycle,
+            view: WindowGridViewSelection { target, offset },
         }
     }
 
@@ -3084,6 +3126,14 @@ pub enum CMessageGridTransition {
     ReleaseRequired = 2,
 }
 
+/// C representation of a completed window-grid configuration.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct CWindowGridUpdate {
+    grid_handle: VimHandleT,
+    resized: bool,
+}
+
 /// C representation of the inputs needed to flush message-grid output.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -3101,6 +3151,15 @@ impl From<MessageGridTransition> for CMessageGridTransition {
             MessageGridTransition::Unchanged => Self::Unchanged,
             MessageGridTransition::Resized => Self::Resized,
             MessageGridTransition::ReleaseRequired => Self::ReleaseRequired,
+        }
+    }
+}
+
+impl From<WindowGridUpdate> for CWindowGridUpdate {
+    fn from(update: WindowGridUpdate) -> Self {
+        Self {
+            grid_handle: update.grid_id.as_native_handle(),
+            resized: update.lifecycle == GridLifecycleChange::Resized,
         }
     }
 }
@@ -4568,40 +4627,69 @@ pub unsafe extern "C" fn grid_flush_message_scroll(
 }
 
 /// Applies the complete allocation and validity transition for one window
-/// grid.
+/// grid and updates its C-facing view.
 ///
-/// Returns whether dedicated storage was allocated or resized. The window
-/// subsystem uses that result for border redraw and UI resize notification.
+/// Returns the configured grid identity and whether dedicated storage was
+/// allocated or resized. The window subsystem uses that result for border
+/// redraw and UI resize notification.
 ///
 /// # Safety
 ///
 /// `grid` must point to a valid, exclusively accessible `CScreenGrid`. Any
 /// existing buffers and dimensions must satisfy the ownership and layout
-/// requirements of `ScreenGrid`.
+/// requirements of `ScreenGrid`. `view` must point to a valid, exclusively
+/// writable `CGridView`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn grid_configure_for_window(
     grid: *mut CScreenGrid,
+    view: *mut CGridView,
     rows: libc::c_int,
     columns: libc::c_int,
     use_dedicated_grid: bool,
-) -> bool {
-    if grid.is_null() {
-        return false;
+    row_offset: libc::c_int,
+    col_offset: libc::c_int,
+) -> CWindowGridUpdate {
+    if grid.is_null() || view.is_null() {
+        return CWindowGridUpdate {
+            grid_handle: 0,
+            resized: false,
+        };
     }
     let mode = if use_dedicated_grid {
         let Some(size) = GridSize::try_new(rows, columns) else {
-            return false;
+            return CWindowGridUpdate {
+                grid_handle: 0,
+                resized: false,
+            };
         };
         WindowGridMode::Dedicated(size)
     } else {
         WindowGridMode::Shared
     };
 
-    let mut line_buffer = LineBufferGuard::acquire();
-    // SAFETY: The caller transfers exclusive ownership of the C grid and its
-    // allocations to the guard for the duration of this function.
-    let mut grid = unsafe { ScreenGridGuard::take(grid) };
-    grid.configure_for_window(mode, &mut line_buffer) == GridLifecycleChange::Resized
+    let update = {
+        let mut line_buffer = LineBufferGuard::acquire();
+        // SAFETY: The caller transfers exclusive ownership of the C grid and
+        // its allocations to the guard for the duration of this operation.
+        let mut rust_grid = unsafe { ScreenGridGuard::take(grid) };
+        rust_grid.configure_window_view(
+            mode,
+            GridPosition::new(row_offset, col_offset),
+            &mut line_buffer,
+        )
+    };
+
+    // SAFETY: The caller guarantees exclusive writable access to `view`.
+    unsafe {
+        (*view).target = match update.view.target {
+            WindowGridViewTarget::Dedicated => grid,
+            WindowGridViewTarget::Shared => &raw mut default_grid,
+        };
+        (*view).row_offset = update.view.offset.row;
+        (*view).col_offset = update.view.offset.column;
+    }
+
+    update.into()
 }
 
 /// # Safety
@@ -5123,12 +5211,21 @@ mod tests {
         grid.attrs[0] = 12;
         grid.vcols[0] = 4;
 
-        let change = grid.configure_for_window(
+        let update = grid.configure_window_view(
             WindowGridMode::Dedicated(GridSize::try_new(2, 3).unwrap()),
+            GridPosition::new(1, 2),
             &mut line_buffer,
         );
 
-        assert_eq!(change, GridLifecycleChange::Resized);
+        assert_eq!(update.lifecycle, GridLifecycleChange::Resized);
+        assert_eq!(update.grid_id, GridId::new(7));
+        assert_eq!(
+            update.view,
+            WindowGridViewSelection {
+                target: WindowGridViewTarget::Dedicated,
+                offset: GridPosition::new(1, 2),
+            }
+        );
         assert_eq!(grid.handle, 7);
         assert_eq!((grid.rows, grid.cols), (2, 3));
         assert!(grid.valid);
@@ -5179,9 +5276,21 @@ mod tests {
         grid.handle = 7;
         grid.valid = true;
 
-        let change = grid.configure_for_window(WindowGridMode::Shared, &mut line_buffer);
+        let update = grid.configure_window_view(
+            WindowGridMode::Shared,
+            GridPosition::new(3, 4),
+            &mut line_buffer,
+        );
 
-        assert_eq!(change, GridLifecycleChange::Released);
+        assert_eq!(update.lifecycle, GridLifecycleChange::Released);
+        assert_eq!(update.grid_id, GridId::new(7));
+        assert_eq!(
+            update.view,
+            WindowGridViewSelection {
+                target: WindowGridViewTarget::Shared,
+                offset: GridPosition::new(3, 4),
+            }
+        );
         assert_eq!(grid.handle, 7);
         assert!(!grid.is_allocated());
         assert!(!grid.valid);

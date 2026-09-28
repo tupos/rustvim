@@ -63,6 +63,11 @@ typedef struct {
 } GridLineSubmissionConfig;
 
 typedef struct {
+  handle_T grid_handle;
+  bool resized;
+} WindowGridUpdate;
+
+typedef struct {
   int end_col;
   colnr_T end_vcol;
   size_t color_cols_consumed;
@@ -89,8 +94,9 @@ extern void grid_alloc(ScreenGrid *grid, int rows, int columns, bool copy, bool 
 extern bool grid_is_allocated(const ScreenGrid *grid);
 extern void grid_initialize_default(ScreenGrid *grid);
 extern bool grid_configure_default(ScreenGrid *grid, int rows, int columns);
-extern bool grid_configure_for_window(ScreenGrid *grid, int rows, int columns,
-                                      bool use_dedicated_grid);
+extern WindowGridUpdate grid_configure_for_window(
+  ScreenGrid *grid, GridView *view, int rows, int columns,
+  bool use_dedicated_grid, int row_offset, int col_offset);
 extern bool grid_configure_for_popup_menu(ScreenGrid *grid, int rows, int columns,
                                           bool contents_invalid);
 extern MessageGridTransition grid_prepare_for_messages(ScreenGrid *grid, int rows, int columns,
@@ -195,5 +201,3 @@ extern void alloc_initial_line_buffer(void);
 #else
 # define schar_from_ascii(x) ((schar_T)(x))
 #endif
-
-#include "grid.h.generated.h"

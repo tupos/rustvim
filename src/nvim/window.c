@@ -5707,6 +5707,50 @@ void win_free_grid(win_T *wp, bool reinit)
   }
 }
 
+/// (Re)allocates a window grid if its required storage changed.
+///
+/// Window-owned line metadata is resized here. Rust owns the corresponding
+/// grid-storage lifecycle and grid-view selection.
+void win_grid_alloc(win_T *wp)
+{
+  int total_rows = wp->w_height_outer;
+  int total_cols = wp->w_width_outer;
+  bool use_dedicated_grid = ui_has(kUIMultigrid) || wp->w_floating;
+
+  if (wp->w_view_height > wp->w_lines_size) {
+    wp->w_lines_valid = 0;
+    xfree(wp->w_lines);
+    wp->w_lines = xcalloc((size_t)wp->w_view_height + 1, sizeof(wline_T));
+    wp->w_lines_size = wp->w_view_height;
+  }
+
+  int row_offset = wp->w_winrow_off;
+  int col_offset = wp->w_wincol_off;
+  if (!use_dedicated_grid) {
+    row_offset += wp->w_winrow;
+    col_offset += wp->w_wincol;
+  }
+
+  WindowGridUpdate update = grid_configure_for_window(
+    &wp->w_grid_alloc, &wp->w_grid, total_rows, total_cols,
+    use_dedicated_grid, row_offset, col_offset);
+  if (update.grid_handle == 0) {
+    return;
+  }
+
+  if (update.resized && wp->w_floating && wp->w_config.border) {
+    wp->w_redr_border = true;
+  }
+
+  // Send a grid resize event if the grid was just resized, screen_resize()
+  // requires every grid size to be resent, or the UI requires multigrid
+  // events.
+  if ((resizing_screen || update.resized) && use_dedicated_grid) {
+    ui_call_grid_resize(update.grid_handle, total_cols, total_rows);
+    ui_check_cursor_grid(update.grid_handle);
+  }
+}
+
 /// Append window "wp" in the window list after window "after".
 ///
 /// @param tp  tab page "win" (and "after", if not NULL) is in, NULL for current
