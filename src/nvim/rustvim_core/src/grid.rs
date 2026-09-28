@@ -140,6 +140,24 @@ impl DirtyColumns {
     }
 }
 
+/// Storage mode selected by the window subsystem for one screen grid.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WindowGridMode {
+    /// Render into storage owned by this window grid.
+    Dedicated(GridSize),
+    /// Render through a view into the shared default grid.
+    Shared,
+}
+
+/// State transition performed while configuring one window grid.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WindowGridChange {
+    Unchanged,
+    Resized,
+    Released,
+    Revalidated,
+}
+
 /// Includes final NUL. MAX_MCO is no longer used, but at least 4*(MAX_MCO+1)+1=29
 /// ensures we can fit all composed chars which did fit before.
 static MAX_SCHAR_SIZE: usize = 32;
@@ -344,6 +362,61 @@ impl ScreenGrid {
         new_grid.realloc_line_buffer(line_buffer);
 
         new_grid
+    }
+
+    /// Configures storage and validity for the window subsystem's chosen mode.
+    ///
+    /// Valid contents are retained across a dedicated-grid resize. An invalid
+    /// grid is instead cleared to invalid cells, matching the redraw contract
+    /// formerly implemented by `win_grid_alloc()`.
+    fn configure_for_window(
+        &mut self,
+        mode: WindowGridMode,
+        line_buffer: &mut LineBuffer,
+    ) -> WindowGridChange {
+        match mode {
+            WindowGridMode::Dedicated(size)
+                if !self.is_allocated() || self.rows != size.height || self.cols != size.width =>
+            {
+                let copy_contents = self.valid;
+                *self = Self::from_grid(
+                    self,
+                    size.height,
+                    size.width,
+                    false,
+                    copy_contents,
+                    line_buffer,
+                );
+                self.valid = true;
+                WindowGridChange::Resized
+            }
+            WindowGridMode::Dedicated(_) if !self.valid => {
+                self.invalidate();
+                self.valid = true;
+                WindowGridChange::Revalidated
+            }
+            WindowGridMode::Dedicated(_) => WindowGridChange::Unchanged,
+            WindowGridMode::Shared if self.is_allocated() => {
+                self.release_storage();
+                self.valid = false;
+                WindowGridChange::Released
+            }
+            WindowGridMode::Shared => WindowGridChange::Unchanged,
+        }
+    }
+
+    /// Reports whether this grid currently owns cell storage.
+    fn is_allocated(&self) -> bool {
+        !self.chars.is_empty()
+    }
+
+    /// Releases cell storage while preserving this grid's stable identity.
+    fn release_storage(&mut self) {
+        self.chars = Vec::new();
+        self.attrs = Vec::new();
+        self.vcols = Vec::new();
+        self.line_offset = Vec::new();
+        self.dirty_columns = None;
     }
 
     fn realloc_line_buffer(&self, line_buffer: &mut LineBuffer) {
@@ -3697,6 +3770,43 @@ pub unsafe extern "C" fn grid_alloc(
     *grid = resized_grid;
 }
 
+/// Applies the complete allocation and validity transition for one window
+/// grid.
+///
+/// Returns whether dedicated storage was allocated or resized. The window
+/// subsystem uses that result for border redraw and UI resize notification.
+///
+/// # Safety
+///
+/// `grid` must point to a valid, exclusively accessible `CScreenGrid`. Any
+/// existing buffers and dimensions must satisfy the ownership and layout
+/// requirements of `ScreenGrid`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn grid_configure_for_window(
+    grid: *mut CScreenGrid,
+    rows: libc::c_int,
+    columns: libc::c_int,
+    use_dedicated_grid: bool,
+) -> bool {
+    if grid.is_null() {
+        return false;
+    }
+    let mode = if use_dedicated_grid {
+        let Some(size) = GridSize::try_new(rows, columns) else {
+            return false;
+        };
+        WindowGridMode::Dedicated(size)
+    } else {
+        WindowGridMode::Shared
+    };
+
+    let mut line_buffer = LineBufferGuard::acquire();
+    // SAFETY: The caller transfers exclusive ownership of the C grid and its
+    // allocations to the guard for the duration of this function.
+    let mut grid = unsafe { ScreenGridGuard::take(grid) };
+    grid.configure_for_window(mode, &mut line_buffer) == WindowGridChange::Resized
+}
+
 /// Enables dirty-column tracking and resets all rows to clean.
 ///
 /// # Safety
@@ -4263,6 +4373,84 @@ mod tests {
 
         assert_eq!(region, GridRegion::try_new(0..2, 0..3).unwrap());
         assert_eq!(delta, GridDelta::new(1, 0));
+    }
+
+    #[test]
+    fn window_grid_resize_preserves_valid_contents() {
+        let mut line_buffer = LineBuffer::new(2);
+        let mut grid = ScreenGrid::new(1, 2, true, &mut line_buffer);
+        grid.handle = 7;
+        grid.valid = true;
+        grid.chars[0] = schar_from_ascii('x');
+        grid.attrs[0] = 12;
+        grid.vcols[0] = 4;
+
+        let change = grid.configure_for_window(
+            WindowGridMode::Dedicated(GridSize::try_new(2, 3).unwrap()),
+            &mut line_buffer,
+        );
+
+        assert_eq!(change, WindowGridChange::Resized);
+        assert_eq!(grid.handle, 7);
+        assert_eq!((grid.rows, grid.cols), (2, 3));
+        assert!(grid.valid);
+        assert_eq!(grid.chars[0], schar_from_ascii('x'));
+        assert_eq!(grid.attrs[0], 12);
+        assert_eq!(grid.vcols[0], 4);
+        assert_eq!(grid.attrs[2], -1);
+    }
+
+    #[test]
+    fn window_grid_resize_discards_invalid_contents() {
+        let mut line_buffer = LineBuffer::new(2);
+        let mut grid = ScreenGrid::new(1, 2, true, &mut line_buffer);
+        grid.chars[0] = schar_from_ascii('x');
+        grid.attrs[0] = 12;
+
+        let change = grid.configure_for_window(
+            WindowGridMode::Dedicated(GridSize::try_new(2, 3).unwrap()),
+            &mut line_buffer,
+        );
+
+        assert_eq!(change, WindowGridChange::Resized);
+        assert!(grid.valid);
+        assert_eq!(grid.chars[0], schar_from_ascii(' '));
+        assert_eq!(grid.attrs[0], -1);
+    }
+
+    #[test]
+    fn window_grid_configuration_revalidates_existing_storage() {
+        let mut line_buffer = LineBuffer::new(2);
+        let mut grid = ScreenGrid::new(1, 2, true, &mut line_buffer);
+        grid.attrs.fill(3);
+
+        let change = grid.configure_for_window(
+            WindowGridMode::Dedicated(GridSize::try_new(1, 2).unwrap()),
+            &mut line_buffer,
+        );
+
+        assert_eq!(change, WindowGridChange::Revalidated);
+        assert!(grid.valid);
+        assert_eq!(grid.attrs, [-1, -1]);
+    }
+
+    #[test]
+    fn shared_window_grid_releases_dedicated_storage() {
+        let mut line_buffer = LineBuffer::new(2);
+        let mut grid = ScreenGrid::new(1, 2, true, &mut line_buffer);
+        grid.handle = 7;
+        grid.valid = true;
+
+        let change = grid.configure_for_window(WindowGridMode::Shared, &mut line_buffer);
+
+        assert_eq!(change, WindowGridChange::Released);
+        assert_eq!(grid.handle, 7);
+        assert!(!grid.is_allocated());
+        assert!(!grid.valid);
+        assert_eq!(
+            grid.configure_for_window(WindowGridMode::Shared, &mut line_buffer),
+            WindowGridChange::Unchanged
+        );
     }
 
     #[test]

@@ -37,9 +37,6 @@
 
 /// (Re)allocates a window grid if size changed while in ext_multigrid mode.
 /// Updates size, offsets and handle for the grid regardless.
-///
-/// If "doclear" is true, don't try to copy from the old grid rather clear the
-/// resized grid.
 void win_grid_alloc(win_T *wp)
 {
   GridView *grid = &wp->w_grid;
@@ -49,7 +46,6 @@ void win_grid_alloc(win_T *wp)
   int total_cols = wp->w_width_outer;
 
   bool want_allocation = ui_has(kUIMultigrid) || wp->w_floating;
-  bool has_allocation = grid_is_allocated(grid_allocated);
 
   if (wp->w_view_height > wp->w_lines_size) {
     wp->w_lines_valid = 0;
@@ -58,25 +54,10 @@ void win_grid_alloc(win_T *wp)
     wp->w_lines_size = wp->w_view_height;
   }
 
-  bool was_resized = false;
-  if (want_allocation && (!has_allocation
-                          || grid_allocated->rows != total_rows
-                          || grid_allocated->cols != total_cols)) {
-    grid_alloc(grid_allocated, total_rows, total_cols, wp->w_grid_alloc.valid, false);
-    grid_allocated->valid = true;
-    if (wp->w_floating && wp->w_config.border) {
-      wp->w_redr_border = true;
-    }
-    was_resized = true;
-  } else if (!want_allocation && has_allocation) {
-    // Single grid mode, all rendering will be redirected to default_grid.
-    // Only keep track of the size and offset of the window.
-    grid_free(grid_allocated);
-    grid_allocated->valid = false;
-    was_resized = true;
-  } else if (want_allocation && has_allocation && !wp->w_grid_alloc.valid) {
-    grid_invalidate(grid_allocated);
-    grid_allocated->valid = true;
+  bool grid_resized = grid_configure_for_window(
+    grid_allocated, total_rows, total_cols, want_allocation);
+  if (grid_resized && wp->w_floating && wp->w_config.border) {
+    wp->w_redr_border = true;
   }
 
   if (want_allocation) {
@@ -93,9 +74,9 @@ void win_grid_alloc(win_T *wp)
   // - a grid was just resized
   // - screen_resize was called and all grid sizes must be sent
   // - the UI wants multigrid event (necessary)
-  if ((resizing_screen || was_resized) && want_allocation) {
+  if ((resizing_screen || grid_resized) && want_allocation) {
     ui_call_grid_resize(grid_allocated->handle,
-                        grid_allocated->cols, grid_allocated->rows);
+                        total_cols, total_rows);
     ui_check_cursor_grid(grid_allocated->handle);
   }
 }
