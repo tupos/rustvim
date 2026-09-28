@@ -178,14 +178,11 @@ static void ui_ext_msg_set_pos(int row, bool scrolled)
 
 void msg_grid_set_pos(int row, bool scrolled)
 {
-  if (!msg_grid.throttled) {
-    ui_ext_msg_set_pos(row, scrolled);
+  if (grid_set_message_position(&msg_grid, &msg_grid_adj, row, scrolled,
+                                ui_ext_msg_set_pos)) {
     msg_grid_pos_at_flush = row;
   }
   msg_grid_pos = row;
-  if (grid_is_allocated(&msg_grid)) {
-    msg_grid_adj.row_offset = -row;
-  }
 }
 
 bool msg_use_grid(void)

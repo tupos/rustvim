@@ -99,6 +99,9 @@ extern bool grid_configure_for_popup_menu(ScreenGrid *grid, int rows, int column
 extern MessageGridTransition grid_prepare_for_messages(ScreenGrid *grid, int rows, int columns,
                                                        bool should_allocate);
 extern void grid_release_message(ScreenGrid *grid);
+extern bool grid_set_message_position(ScreenGrid *grid, GridView *view, int row,
+                                      bool scrolled,
+                                      MessageGridPositionEmitter emit_position);
 extern void grid_scroll_message_up(ScreenGrid *grid, int current_position,
                                    bool enable_throttling, bool zero_cmdheight,
                                    MessageGridPositionEmitter set_position);

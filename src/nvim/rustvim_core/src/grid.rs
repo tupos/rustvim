@@ -218,6 +218,13 @@ enum MessageGridScrollUpPlan {
     },
 }
 
+/// Effects of changing the logical message-grid position.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct MessageGridPositionUpdate {
+    publish: bool,
+    view_row_offset: Option<i32>,
+}
+
 /// C callback used to publish a message-grid position.
 type CMessageGridPositionEmitter = unsafe extern "C" fn(row: libc::c_int, scrolled: bool);
 
@@ -561,6 +568,16 @@ impl ScreenGrid {
     fn release_message(&mut self) {
         self.release_storage();
         self.throttled = false;
+    }
+
+    /// Determines the externally visible effects of positioning this message
+    /// grid.
+    fn update_message_position(&self, row: i32) -> MessageGridPositionUpdate {
+        assert!(row >= 0, "message-grid position must be nonnegative");
+        MessageGridPositionUpdate {
+            publish: !self.throttled,
+            view_row_offset: self.is_allocated().then_some(-row),
+        }
     }
 
     /// Starts one upward message-grid scroll.
@@ -4218,6 +4235,53 @@ pub unsafe extern "C" fn grid_release_message(grid: *mut CScreenGrid) {
     grid.release_message();
 }
 
+/// Updates the message-grid position and its legacy adjusted view.
+///
+/// The position callback and view mutation occur only after the grid guard has
+/// restored ownership to the C representation.
+///
+/// Returns whether the position was published immediately.
+///
+/// # Safety
+///
+/// `grid` must point to a valid, exclusively accessible `CScreenGrid`. Its
+/// buffers must satisfy the ownership and layout requirements of `ScreenGrid`.
+/// `view` must point to a valid, exclusively accessible `CGridView`.
+/// `emit_position` must remain callable for the duration of this operation.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn grid_set_message_position(
+    grid: *mut CScreenGrid,
+    view: *mut CGridView,
+    row: libc::c_int,
+    scrolled: bool,
+    emit_position: CMessageGridPositionEmitter,
+) -> bool {
+    if grid.is_null() || view.is_null() {
+        return false;
+    }
+    let update = {
+        // SAFETY: The caller transfers exclusive ownership of the grid and
+        // its allocations to the guard for the duration of this operation.
+        let grid = unsafe { ScreenGridGuard::take(grid) };
+        grid.update_message_position(row)
+    };
+
+    if update.publish {
+        // SAFETY: The caller guarantees that the callback is valid. The grid
+        // guard was dropped before this callback can reenter editor code.
+        unsafe {
+            emit_position(row, scrolled);
+        }
+    }
+    if let Some(row_offset) = update.view_row_offset {
+        // SAFETY: The caller guarantees exclusive access to a valid view.
+        unsafe {
+            (*view).row_offset = row_offset;
+        }
+    }
+    update.publish
+}
+
 /// Scrolls the message grid upward by one row.
 ///
 /// Position callbacks and scroll events are emitted only after the grid guard
@@ -5123,6 +5187,39 @@ mod tests {
         assert!(!scrolled);
         assert!(clear_first_row);
         assert!(grid.throttled);
+    }
+
+    #[test]
+    fn message_position_update_controls_publication_and_view_offset() {
+        let mut line_buffer = LineBuffer::new(3);
+        let mut grid = ScreenGrid::new(2, 3, true, &mut line_buffer);
+
+        assert_eq!(
+            grid.update_message_position(2),
+            MessageGridPositionUpdate {
+                publish: true,
+                view_row_offset: Some(-2),
+            }
+        );
+
+        grid.throttled = true;
+        assert_eq!(
+            grid.update_message_position(1),
+            MessageGridPositionUpdate {
+                publish: false,
+                view_row_offset: Some(-1),
+            }
+        );
+
+        grid.throttled = false;
+        grid.release_storage();
+        assert_eq!(
+            grid.update_message_position(0),
+            MessageGridPositionUpdate {
+                publish: true,
+                view_row_offset: None,
+            }
+        );
     }
 
     #[test]
