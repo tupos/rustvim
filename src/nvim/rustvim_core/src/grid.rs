@@ -156,6 +156,7 @@ enum GridLifecycleChange {
     Resized,
     Released,
     Revalidated,
+    Invalidated,
 }
 
 /// Includes final NUL. MAX_MCO is no longer used, but at least 4*(MAX_MCO+1)+1=29
@@ -426,6 +427,34 @@ impl ScreenGrid {
         *self = Self::from_grid(self, size.height, size.width, true, true, line_buffer);
         self.initialize_as_default();
         GridLifecycleChange::Resized
+    }
+
+    /// Configures storage and redraw state for the popup-menu grid.
+    ///
+    /// Existing cells are copied during a resize only when the popup remains
+    /// valid at its compositor position.
+    fn configure_for_popup_menu(
+        &mut self,
+        size: GridSize,
+        contents_invalid: bool,
+        line_buffer: &mut LineBuffer,
+    ) -> GridLifecycleChange {
+        if !self.is_allocated() || self.rows != size.height || self.cols != size.width {
+            *self = Self::from_grid(
+                self,
+                size.height,
+                size.width,
+                false,
+                !contents_invalid,
+                line_buffer,
+            );
+            GridLifecycleChange::Resized
+        } else if contents_invalid {
+            self.invalidate();
+            GridLifecycleChange::Invalidated
+        } else {
+            GridLifecycleChange::Unchanged
+        }
     }
 
     /// Reports whether this grid currently owns cell storage.
@@ -3841,6 +3870,38 @@ pub unsafe extern "C" fn grid_configure_default(
     grid.configure_as_default(size, &mut line_buffer) == GridLifecycleChange::Resized
 }
 
+/// Applies the complete resize or invalidation transition for the popup-menu
+/// grid.
+///
+/// Returns whether storage was allocated or resized.
+///
+/// # Safety
+///
+/// `grid` must point to a valid, exclusively accessible `CScreenGrid`. Any
+/// existing buffers and dimensions must satisfy the ownership and layout
+/// requirements of `ScreenGrid`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn grid_configure_for_popup_menu(
+    grid: *mut CScreenGrid,
+    rows: libc::c_int,
+    columns: libc::c_int,
+    contents_invalid: bool,
+) -> bool {
+    if grid.is_null() {
+        return false;
+    }
+    let Some(size) = GridSize::try_new(rows, columns) else {
+        return false;
+    };
+
+    let mut line_buffer = LineBufferGuard::acquire();
+    // SAFETY: The caller transfers exclusive ownership of the C grid and its
+    // allocations to the guard for the duration of this function.
+    let mut grid = unsafe { ScreenGridGuard::take(grid) };
+    grid.configure_for_popup_menu(size, contents_invalid, &mut line_buffer)
+        == GridLifecycleChange::Resized
+}
+
 /// Applies the complete allocation and validity transition for one window
 /// grid.
 ///
@@ -4545,6 +4606,51 @@ mod tests {
         );
         assert_eq!(
             grid.configure_as_default(GridSize::try_new(0, 3).unwrap(), &mut line_buffer,),
+            GridLifecycleChange::Unchanged
+        );
+    }
+
+    #[test]
+    fn popup_grid_resize_preserves_cells_when_position_is_valid() {
+        let mut line_buffer = LineBuffer::new(2);
+        let mut grid = ScreenGrid::new(1, 2, true, &mut line_buffer);
+        grid.handle = 9;
+        grid.chars[0] = schar_from_ascii('x');
+        grid.attrs[0] = 12;
+
+        let change = grid.configure_for_popup_menu(
+            GridSize::try_new(2, 3).unwrap(),
+            false,
+            &mut line_buffer,
+        );
+
+        assert_eq!(change, GridLifecycleChange::Resized);
+        assert_eq!(grid.handle, 9);
+        assert_eq!((grid.rows, grid.cols), (2, 3));
+        assert_eq!(grid.chars[0], schar_from_ascii('x'));
+        assert_eq!(grid.attrs[0], 12);
+        assert_eq!(grid.attrs[2], -1);
+    }
+
+    #[test]
+    fn popup_grid_configuration_invalidates_moved_contents() {
+        let mut line_buffer = LineBuffer::new(2);
+        let mut grid = ScreenGrid::new(1, 2, true, &mut line_buffer);
+        grid.chars[0] = schar_from_ascii('x');
+        grid.attrs.fill(12);
+
+        let change =
+            grid.configure_for_popup_menu(GridSize::try_new(1, 2).unwrap(), true, &mut line_buffer);
+
+        assert_eq!(change, GridLifecycleChange::Invalidated);
+        assert_eq!(grid.chars[0], schar_from_ascii('x'));
+        assert_eq!(grid.attrs, [-1, -1]);
+        assert_eq!(
+            grid.configure_for_popup_menu(
+                GridSize::try_new(1, 2).unwrap(),
+                false,
+                &mut line_buffer,
+            ),
             GridLifecycleChange::Unchanged
         );
     }

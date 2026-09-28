@@ -75,6 +75,8 @@ extern void grid_initialize_default(ScreenGrid *grid);
 extern bool grid_configure_default(ScreenGrid *grid, int rows, int columns);
 extern bool grid_configure_for_window(ScreenGrid *grid, int rows, int columns,
                                       bool use_dedicated_grid);
+extern bool grid_configure_for_popup_menu(ScreenGrid *grid, int rows, int columns,
+                                          bool contents_invalid);
 extern void grid_free(ScreenGrid *grid);
 extern void grid_free_all_mem(void);
 extern void grid_reset_dirty_columns(ScreenGrid *grid);

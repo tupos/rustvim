@@ -669,13 +669,11 @@ void pum_redraw(void)
   pum_invalid = false;
   must_redraw_pum = false;
 
-  if (!grid_is_allocated(&pum_grid) || pum_grid.rows != pum_height + border_width
-      || pum_grid.cols != grid_width + border_width) {
-    grid_alloc(&pum_grid, pum_height + border_width, grid_width + border_width,
-               !invalid_grid, false);
-    ui_call_grid_resize(pum_grid.handle, pum_grid.cols, pum_grid.rows);
-  } else if (invalid_grid) {
-    grid_invalidate(&pum_grid);
+  int grid_height = pum_height + border_width;
+  int grid_columns = grid_width + border_width;
+  if (grid_configure_for_popup_menu(
+        &pum_grid, grid_height, grid_columns, invalid_grid)) {
+    ui_call_grid_resize(pum_grid.handle, grid_columns, grid_height);
   }
   if (ui_has(kUIMultigrid)) {
     pum_pos_ui_flush(true);
