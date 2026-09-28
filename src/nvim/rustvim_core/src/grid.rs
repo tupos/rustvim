@@ -632,6 +632,23 @@ impl ScreenGrid {
         self.clear_row(0, width, false);
     }
 
+    /// Clears message rows before redrawing the screen and ends throttling.
+    fn prepare_message_redraw(&mut self, rows_to_clear: usize, valid_rows: usize) {
+        if self.is_allocated() {
+            let row_count = std::cmp::min(
+                rows_to_clear,
+                usize::try_from(self.rows)
+                    .expect("allocated message-grid height must be nonnegative"),
+            );
+            let width = usize::try_from(self.cols)
+                .expect("allocated message-grid width must be nonnegative");
+            for row in 0..row_count {
+                self.clear_row(row, width, row < valid_rows);
+            }
+        }
+        self.throttled = false;
+    }
+
     /// Finishes one throttled message-grid update.
     ///
     /// Cell payloads are copied into owned commands so they remain valid after
@@ -4355,6 +4372,33 @@ pub unsafe extern "C" fn grid_scroll_message_up(
     started_throttling
 }
 
+/// Clears message-grid rows in preparation for a screen redraw.
+///
+/// # Safety
+///
+/// `grid` must point to a valid, exclusively accessible `CScreenGrid`. Its
+/// buffers must satisfy the ownership and layout requirements of `ScreenGrid`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn grid_prepare_message_redraw(
+    grid: *mut CScreenGrid,
+    rows_to_clear: libc::c_int,
+    valid_rows: libc::c_int,
+) {
+    if grid.is_null() {
+        return;
+    }
+    let (Ok(rows_to_clear), Ok(valid_rows)) =
+        (usize::try_from(rows_to_clear), usize::try_from(valid_rows))
+    else {
+        return;
+    };
+
+    // SAFETY: The caller transfers exclusive ownership of the grid and its
+    // allocations to the guard for the duration of this operation.
+    let mut grid = unsafe { ScreenGridGuard::take(grid) };
+    grid.prepare_message_redraw(rows_to_clear, valid_rows);
+}
+
 /// Flushes pending throttled message-grid scrolling and row updates.
 ///
 /// The message-position callback and UI commands are emitted only after the
@@ -5225,6 +5269,33 @@ mod tests {
                 view_row_offset: None,
             }
         );
+    }
+
+    #[test]
+    fn preparing_message_redraw_clears_rows_with_expected_validity() {
+        let mut line_buffer = LineBuffer::new(2);
+        let mut grid = ScreenGrid::new(3, 2, true, &mut line_buffer);
+        grid.chars.fill(schar_from_ascii('x'));
+        grid.attrs.fill(7);
+        grid.vcols.fill(4);
+        grid.throttled = true;
+
+        grid.prepare_message_redraw(2, 1);
+
+        assert!(!grid.throttled);
+        assert_eq!(
+            grid.chars,
+            [
+                schar_from_ascii(' '),
+                schar_from_ascii(' '),
+                schar_from_ascii(' '),
+                schar_from_ascii(' '),
+                schar_from_ascii('x'),
+                schar_from_ascii('x'),
+            ]
+        );
+        assert_eq!(grid.attrs, [0, 0, -1, -1, 7, 7]);
+        assert_eq!(grid.vcols, [-1, -1, -1, -1, 4, 4]);
     }
 
     #[test]

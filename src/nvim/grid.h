@@ -105,6 +105,8 @@ extern bool grid_set_message_position(ScreenGrid *grid, GridView *view, int row,
 extern bool grid_scroll_message_up(ScreenGrid *grid, int current_position,
                                    bool enable_throttling, bool zero_cmdheight,
                                    MessageGridPositionEmitter set_position);
+extern void grid_prepare_message_redraw(ScreenGrid *grid, int rows_to_clear,
+                                        int valid_rows);
 extern void grid_flush_message_scroll(ScreenGrid *grid, MessageGridScrollFlushRequest request,
                                       MessageGridPositionEmitter emit_position);
 extern void grid_free(ScreenGrid *grid);

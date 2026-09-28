@@ -497,13 +497,7 @@ int update_screen(void)
   if (msg_scrolled || msg_grid_invalid) {
     clear_cmdline = true;
     int valid = MAX(Rows - msg_scrollsize(), 0);
-    if (grid_is_allocated(&msg_grid)) {
-      // non-displayed part of msg_grid is considered invalid.
-      for (int i = 0; i < MIN(msg_scrollsize(), msg_grid.rows); i++) {
-        grid_clear_row(&msg_grid, i, msg_grid.cols, i < p_ch);
-      }
-    }
-    msg_grid.throttled = false;
+    grid_prepare_message_redraw(&msg_grid, msg_scrollsize(), (int)p_ch);
     bool was_invalidated = false;
 
     // UPD_CLEAR is already handled
