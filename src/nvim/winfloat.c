@@ -188,6 +188,38 @@ int win_border_width(win_T *wp)
   return wp->w_border_adj[1] + wp->w_border_adj[3];
 }
 
+/// Draws a grid border using floating-window configuration.
+void win_grid_draw_border(ScreenGrid *grid, const WinConfig *config,
+                          const int *adjustments, int winblend,
+                          const int *highlight_attributes, int normal_highlight)
+{
+  const int *active_hl_attr =
+    highlight_attributes == NULL ? hl_attr_active : highlight_attributes;
+  GridBorderConfig border = {
+    .chars = &config->border_chars[0][0],
+    .attrs = config->border_attr,
+    .title = config->title,
+    .title_pos = config->title_pos,
+    .title_chunks = config->title_chunks,
+    .title_width = config->title_width,
+    .title_attr = active_hl_attr[HLF_BTITLE],
+    .footer = config->footer,
+    .footer_pos = config->footer_pos,
+    .footer_chunks = config->footer_chunks,
+    .footer_width = config->footer_width,
+    .footer_attr = active_hl_attr[HLF_BFOOTER],
+  };
+  grid_draw_border(grid, &border, adjustments, winblend, normal_highlight);
+}
+
+/// Draws the border configured for a floating window.
+void win_float_draw_border(win_T *wp)
+{
+  win_grid_draw_border(&wp->w_grid_alloc, &wp->w_config, wp->w_border_adj,
+                       (int)wp->w_p_winbl, wp->w_ns_hl_attr,
+                       wp->w_hl_attr_normal);
+}
+
 void win_config_float(win_T *wp, WinConfig fconfig)
 {
   // Process statusline changes before applying new height from config

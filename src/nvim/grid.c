@@ -80,25 +80,3 @@ void win_grid_alloc(win_T *wp)
     ui_check_cursor_grid(grid_allocated->handle);
   }
 }
-
-/// draw border on floating window grid
-void grid_draw_border(ScreenGrid *grid, WinConfig *config, int *adj, int winbl, int *hl_attr,
-                      int win_hl_attr_normal)
-{
-  const int *active_hl_attr = hl_attr == NULL ? hl_attr_active : hl_attr;
-  GridBorderConfig border = {
-    .chars = &config->border_chars[0][0],
-    .attrs = config->border_attr,
-    .title = config->title,
-    .title_pos = config->title_pos,
-    .title_chunks = config->title_chunks,
-    .title_width = config->title_width,
-    .title_attr = active_hl_attr[HLF_BTITLE],
-    .footer = config->footer,
-    .footer_pos = config->footer_pos,
-    .footer_chunks = config->footer_chunks,
-    .footer_width = config->footer_width,
-    .footer_attr = active_hl_attr[HLF_BFOOTER],
-  };
-  grid_draw_border_impl(grid, &border, adj, winbl, win_hl_attr_normal);
-}

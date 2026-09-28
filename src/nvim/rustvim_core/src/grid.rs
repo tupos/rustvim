@@ -2928,7 +2928,7 @@ pub unsafe extern "C" fn grid_clear(
 /// line buffer must be initialized, and this function must run on Neovim's
 /// main thread.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn grid_draw_border_impl(
+pub unsafe extern "C" fn grid_draw_border(
     grid: *mut CScreenGrid,
     config: *const CGridBorderConfig,
     adjustments: *const libc::c_int,

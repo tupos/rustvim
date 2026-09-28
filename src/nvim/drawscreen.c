@@ -121,6 +121,7 @@
 #include "nvim/version.h"
 #include "nvim/vim_defs.h"
 #include "nvim/window.h"
+#include "nvim/winfloat.h"
 
 /// corner value flags for hsep_connected and vsep_connected
 typedef enum {
@@ -648,8 +649,7 @@ int update_screen(void)
     win_grid_alloc(wp);
 
     if (wp->w_redr_border || wp->w_redr_type >= UPD_NOT_VALID) {
-      grid_draw_border(&wp->w_grid_alloc, &wp->w_config, wp->w_border_adj, (int)wp->w_p_winbl,
-                       wp->w_ns_hl_attr, wp->w_hl_attr_normal);
+      win_float_draw_border(wp);
     }
 
     if (wp->w_redr_type != 0) {

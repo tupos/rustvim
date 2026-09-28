@@ -176,8 +176,8 @@ extern void grid_line_flush_if_valid_row(void);
 extern void grid_clear(GridView *grid, int start_row, int end_row, int start_col, int end_col, int attr);
 extern void grid_put_window_line(const GridView *view,
                                  const GridLineSubmissionConfig *config);
-extern void grid_draw_border_impl(ScreenGrid *grid, const GridBorderConfig *config, const int *adj,
-                                  int winbl, int win_hl_attr_normal);
+extern void grid_draw_border(ScreenGrid *grid, const GridBorderConfig *config, const int *adj,
+                             int winbl, int win_hl_attr_normal);
 
 extern void grid_assign_handle(ScreenGrid *grid);
 
