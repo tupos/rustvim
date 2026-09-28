@@ -2658,33 +2658,19 @@ void msg_scroll_up(bool may_throttle, bool zerocmd)
 /// redraw_later code paths.
 void msg_scroll_flush(void)
 {
-  if (msg_grid.throttled) {
-    msg_grid.throttled = false;
-    int pos_delta = msg_grid_pos_at_flush - msg_grid_pos;
-    assert(pos_delta >= 0);
-    int delta = MIN(msg_scrolled - msg_scrolled_at_flush, msg_grid.rows);
-
-    if (pos_delta > 0) {
-      ui_ext_msg_set_pos(msg_grid_pos, true);
-    }
-
-    int to_scroll = delta - pos_delta - msg_grid_scroll_discount;
-    assert(to_scroll >= 0);
-
-    // TODO(bfredl): msg_grid_pos should be 0 already when starting scrolling
-    // but this sometimes fails in "headless" message printing.
-    if (to_scroll > 0 && msg_grid_pos == 0) {
-      ui_call_grid_scroll(msg_grid.handle, 0, Rows, 0, Columns, to_scroll, 0);
-    }
-
-    for (int i = MAX(Rows - MAX(delta, 1), 0); i < Rows; i++) {
-      int row = i - msg_grid_pos;
-      assert(row >= 0);
-      int dirty_col = grid_take_dirty_column(&msg_grid, row);
-      ui_line(&msg_grid, row, false, 0, dirty_col, msg_grid.cols,
-              HL_ATTR(HLF_MSG), false);
-    }
-  }
+  grid_flush_message_scroll(
+    &msg_grid,
+    (MessageGridScrollFlushRequest){
+      .position = msg_grid_pos,
+      .position_at_last_flush = msg_grid_pos_at_flush,
+      .scrolled_lines = msg_scrolled,
+      .scrolled_lines_at_last_flush = msg_scrolled_at_flush,
+      .scroll_discount = msg_grid_scroll_discount,
+      .screen_rows = Rows,
+      .screen_columns = Columns,
+      .clear_attribute = HL_ATTR(HLF_MSG),
+    },
+    ui_ext_msg_set_pos);
   msg_scrolled_at_flush = msg_scrolled;
   msg_grid_scroll_discount = 0;
   msg_grid_pos_at_flush = msg_grid_pos;

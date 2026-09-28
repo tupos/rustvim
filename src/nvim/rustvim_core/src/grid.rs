@@ -165,6 +165,47 @@ enum MessageGridTransition {
     ReleaseRequired,
 }
 
+/// Message-scroll counters captured when pending output is flushed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct MessageScrollState {
+    position: i32,
+    position_at_last_flush: i32,
+    scrolled_lines: i32,
+    scrolled_lines_at_last_flush: i32,
+    scroll_discount: i32,
+}
+
+/// Validated input for flushing pending message-grid output.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct MessageGridScrollFlushRequest {
+    scroll: MessageScrollState,
+    screen_size: GridSize,
+    clear_attribute: VimSAttrT,
+}
+
+/// Owned output produced by one message-grid flush.
+struct MessageGridScrollFlushPlan {
+    target: GridOutputTarget,
+    position_update: Option<i32>,
+    scroll: Option<UiCommand<LocalGridSpace>>,
+    lines: Vec<OwnedRawLineCommand>,
+}
+
+impl MessageGridScrollFlushPlan {
+    /// Creates a flush with no pending output.
+    fn empty(target: GridOutputTarget) -> Self {
+        Self {
+            target,
+            position_update: None,
+            scroll: None,
+            lines: Vec::new(),
+        }
+    }
+}
+
+/// C callback used to publish a message-grid position.
+type CMessageGridPositionEmitter = unsafe extern "C" fn(row: libc::c_int, scrolled: bool);
+
 /// State transition performed while configuring one window grid.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum GridLifecycleChange {
@@ -505,6 +546,88 @@ impl ScreenGrid {
     fn release_message(&mut self) {
         self.release_storage();
         self.throttled = false;
+    }
+
+    /// Finishes one throttled message-grid update.
+    ///
+    /// Cell payloads are copied into owned commands so they remain valid after
+    /// the grid borrow ends and while UI callbacks are running.
+    fn flush_message_scroll(
+        &mut self,
+        request: MessageGridScrollFlushRequest,
+    ) -> MessageGridScrollFlushPlan {
+        let target = GridOutputTarget::new(self.id(), self.cols);
+        let mut plan = MessageGridScrollFlushPlan::empty(target);
+        if !self.throttled {
+            return plan;
+        }
+        self.throttled = false;
+
+        let scroll = request.scroll;
+        assert!(
+            scroll.position >= 0 && scroll.position_at_last_flush >= scroll.position,
+            "message-grid positions must be ordered and nonnegative"
+        );
+        let position_delta = scroll.position_at_last_flush - scroll.position;
+        let scrolled_delta = scroll
+            .scrolled_lines
+            .checked_sub(scroll.scrolled_lines_at_last_flush)
+            .expect("message scroll delta overflow");
+        assert!(
+            scrolled_delta >= 0,
+            "message scroll count must not move backwards"
+        );
+        let line_delta = std::cmp::min(scrolled_delta, self.rows);
+
+        if position_delta > 0 {
+            plan.position_update = Some(scroll.position);
+        }
+
+        let rows_to_scroll = line_delta
+            .checked_sub(position_delta)
+            .and_then(|rows| rows.checked_sub(scroll.scroll_discount))
+            .expect("message scroll calculation overflow");
+        assert!(
+            rows_to_scroll >= 0,
+            "message scroll discount exceeds pending output"
+        );
+
+        // The position should normally already be zero when scrolling begins,
+        // but headless message output does not always preserve that invariant.
+        if rows_to_scroll > 0 && scroll.position == 0 {
+            let region =
+                GridRegion::try_new(0..request.screen_size.height, 0..request.screen_size.width)
+                    .expect("validated screen dimensions form a grid region");
+            plan.scroll = Some(UiCommand::GridScroll {
+                region,
+                delta: GridDelta::new(rows_to_scroll, 0),
+            });
+        }
+
+        let first_screen_row = request
+            .screen_size
+            .height
+            .saturating_sub(line_delta.max(1))
+            .max(0);
+        for screen_row in first_screen_row..request.screen_size.height {
+            let row = screen_row - scroll.position;
+            assert!(
+                0 <= row && row < self.rows,
+                "dirty message row must belong to the message grid"
+            );
+            let dirty_column = self.take_dirty_column(row as usize).unwrap_or_default();
+            plan.lines.push(ui::ui_line_r(
+                self,
+                row,
+                false,
+                0,
+                dirty_column,
+                self.cols,
+                request.clear_attribute,
+                false,
+            ));
+        }
+        plan
     }
 
     /// Reports whether this grid currently owns cell storage.
@@ -2799,6 +2922,20 @@ pub enum CMessageGridTransition {
     ReleaseRequired = 2,
 }
 
+/// C representation of the inputs needed to flush message-grid output.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct CMessageGridScrollFlushRequest {
+    position: libc::c_int,
+    position_at_last_flush: libc::c_int,
+    scrolled_lines: libc::c_int,
+    scrolled_lines_at_last_flush: libc::c_int,
+    scroll_discount: libc::c_int,
+    screen_rows: libc::c_int,
+    screen_columns: libc::c_int,
+    clear_attribute: VimSAttrT,
+}
+
 impl From<MessageGridTransition> for CMessageGridTransition {
     fn from(transition: MessageGridTransition) -> Self {
         match transition {
@@ -4027,6 +4164,65 @@ pub unsafe extern "C" fn grid_release_message(grid: *mut CScreenGrid) {
     grid.release_message();
 }
 
+/// Flushes pending throttled message-grid scrolling and row updates.
+///
+/// The message-position callback and UI commands are emitted only after the
+/// grid guard has restored ownership to the C representation.
+///
+/// # Safety
+///
+/// `grid` must point to a valid, exclusively accessible `CScreenGrid`. Its
+/// buffers must satisfy the ownership and layout requirements of `ScreenGrid`.
+/// `emit_position` must remain callable for the duration of this operation.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn grid_flush_message_scroll(
+    grid: *mut CScreenGrid,
+    request: CMessageGridScrollFlushRequest,
+    emit_position: CMessageGridPositionEmitter,
+) {
+    if grid.is_null() {
+        return;
+    }
+    let Some(screen_size) = GridSize::try_new(request.screen_rows, request.screen_columns) else {
+        return;
+    };
+    let request = MessageGridScrollFlushRequest {
+        scroll: MessageScrollState {
+            position: request.position,
+            position_at_last_flush: request.position_at_last_flush,
+            scrolled_lines: request.scrolled_lines,
+            scrolled_lines_at_last_flush: request.scrolled_lines_at_last_flush,
+            scroll_discount: request.scroll_discount,
+        },
+        screen_size,
+        clear_attribute: request.clear_attribute,
+    };
+    let plan = {
+        // SAFETY: The caller transfers exclusive ownership of the grid and
+        // its allocations to the guard for the duration of this operation.
+        let mut grid = unsafe { ScreenGridGuard::take(grid) };
+        grid.flush_message_scroll(request)
+    };
+
+    let MessageGridScrollFlushPlan {
+        target,
+        position_update,
+        scroll,
+        lines,
+    } = plan;
+    if let Some(row) = position_update {
+        // SAFETY: The caller guarantees that the callback is valid. The grid
+        // guard was dropped before this callback can reenter editor code.
+        unsafe {
+            emit_position(row, true);
+        }
+    }
+    if let Some(scroll) = scroll {
+        target.emit(scroll);
+    }
+    target.emit_lines(lines);
+}
+
 /// Applies the complete allocation and validity transition for one window
 /// grid.
 ///
@@ -4098,30 +4294,6 @@ pub unsafe extern "C" fn grid_scroll_dirty_columns(grid: *mut CScreenGrid) {
     // into the guard for the duration of this function.
     let mut grid = unsafe { ScreenGridGuard::take(grid) };
     grid.scroll_dirty_columns();
-}
-
-/// Returns and clears the dirty column for one row.
-///
-/// # Safety
-///
-/// `grid` must point to a valid, exclusively accessible `CScreenGrid`. Its
-/// buffers must satisfy the ownership and layout requirements of `ScreenGrid`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn grid_take_dirty_column(
-    grid: *mut CScreenGrid,
-    row: libc::c_int,
-) -> VimDirtyColT {
-    if grid.is_null() {
-        return 0;
-    }
-
-    // SAFETY: The caller transfers exclusive ownership of the grid buffers
-    // into the guard for the duration of this function.
-    let mut grid = unsafe { ScreenGridGuard::take(grid) };
-    usize::try_from(row)
-        .ok()
-        .and_then(|row| grid.take_dirty_column(row))
-        .unwrap_or_default()
 }
 
 /// # Safety
@@ -4855,6 +5027,49 @@ mod tests {
         assert_eq!(dirty_columns.take(0), Some(3));
         assert_eq!(&*dirty_columns.columns, [0, 0, 0]);
         assert_eq!(dirty_columns.take(3), None);
+    }
+
+    #[test]
+    fn message_scroll_flush_owns_pending_output_and_resets_dirty_rows() {
+        let mut line_buffer = LineBuffer::new(4);
+        let mut grid = ScreenGrid::new(3, 4, true, &mut line_buffer);
+        grid.handle = 7;
+        grid.reset_dirty_columns();
+        grid.throttled = true;
+        grid.mark_dirty_column(1, 3);
+        grid.mark_dirty_column(2, 2);
+
+        let plan = grid.flush_message_scroll(MessageGridScrollFlushRequest {
+            scroll: MessageScrollState {
+                position: 0,
+                position_at_last_flush: 2,
+                scrolled_lines: 3,
+                scrolled_lines_at_last_flush: 0,
+                scroll_discount: 0,
+            },
+            screen_size: GridSize::try_new(3, 4).unwrap(),
+            clear_attribute: 9,
+        });
+
+        assert!(!grid.throttled);
+        assert_eq!(plan.position_update, Some(0));
+        let scroll = plan.scroll.unwrap();
+        let UiCommand::GridScroll { region, delta } = scroll else {
+            panic!("message flush must produce a grid-scroll command");
+        };
+        assert_eq!(region, GridRegion::try_new(0..3, 0..4).unwrap());
+        assert_eq!(delta, GridDelta::new(1, 0));
+        assert_eq!(
+            plan.lines
+                .iter()
+                .map(|line| line.columns.clone())
+                .collect::<Vec<_>>(),
+            [0..0, 0..3, 0..2]
+        );
+        assert_eq!(
+            grid.dirty_columns.as_ref().map(|columns| &*columns.columns),
+            Some([0, 0, 0].as_slice())
+        );
     }
 
     #[test]

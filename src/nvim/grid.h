@@ -75,6 +75,19 @@ typedef enum {
   kMessageGridReleaseRequired = 2,
 } MessageGridTransition;
 
+typedef struct {
+  int position;
+  int position_at_last_flush;
+  int scrolled_lines;
+  int scrolled_lines_at_last_flush;
+  int scroll_discount;
+  int screen_rows;
+  int screen_columns;
+  sattr_T clear_attribute;
+} MessageGridScrollFlushRequest;
+
+typedef void (*MessageGridPositionEmitter)(int row, bool scrolled);
+
 extern void grid_alloc(ScreenGrid *grid, int rows, int columns, bool copy, bool valid);
 extern bool grid_is_allocated(const ScreenGrid *grid);
 extern void grid_initialize_default(ScreenGrid *grid);
@@ -86,11 +99,12 @@ extern bool grid_configure_for_popup_menu(ScreenGrid *grid, int rows, int column
 extern MessageGridTransition grid_prepare_for_messages(ScreenGrid *grid, int rows, int columns,
                                                        bool should_allocate);
 extern void grid_release_message(ScreenGrid *grid);
+extern void grid_flush_message_scroll(ScreenGrid *grid, MessageGridScrollFlushRequest request,
+                                      MessageGridPositionEmitter emit_position);
 extern void grid_free(ScreenGrid *grid);
 extern void grid_free_all_mem(void);
 extern void grid_reset_dirty_columns(ScreenGrid *grid);
 extern void grid_scroll_dirty_columns(ScreenGrid *grid);
-extern int grid_take_dirty_column(ScreenGrid *grid, int row);
 extern void grid_clear_row(ScreenGrid *grid, int row, int width, bool valid);
 extern ScreenGrid *grid_adjust(GridView *grid, int *row_off, int *col_off);
 extern void grid_invalidate(ScreenGrid *grid);
