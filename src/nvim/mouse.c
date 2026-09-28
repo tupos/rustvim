@@ -1860,43 +1860,41 @@ static win_T *mouse_find_grid_win(int *gridp, int *rowp, int *colp)
       return wp;
     }
   } else if (*gridp == 0) {
-    int grid_row;
-    int grid_col;
-    ScreenGrid *grid = ui_comp_find_grid_at_coord(
-      *rowp, *colp, true, &grid_row, &grid_col);
-    if (grid == NULL && ui_has(kUIMultigrid)) {
+    CompositorGridHit hit;
+    bool found = ui_comp_find_mouse_grid_at_coord(*rowp, *colp, &hit);
+    if (!found && ui_has(kUIMultigrid)) {
       FOR_ALL_WINDOWS_IN_TAB(wp, curtab) {
         ScreenGrid *window_grid = &wp->w_grid_alloc;
         if (wp->w_config.mouse
-            && ui_comp_grid_contains_at(
+            && ui_comp_grid_hit_at_coord(
               window_grid, wp->w_winrow, wp->w_wincol, *rowp, *colp,
-              &grid_row, &grid_col)) {
-          grid = window_grid;
+              &hit)) {
+          found = true;
           break;
         }
       }
     }
 
-    if (grid == &pum_grid) {
-      *gridp = grid->handle;
-      *rowp = grid_row;
-      *colp = grid_col;
+    if (found && hit.grid_handle == pum_grid.handle) {
+      *gridp = hit.grid_handle;
+      *rowp = hit.row;
+      *colp = hit.column;
       // The popup menu doesn't have a window, so return NULL
       return NULL;
-    } else {
-      FOR_ALL_WINDOWS_IN_TAB(wp, curtab) {
-        if (&wp->w_grid_alloc != grid) {
-          continue;
-        }
-        *gridp = grid->handle;
-        *rowp = grid_row - wp->w_grid.row_offset;
-        *colp = grid_col - wp->w_grid.col_offset;
+    }
+
+    if (found) {
+      win_T *wp = win_find_by_grid_handle(hit.grid_handle);
+      if (wp != NULL) {
+        *gridp = hit.grid_handle;
+        *rowp = hit.row - wp->w_grid.row_offset;
+        *colp = hit.column - wp->w_grid.col_offset;
         return wp;
       }
     }
 
-    // No grid found, return the default grid. With multigrid this happens for split separators for
-    // example.
+    // No grid found, return the default grid. With multigrid this happens for
+    // split separators, for example.
     *gridp = DEFAULT_GRID_HANDLE;
   }
   return NULL;

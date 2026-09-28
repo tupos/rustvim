@@ -25,9 +25,10 @@ use crate::{
 };
 #[cfg(test)]
 use ffi::{
-    apply_cursor_update_to_registered_grids, cursor_is_covered_by_registered_layers,
+    CCompositorGridHit, apply_cursor_update_to_registered_grids,
+    cursor_is_covered_by_registered_layers,
     grid_store::{LegacyGridStore, lock_compositor_grid_bindings},
-    place_grid_in_registered_layers, remove_registered_layer, ui_comp_find_grid_at_coord,
+    place_grid_in_registered_layers, remove_registered_layer, ui_comp_find_mouse_grid_at_coord,
     ui_comp_get_cell_at_coord, update_registered_layer_policy,
 };
 
@@ -103,9 +104,18 @@ impl<'grid> PositionedGrid<'grid> {
         })
     }
 
+    /// Returns this grid's identity and local coordinates for one contained
+    /// composed-screen position.
+    fn hit(self, point: ComposedPosition) -> Option<CompositorGridHit> {
+        Some(CompositorGridHit {
+            grid_id: self.grid.id(),
+            local_position: self.local_position(point)?,
+        })
+    }
+
     /// Reads the cell at one contained composed-screen position.
     fn cell(self, point: ComposedPosition) -> Option<GridCell> {
-        let position = self.local_position(point)?;
+        let position = self.hit(point)?.local_position;
         let row = usize::try_from(position.row).ok()?;
         let column = usize::try_from(position.column).ok()?;
         self.grid.cell(row, column)
@@ -2413,15 +2423,8 @@ impl<'grid> Layers<CompositorLayer<'grid>> {
         self.overlays.iter().rev().copied().find_map(|layer| {
             hit_test
                 .accepts(layer)
-                .then(|| {
-                    let grid = layer.positioned_grid();
-                    grid.local_position(point)
-                })
+                .then(|| layer.positioned_grid().hit(point))
                 .flatten()
-                .map(|local_position| CompositorGridHit {
-                    grid_id: layer.grid.id(),
-                    local_position,
-                })
         })
     }
 
@@ -4688,13 +4691,17 @@ mod tests {
     }
 
     #[test]
-    fn registered_hit_testing_returns_the_bound_c_grid() {
+    fn registered_hit_testing_returns_grid_identity_and_coordinates() {
         let default_grid = grid_with_size(4, 4);
         let mut overlay_grid = grid_with_size(2, 2);
         overlay_grid.chars[0] = schar_from_ascii('x');
         overlay_grid.attrs[0] = 7;
         overlay_grid.vcols[0] = 9;
         let overlay_grid_id = overlay_grid.id();
+        let expected_hit = CCompositorGridHit::from(CompositorGridHit {
+            grid_id: overlay_grid_id,
+            local_position: GridPosition::new(0, 0),
+        });
         let expected_cell = CGridCell::from(overlay_grid.cell(0, 0).unwrap());
 
         // SAFETY: Each conversion transfers its grid allocations to a
@@ -4710,25 +4717,23 @@ mod tests {
             // grids for the duration of the registered operations.
             let _registry = unsafe { register_test_compositor_layers(&cgrids) };
             set_registered_test_layer_origin(overlay_grid_id, ComposedPosition::new(1, 1));
-            set_registered_test_layer_mouse_input(overlay_grid_id, false);
-            let mut grid_row = -1;
-            let mut grid_column = -1;
+            let mut hit = CCompositorGridHit::default();
             let mut cell = CGridCell::default();
 
-            assert_eq!(
-                ui_comp_find_grid_at_coord(1, 1, false, &mut grid_row, &mut grid_column,),
-                overlay_pointer
-            );
-            assert_eq!((grid_row, grid_column), (0, 0));
-            assert!(
-                ui_comp_find_grid_at_coord(1, 1, true, &mut grid_row, &mut grid_column,).is_null()
-            );
+            set_registered_test_layer_mouse_input(overlay_grid_id, false);
+            // SAFETY: `hit` is valid writable storage for this call.
+            assert!(!unsafe { ui_comp_find_mouse_grid_at_coord(1, 1, &mut hit) });
             // SAFETY: `cell` is valid writable storage for this call.
             assert!(unsafe { ui_comp_get_cell_at_coord(1, 1, &mut cell) });
             assert_eq!(cell, expected_cell);
-            assert!(
-                ui_comp_find_grid_at_coord(0, 0, false, &mut grid_row, &mut grid_column,).is_null()
-            );
+
+            set_registered_test_layer_mouse_input(overlay_grid_id, true);
+            // SAFETY: `hit` is valid writable storage for this call.
+            assert!(unsafe { ui_comp_find_mouse_grid_at_coord(1, 1, &mut hit) });
+            assert_eq!(hit, expected_hit);
+
+            // SAFETY: `hit` is valid writable storage for this call.
+            assert!(!unsafe { ui_comp_find_mouse_grid_at_coord(0, 0, &mut hit) });
             // SAFETY: `cell` is valid writable storage for this call.
             assert!(!unsafe { ui_comp_get_cell_at_coord(0, 0, &mut cell) });
         }
@@ -4767,6 +4772,13 @@ mod tests {
         assert_eq!(
             positioned.local_position(ComposedPosition::new(5, 7)),
             Some(GridPosition::new(1, 2))
+        );
+        assert_eq!(
+            positioned.hit(ComposedPosition::new(5, 7)),
+            Some(CompositorGridHit {
+                grid_id: grid.id(),
+                local_position: GridPosition::new(1, 2),
+            })
         );
         assert_eq!(
             positioned.cell(ComposedPosition::new(5, 7)),

@@ -225,16 +225,6 @@ impl LegacyGridStore {
             .find_map(|layer| (layer.cgrid == cgrid).then_some(layer.grid.id()))
     }
 
-    /// Returns the transitional C pointer bound to one registered identity.
-    pub(in crate::ui_compositor) fn cgrid_by_id(
-        &self,
-        grid_id: GridId,
-    ) -> Option<*mut CScreenGrid> {
-        self.bindings
-            .get(&grid_id)
-            .map(|layer| layer.cgrid.as_ptr())
-    }
-
     /// Removes one temporary C binding after its layer is unregistered.
     pub(in crate::ui_compositor) fn remove_binding(
         &mut self,

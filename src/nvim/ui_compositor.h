@@ -8,6 +8,12 @@
 #include "nvim/types_defs.h"  // IWYU pragma: keep
 #include "nvim/ui_defs.h"  // IWYU pragma: keep
 
+typedef struct {
+  handle_T grid_handle;
+  int row;
+  int column;
+} CompositorGridHit;
+
 extern void ui_comp_init(void);
 extern void ui_comp_free_all_mem(void);
 extern void ui_comp_syn_init(void);
@@ -39,16 +45,15 @@ extern void ui_comp_msg_set_pos(
   Integer z_index, Integer compositor_index);
 extern bool ui_comp_get_cell_at_coord(
   int row, int column, GridCell *cell);
-extern ScreenGrid *ui_comp_find_grid_at_coord(
-  int row, int column, bool require_mouse_input,
-  int *grid_row, int *grid_column);
+extern bool ui_comp_find_mouse_grid_at_coord(
+  int row, int column, CompositorGridHit *hit);
 
 extern bool ui_comp_grid_get_cell_at(
   ScreenGrid *grid, int origin_row, int origin_column,
   int row, int column, GridCell *cell);
-extern bool ui_comp_grid_contains_at(
+extern bool ui_comp_grid_hit_at_coord(
   ScreenGrid *grid, int origin_row, int origin_column,
-  int row, int column, int *grid_row, int *grid_column);
+  int row, int column, CompositorGridHit *hit);
 
 extern bool ui_comp_grid_origin(Integer grid_handle, int *row, int *column);
 
