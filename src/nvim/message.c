@@ -2614,13 +2614,15 @@ bool msg_do_throttle(void)
 }
 
 /// Scroll the screen up one line for displaying the next message line.
-void msg_scroll_up(bool may_throttle, bool zerocmd)
+bool msg_scroll_up(bool may_throttle, bool zerocmd)
 {
   msg_did_scroll = true;
-  grid_scroll_message_up(&msg_grid, msg_grid_pos,
-                         may_throttle && msg_do_throttle(), zerocmd,
-                         msg_grid_set_pos);
+  bool started_throttling =
+    grid_scroll_message_up(&msg_grid, msg_grid_pos,
+                           may_throttle && msg_do_throttle(), zerocmd,
+                           msg_grid_set_pos);
   grid_clear(&msg_grid_adj, Rows - 1, Rows, 0, Columns, HL_ATTR(HLF_MSG));
+  return started_throttling;
 }
 
 /// Send throttled message output to UI clients
@@ -3168,14 +3170,13 @@ static bool do_more_prompt(int typed_char)
           msg_scrolled++;
         }
         while (toscroll > 0 && mp_last != NULL) {
-          if (msg_do_throttle() && !msg_grid.throttled) {
+          // scroll up, display line at bottom
+          if (msg_scroll_up(true, false)) {
             // Tricky: we redraw at one line higher than usual. Therefore
             // the non-flushed area is one line larger.
             msg_scrolled_at_flush--;
             msg_grid_scroll_discount++;
           }
-          // scroll up, display line at bottom
-          msg_scroll_up(true, false);
           inc_msg_scrolled();
           grid_clear(&msg_grid_adj, Rows - 2, Rows - 1, 0, Columns, HL_ATTR(HLF_MSG));
           mp_last = disp_sb_line(Rows - 2, mp_last);
