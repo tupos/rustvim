@@ -5,6 +5,7 @@ mod fold_column;
 mod line_buffer;
 mod line_submission;
 mod row;
+mod store;
 mod tabstops;
 mod virtual_text;
 
