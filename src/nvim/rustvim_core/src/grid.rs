@@ -40,7 +40,8 @@ pub use line_buffer::LineBuffer;
 use line_buffer::{LineTextRenderOptions, LineTextVirtualColumns};
 use line_submission::{LineSubmission, SmoothScrollMarker};
 pub(crate) use row::{GridRow, GridRowSegment};
-use store::{GridStoreResult, StoredGridGuard, lock_grid_store};
+pub(crate) use store::{GridStore, lock_grid_store};
+use store::{GridStoreResult, StoredGridGuard};
 use tabstops::TabStops;
 use virtual_text::{VirtualText, VirtualTextChunk, VirtualTextRenderOptions};
 
@@ -1705,7 +1706,7 @@ fn cgrid_address(cgrid: std::ptr::NonNull<CScreenGrid>) -> usize {
 }
 
 /// Resolves a C grid address when its grid has permanent Rust ownership.
-fn permanent_grid_id(cgrid: std::ptr::NonNull<CScreenGrid>) -> Option<GridId> {
+pub(crate) fn permanent_grid_id(cgrid: std::ptr::NonNull<CScreenGrid>) -> Option<GridId> {
     lock_permanent_grid_bindings()
         .get(&cgrid_address(cgrid))
         .copied()

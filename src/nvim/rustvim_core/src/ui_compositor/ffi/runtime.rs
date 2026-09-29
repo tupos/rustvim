@@ -13,7 +13,7 @@ use super::super::{
     CompositorDebugHighlights, CompositorRecomposeArea, CompositorRuntime,
     emit_compositor_debug_line, lock_compositor,
 };
-use super::grid_store::LegacyGridStore;
+use super::grid_store::CompositorGridAccess;
 
 unsafe extern "C" {
     static mut p_wd: OptInt;
@@ -89,7 +89,7 @@ impl CompositorRuntime {
             return;
         }
         let area = {
-            let Some(grid_store) = LegacyGridStore::try_take_registered() else {
+            let Some(grid_store) = CompositorGridAccess::try_take_registered() else {
                 return;
             };
             lock_compositor().clip_recompose_area(&grid_store, requested_area.clone())

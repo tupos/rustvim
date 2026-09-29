@@ -7,7 +7,9 @@ use std::{
     sync::{Mutex, MutexGuard},
 };
 
-use crate::grid::{CScreenGrid, GridId, ScreenGrid, ScreenGridGuard};
+use crate::grid::{
+    CScreenGrid, GridId, GridStore, ScreenGrid, ScreenGridGuard, lock_grid_store, permanent_grid_id,
+};
 
 use super::super::{CompositorError, CompositorResult, GridAccess};
 
@@ -59,24 +61,43 @@ impl CCompositorGridBindings {
     }
 }
 
-/// One temporary C pointer binding paired with its Rust grid owner.
+/// One C pointer binding and any required legacy ownership guard.
 struct GuardedCompositorLayer {
     cgrid: NonNull<CScreenGrid>,
-    grid: ScreenGridGuard,
+    legacy_grid: Option<ScreenGridGuard>,
 }
 
-/// Temporary Rust ownership of compositor layers received from C.
+/// Complete compositor access to permanent and transitional screen grids.
 ///
-/// Layer identity and ordering remain in the safe compositor. This boundary
-/// store contains only temporary C bindings. Each `ScreenGridGuard` restores
-/// its grid allocations when this collection is dropped.
-#[must_use = "dropping the layer guards restores ownership to the C grids"]
-pub(in crate::ui_compositor) struct LegacyGridStore {
+/// Permanently owned grids share one store borrow. Grids that have not yet
+/// migrated retain one temporary legacy guard each.
+#[must_use = "the access guard owns every compositor grid borrow"]
+pub(in crate::ui_compositor) struct CompositorGridAccess {
+    stored_grids: Option<MutexGuard<'static, GridStore>>,
     bindings: HashMap<GridId, GuardedCompositorLayer>,
 }
 
-impl LegacyGridStore {
-    /// Takes temporary ownership of all grids registered at the FFI boundary.
+impl CompositorGridAccess {
+    /// Creates access after validating every permanent binding.
+    fn try_from_bindings(bindings: HashMap<GridId, GuardedCompositorLayer>) -> Option<Self> {
+        let stored_grids = bindings
+            .values()
+            .any(|binding| binding.legacy_grid.is_none())
+            .then(lock_grid_store);
+        if let Some(store) = &stored_grids
+            && bindings.iter().any(|(grid_id, binding)| {
+                binding.legacy_grid.is_none() && store.grid(*grid_id).is_err()
+            })
+        {
+            return None;
+        }
+        Some(Self {
+            stored_grids,
+            bindings,
+        })
+    }
+
+    /// Borrows all grids registered at the compositor FFI boundary.
     pub(in crate::ui_compositor) fn try_take_registered() -> Option<Self> {
         let cgrids = {
             let bindings = lock_compositor_grid_bindings();
@@ -105,10 +126,17 @@ impl LegacyGridStore {
             return Some((grid_store, grid_id, true));
         }
 
-        // SAFETY: The caller transfers ownership of the unregistered
-        // candidate for the lifetime of the returned guard collection.
-        let grid = unsafe { ScreenGridGuard::take(candidate.as_ptr()) };
-        let grid_id = grid.id();
+        let (grid_id, legacy_grid) = if let Some(grid_id) = permanent_grid_id(candidate) {
+            let stored_grids = grid_store.stored_grids.get_or_insert_with(lock_grid_store);
+            stored_grids.grid(grid_id).ok()?;
+            (grid_id, None)
+        } else {
+            // SAFETY: The caller transfers ownership of the unregistered
+            // candidate for the lifetime of the returned access guard.
+            let grid = unsafe { ScreenGridGuard::take(candidate.as_ptr()) };
+            let grid_id = grid.id();
+            (grid_id, Some(grid))
+        };
         if grid_store.bindings.contains_key(&grid_id) {
             return None;
         }
@@ -119,7 +147,7 @@ impl LegacyGridStore {
                 grid_id,
                 GuardedCompositorLayer {
                     cgrid: candidate,
-                    grid,
+                    legacy_grid,
                 },
             )
             .is_none()
@@ -133,9 +161,10 @@ impl LegacyGridStore {
     /// # Safety
     ///
     /// If `layer_count` is nonzero, `layer_grids` must point to that many
-    /// readable grid pointers. Every non-null grid must be valid, distinct,
-    /// exclusively accessible, and satisfy the ownership and layout
-    /// requirements of `ScreenGrid`.
+    /// readable grid pointers. Every pointer must be distinct and identify
+    /// either a permanently stored grid or a valid, exclusively accessible
+    /// legacy grid satisfying the ownership and layout requirements of
+    /// `ScreenGrid`.
     #[cfg(test)]
     pub(in crate::ui_compositor) unsafe fn try_take_in_binding_order(
         layer_grids: *const *mut CScreenGrid,
@@ -144,25 +173,26 @@ impl LegacyGridStore {
         // SAFETY: The caller satisfies the documented pointer and grid
         // ownership requirements.
         let (layer_ids, bindings) = unsafe { Self::take_bindings(layer_grids, layer_count) }?;
-        Some((Self { bindings }, layer_ids))
+        Some((Self::try_from_bindings(bindings)?, layer_ids))
     }
 
-    /// Takes temporary ownership of the supplied distinct C grids.
+    /// Borrows the supplied distinct permanent and legacy grids.
     unsafe fn try_take(layer_grids: *const *mut CScreenGrid, layer_count: usize) -> Option<Self> {
         // SAFETY: The caller satisfies the documented pointer and grid
         // ownership requirements.
         let (_, bindings) = unsafe { Self::take_bindings(layer_grids, layer_count) }?;
-        Some(Self { bindings })
+        Self::try_from_bindings(bindings)
     }
 
-    /// Validates C bindings and takes temporary ownership of their grids.
+    /// Validates C bindings and takes ownership of any legacy grids.
     ///
     /// # Safety
     ///
     /// If `layer_count` is nonzero, `layer_grids` must point to that many
-    /// readable grid pointers. Every non-null grid must be valid, distinct,
-    /// exclusively accessible, and satisfy the ownership and layout
-    /// requirements of `ScreenGrid`.
+    /// readable grid pointers. Every pointer must be distinct and identify
+    /// either a permanently stored grid or a valid, exclusively accessible
+    /// legacy grid satisfying the ownership and layout requirements of
+    /// `ScreenGrid`.
     unsafe fn take_bindings(
         layer_grids: *const *mut CScreenGrid,
         layer_count: usize,
@@ -189,15 +219,20 @@ impl LegacyGridStore {
         let guarded_layers = cgrids
             .into_iter()
             .map(|cgrid| {
-                // SAFETY: Null and duplicate pointers were rejected, and the
-                // caller transfers ownership for this operation.
-                let grid = unsafe { ScreenGridGuard::take(cgrid.as_ptr()) };
-                GuardedCompositorLayer { cgrid, grid }
+                let (grid_id, legacy_grid) = if let Some(grid_id) = permanent_grid_id(cgrid) {
+                    (grid_id, None)
+                } else {
+                    // SAFETY: Null and duplicate pointers were rejected, and
+                    // the caller transfers legacy ownership for this operation.
+                    let grid = unsafe { ScreenGridGuard::take(cgrid.as_ptr()) };
+                    (grid.id(), Some(grid))
+                };
+                (grid_id, GuardedCompositorLayer { cgrid, legacy_grid })
             })
             .collect::<Vec<_>>();
         let layer_ids = guarded_layers
             .iter()
-            .map(|layer| layer.grid.id())
+            .map(|(grid_id, _)| *grid_id)
             .collect::<Vec<_>>();
         if layer_ids
             .iter()
@@ -206,10 +241,7 @@ impl LegacyGridStore {
         {
             return None;
         }
-        let bindings = guarded_layers
-            .into_iter()
-            .map(|layer| (layer.grid.id(), layer))
-            .collect();
+        let bindings = guarded_layers.into_iter().collect();
 
         Some((layer_ids, bindings))
     }
@@ -221,8 +253,8 @@ impl LegacyGridStore {
     ) -> Option<GridId> {
         let cgrid = NonNull::new(cgrid)?;
         self.bindings
-            .values()
-            .find_map(|layer| (layer.cgrid == cgrid).then_some(layer.grid.id()))
+            .iter()
+            .find_map(|(grid_id, layer)| (layer.cgrid == cgrid).then_some(*grid_id))
     }
 
     /// Removes one temporary C binding after its layer is unregistered.
@@ -247,9 +279,12 @@ impl LegacyGridStore {
     }
 }
 
-impl GridAccess for LegacyGridStore {
+impl GridAccess for CompositorGridAccess {
     fn grid(&self, grid_id: GridId) -> Option<&ScreenGrid> {
-        self.bindings.get(&grid_id).map(|layer| &*layer.grid)
+        self.stored_grids
+            .as_ref()
+            .and_then(|store| store.grid(grid_id).ok())
+            .or_else(|| self.bindings.get(&grid_id)?.legacy_grid.as_deref())
     }
 }
 

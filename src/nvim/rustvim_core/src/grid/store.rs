@@ -107,7 +107,7 @@ impl GridStore {
 static GRID_STORE: LazyLock<Mutex<GridStore>> = LazyLock::new(|| Mutex::new(GridStore::new()));
 
 /// Acquires exclusive access to permanent screen-grid storage.
-pub(super) fn lock_grid_store() -> MutexGuard<'static, GridStore> {
+pub(crate) fn lock_grid_store() -> MutexGuard<'static, GridStore> {
     GRID_STORE
         .try_lock()
         .expect("permanent grid store is already borrowed")

@@ -27,7 +27,7 @@ use crate::{
 use ffi::{
     CCompositorGridHit, apply_cursor_update_to_registered_grids,
     cursor_is_covered_by_registered_layers,
-    grid_store::{LegacyGridStore, lock_compositor_grid_bindings},
+    grid_store::{CompositorGridAccess, lock_compositor_grid_bindings},
     place_grid_in_registered_layers, remove_registered_layer, ui_comp_find_mouse_grid_at_coord,
     ui_comp_get_cell_at_coord, update_registered_layer_policy,
 };
@@ -3231,9 +3231,10 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         // SAFETY: The caller satisfies the documented pointer and grid
         // ownership requirements.
-        let (grid_store, layer_ids) =
-            unsafe { LegacyGridStore::try_take_in_binding_order(cgrids.as_ptr(), cgrids.len()) }
-                .expect("test compositor layers must be valid");
+        let (grid_store, layer_ids) = unsafe {
+            CompositorGridAccess::try_take_in_binding_order(cgrids.as_ptr(), cgrids.len())
+        }
+        .expect("test compositor layers must be valid");
         let bindings = grid_store
             .ffi_bindings()
             .expect("test compositor bindings must be valid");
@@ -3738,7 +3739,7 @@ mod tests {
             // grid for the duration of the operation.
             let _registry = unsafe { register_test_compositor_layers(&cgrids) };
             set_registered_test_layer_origin(grid_id, ComposedPosition::new(2, 5));
-            let grid_store = LegacyGridStore::try_take_registered().unwrap();
+            let grid_store = CompositorGridAccess::try_take_registered().unwrap();
             let compositor = lock_compositor();
 
             assert_eq!(
@@ -3786,7 +3787,7 @@ mod tests {
             // SAFETY: Both pointers identify distinct, exclusively accessible
             // C grids and the pointer array remains readable for this scope.
             let (grid_store, layer_ids) = unsafe {
-                LegacyGridStore::try_take_in_binding_order(cgrids.as_ptr(), cgrids.len())
+                CompositorGridAccess::try_take_in_binding_order(cgrids.as_ptr(), cgrids.len())
             }
             .unwrap();
             assert_eq!(layer_ids, [second_id, first_id]);
@@ -4209,7 +4210,7 @@ mod tests {
 
         // SAFETY: The candidate is already registered.
         let (grid_store, grid_id, was_registered) = unsafe {
-            LegacyGridStore::try_take_registered_with_candidate(
+            CompositorGridAccess::try_take_registered_with_candidate(
                 NonNull::new(moving_pointer).unwrap(),
             )
         }
@@ -4312,7 +4313,7 @@ mod tests {
         // SAFETY: The candidate is distinct from every registered grid and is
         // exclusively accessible.
         let (grid_store, grid_id, was_registered) = unsafe {
-            LegacyGridStore::try_take_registered_with_candidate(
+            CompositorGridAccess::try_take_registered_with_candidate(
                 NonNull::new(appended_pointer).unwrap(),
             )
         }
@@ -4499,7 +4500,7 @@ mod tests {
             // SAFETY: The pointers identify distinct, exclusively accessible
             // C grids and the pointer array remains readable for this scope.
             let (_grid_store, layer_ids) = unsafe {
-                LegacyGridStore::try_take_in_binding_order(cgrids.as_ptr(), cgrids.len())
+                CompositorGridAccess::try_take_in_binding_order(cgrids.as_ptr(), cgrids.len())
             }
             .unwrap();
             let mut layers = Layers::try_new(layer_ids).unwrap();
@@ -4564,7 +4565,7 @@ mod tests {
             // SAFETY: The pointers identify distinct, exclusively accessible
             // C grids and the pointer array remains readable for this scope.
             let (_grid_store, layer_ids) = unsafe {
-                LegacyGridStore::try_take_in_binding_order(cgrids.as_ptr(), cgrids.len())
+                CompositorGridAccess::try_take_in_binding_order(cgrids.as_ptr(), cgrids.len())
             }
             .unwrap();
             let mut layers = Layers::try_new(layer_ids).unwrap();
@@ -4631,7 +4632,7 @@ mod tests {
         let _compositor = attach_test_compositor();
         clear_registered_test_layer_publications();
 
-        let grid_store = LegacyGridStore::try_take_registered().unwrap();
+        let grid_store = CompositorGridAccess::try_take_registered().unwrap();
         let layer_index = lock_compositor()
             .layer_index(removed_grid_id)
             .unwrap()
@@ -4652,7 +4653,7 @@ mod tests {
         );
 
         {
-            let grid_store = LegacyGridStore::try_take_registered().unwrap();
+            let grid_store = CompositorGridAccess::try_take_registered().unwrap();
             assert_eq!(lock_compositor().layer_index(removed_grid_id), Ok(None));
             assert_eq!(grid_store.grid_id_for_cgrid(removed_pointer), None);
         }
