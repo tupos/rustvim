@@ -5780,7 +5780,7 @@ static bool screenchar_get_cell(int row, int col, GridCell *cell)
     }
   }
 
-  return grid_get_cell(&default_grid, row, col, cell);
+  return ui_comp_grid_get_cell_at(&default_grid, 0, 0, row, col, cell);
 }
 
 /// "screenattr()" function

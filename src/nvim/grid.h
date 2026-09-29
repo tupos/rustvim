@@ -136,8 +136,6 @@ extern bool schar_in_arabic_block(schar_T sc);
 extern char schar_get_ascii(schar_T sc);
 extern int schar_cells(schar_T sc);
 extern void line_do_arabic_shape(schar_T *buf, int cols);
-extern bool grid_get_cell(ScreenGrid *grid, int64_t row, int64_t col,
-                          GridCell *cell);
 extern bool grid_view_get_cell(
   const GridView *view, handle_T expected_grid,
   int row, int col, GridCell *cell);

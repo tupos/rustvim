@@ -5109,45 +5109,6 @@ pub unsafe extern "C" fn grid_invalidate_row(grid: *mut CScreenGrid, row: libc::
     grid.invalidate_row(row);
 }
 
-/// Reads one complete logical grid cell.
-///
-/// Returns `false` for a null grid, invalid coordinates, or unavailable cell
-/// storage. The output is written only when the cell exists.
-///
-/// # Safety
-///
-/// `grid` must point to a valid, exclusively accessible `CScreenGrid` whose
-/// buffers satisfy the ownership and layout requirements of `ScreenGrid`.
-/// `output` must point to valid, properly aligned writable `CGridCell` storage.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn grid_get_cell(
-    grid: *mut CScreenGrid,
-    row: i64,
-    col: i64,
-    output: *mut CGridCell,
-) -> bool {
-    if grid.is_null() || output.is_null() {
-        return false;
-    }
-    let (Ok(row), Ok(col)) = (usize::try_from(row), usize::try_from(col)) else {
-        return false;
-    };
-
-    // SAFETY: The caller transfers exclusive ownership of the grid buffers to
-    // the guard.
-    let grid = unsafe { ScreenGridGuard::take(grid) };
-    let Some(cell) = grid.cell(row, col) else {
-        return false;
-    };
-
-    // SAFETY: The output pointer was checked for null above and the caller
-    // guarantees valid writable storage.
-    unsafe {
-        output.write(CGridCell::from(cell));
-    }
-    true
-}
-
 /// Reads one cell through a grid view after validating its target identity.
 ///
 /// Returns `false` when the view has no target, its target does not match
