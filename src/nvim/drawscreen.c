@@ -209,13 +209,8 @@ void screenclear(void)
 {
   msg_check_for_delay(false);
 
-  if (starting == NO_SCREEN || !grid_is_allocated(&default_grid)) {
+  if (starting == NO_SCREEN || !grid_clear_all(&default_grid, true)) {
     return;
-  }
-
-  // blank out the default grid
-  for (int i = 0; i < default_grid.rows; i++) {
-    grid_clear_row(&default_grid, i, default_grid.cols, true);
   }
 
   ui_call_grid_clear(1);  // clear the display
@@ -497,9 +492,7 @@ int update_screen(void)
     // UPD_CLEAR is already handled
     if (type == UPD_NOT_VALID && !ui_has(kUIMultigrid) && msg_scrolled) {
       was_invalidated = ui_comp_set_screen_valid(false);
-      for (int i = valid; i < Rows - p_ch; i++) {
-        grid_clear_row(&default_grid, i, Columns, false);
-      }
+      grid_clear_rows(&default_grid, valid, Rows - (int)p_ch, false);
       FOR_ALL_WINDOWS_IN_TAB(wp, curtab) {
         if (wp->w_floating) {
           continue;

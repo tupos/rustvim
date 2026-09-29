@@ -22,6 +22,7 @@ use std::{
     cell::RefCell,
     collections::BTreeMap,
     ffi::CStr,
+    ops::Range,
     sync::{
         Mutex, MutexGuard,
         atomic::{AtomicI32, Ordering},
@@ -979,6 +980,33 @@ impl ScreenGrid {
             return;
         }
         self.clear_line(offset, width, valid);
+    }
+
+    /// Clears complete logical rows using this grid's allocated width.
+    ///
+    /// Returns `false` when the grid has no allocated cell storage.
+    fn clear_rows(&mut self, rows: Range<usize>, valid: bool) -> bool {
+        if !self.is_allocated() {
+            return false;
+        }
+        let (Ok(row_count), Ok(width)) = (usize::try_from(self.rows), usize::try_from(self.cols))
+        else {
+            return false;
+        };
+        let start = rows.start.min(row_count);
+        let end = rows.end.min(row_count);
+        for row in start..end {
+            self.clear_row(row, width, valid);
+        }
+        true
+    }
+
+    /// Clears every allocated logical row.
+    fn clear_all(&mut self, valid: bool) -> bool {
+        let Ok(row_count) = usize::try_from(self.rows) else {
+            return false;
+        };
+        self.clear_rows(0..row_count, valid)
     }
 
     fn attrs_fill(valid: bool) -> VimSAttrT {
@@ -4871,30 +4899,51 @@ pub unsafe extern "C" fn grid_free_all_mem() {
     drop(glyph_mapping);
 }
 
-/// Clears `width` cells from the beginning of a logical grid row.
+/// Clears every allocated logical row.
 ///
 /// # Safety
 ///
 /// `grid` must point to a valid, exclusively accessible `CScreenGrid` whose
 /// buffers satisfy the ownership and layout requirements of `ScreenGrid`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn grid_clear_row(
+pub unsafe extern "C" fn grid_clear_all(grid: *mut CScreenGrid, valid: bool) -> bool {
+    if grid.is_null() {
+        return false;
+    }
+
+    // SAFETY: The caller transfers exclusive ownership of the grid buffers to
+    // the guard.
+    let mut grid = unsafe { ScreenGridGuard::take(grid) };
+    grid.clear_all(valid)
+}
+
+/// Clears a half-open range of complete logical rows.
+///
+/// Rows beyond the allocated grid are ignored.
+///
+/// # Safety
+///
+/// `grid` must point to a valid, exclusively accessible `CScreenGrid` whose
+/// buffers satisfy the ownership and layout requirements of `ScreenGrid`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn grid_clear_rows(
     grid: *mut CScreenGrid,
-    row: libc::c_int,
-    width: libc::c_int,
+    start_row: libc::c_int,
+    end_row: libc::c_int,
     valid: bool,
 ) {
     if grid.is_null() {
         return;
     }
-    let (Ok(row), Ok(width)) = (usize::try_from(row), usize::try_from(width)) else {
+    let (Ok(start_row), Ok(end_row)) = (usize::try_from(start_row), usize::try_from(end_row))
+    else {
         return;
     };
 
     // SAFETY: The caller transfers exclusive ownership of the grid buffers to
     // the guard.
     let mut grid = unsafe { ScreenGridGuard::take(grid) };
-    grid.clear_row(row, width, valid);
+    grid.clear_rows(start_row..end_row, valid);
 }
 
 /// @param buf need not be NUL terminated, but may not contain embedded NULs.
@@ -6339,6 +6388,32 @@ mod tests {
         );
         assert_eq!(grid.attrs, [1, 2, 3, -1, -1, 6]);
         assert_eq!(grid.vcols, [1, 2, 3, -1, -1, 6]);
+    }
+
+    #[test]
+    fn clearing_complete_rows_uses_grid_dimensions_and_logical_offsets() {
+        let mut line_buffer = LineBuffer::new(3);
+        let mut grid = ScreenGrid::new(2, 3, true, &mut line_buffer);
+        grid.chars = "abcdef".chars().map(schar_from_ascii).collect();
+        grid.attrs = vec![1, 2, 3, 4, 5, 6];
+        grid.vcols = vec![1, 2, 3, 4, 5, 6];
+        grid.line_offset.swap(0, 1);
+
+        assert!(grid.clear_rows(0..1, false));
+        assert_eq!(
+            grid.chars,
+            "abc   ".chars().map(schar_from_ascii).collect::<Vec<_>>()
+        );
+        assert_eq!(grid.attrs, [1, 2, 3, -1, -1, -1]);
+        assert_eq!(grid.vcols, [1, 2, 3, -1, -1, -1]);
+
+        assert!(grid.clear_all(true));
+        assert_eq!(grid.chars, vec![schar_from_ascii(' '); 6]);
+        assert_eq!(grid.attrs, [0; 6]);
+        assert_eq!(grid.vcols, [-1; 6]);
+
+        grid.release_storage();
+        assert!(!grid.clear_all(true));
     }
 
     #[test]

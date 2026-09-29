@@ -119,7 +119,8 @@ extern void grid_flush_message_scroll(ScreenGrid *grid, MessageGridScrollFlushRe
                                       MessageGridPositionEmitter emit_position);
 extern void grid_free(ScreenGrid *grid);
 extern void grid_free_all_mem(void);
-extern void grid_clear_row(ScreenGrid *grid, int row, int width, bool valid);
+extern bool grid_clear_all(ScreenGrid *grid, bool valid);
+extern void grid_clear_rows(ScreenGrid *grid, int start_row, int end_row, bool valid);
 extern ScreenGrid *grid_adjust(GridView *grid, int *row_off, int *col_off);
 extern void grid_invalidate(ScreenGrid *grid);
 extern void grid_invalidate_row(ScreenGrid *grid, int row);
