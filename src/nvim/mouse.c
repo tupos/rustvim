@@ -2011,17 +2011,8 @@ static void mouse_check_grid(colnr_T *vcolp, int *flagsp)
       || curwin->w_redr_type != 0) {
     return;
   }
-  int start_row = 0;
-  int start_col = 0;
-  ScreenGrid *gp = grid_adjust(&curwin->w_grid, &start_row, &start_col);
-  if (gp->handle != click_grid) {
-    return;
-  }
-  click_row += start_row;
-  click_col += start_col;
-
   GridCell cell;
-  if (!grid_get_cell(gp, click_row, click_col, &cell)) {
+  if (!grid_view_get_cell(&curwin->w_grid, click_grid, click_row, click_col, &cell)) {
     return;
   }
 

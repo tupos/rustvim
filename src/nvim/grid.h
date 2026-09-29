@@ -138,6 +138,9 @@ extern int schar_cells(schar_T sc);
 extern void line_do_arabic_shape(schar_T *buf, int cols);
 extern bool grid_get_cell(ScreenGrid *grid, int64_t row, int64_t col,
                           GridCell *cell);
+extern bool grid_view_get_cell(
+  const GridView *view, handle_T expected_grid,
+  int row, int col, GridCell *cell);
 extern GridCellInspectionResult grid_inspect_cell(
   ScreenGrid *default_grid, ScreenGrid *popup_grid,
   ScreenGrid *window_grid, int64_t requested_grid,

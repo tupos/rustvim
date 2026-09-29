@@ -1505,6 +1505,33 @@ impl<'grid> GridCellInspector<'grid> {
     }
 }
 
+/// Safe borrowed view into a screen grid at a translated origin.
+struct GridView<'grid> {
+    target: &'grid ScreenGrid,
+    offset: GridPosition,
+}
+
+impl<'grid> GridView<'grid> {
+    /// Creates a view over `target` with the given target-grid offset.
+    fn new(target: &'grid ScreenGrid, offset: GridPosition) -> Self {
+        Self { target, offset }
+    }
+
+    /// Reads a view-relative cell when the caller's grid identity matches the
+    /// view target.
+    fn cell_for_grid(&self, expected_grid: GridId, position: GridPosition) -> Option<GridCell> {
+        if self.target.id() != expected_grid {
+            return None;
+        }
+        let row = position.row.checked_add(self.offset.row)?;
+        let column = position.column.checked_add(self.offset.column)?;
+        let (Ok(row), Ok(column)) = (usize::try_from(row), usize::try_from(column)) else {
+            return None;
+        };
+        self.target.cell(row, column)
+    }
+}
+
 /// Temporary Rust ownership of the allocations exposed by a C screen grid.
 ///
 /// The C structure remains at a stable address while this guard exists so
@@ -5121,6 +5148,55 @@ pub unsafe extern "C" fn grid_get_cell(
     true
 }
 
+/// Reads one cell through a grid view after validating its target identity.
+///
+/// Returns `false` when the view has no target, its target does not match
+/// `expected_grid`, coordinate translation overflows, or the translated
+/// position does not identify an allocated cell.
+///
+/// # Safety
+///
+/// `view` must point to a valid `CGridView` whose target, when non-null, is a
+/// valid, exclusively accessible `CScreenGrid`. The target's buffers must
+/// satisfy the ownership and layout requirements of `ScreenGrid`. `output`
+/// must point to valid, properly aligned writable `CGridCell` storage that
+/// does not alias the target grid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn grid_view_get_cell(
+    view: *const CGridView,
+    expected_grid: VimHandleT,
+    row: libc::c_int,
+    column: libc::c_int,
+    output: *mut CGridCell,
+) -> bool {
+    if view.is_null() || output.is_null() {
+        return false;
+    }
+
+    // SAFETY: The caller guarantees that `view` points to a valid `CGridView`.
+    let view = unsafe { &*view };
+    if view.target.is_null() {
+        return false;
+    }
+    let offset = GridPosition::new(view.row_offset, view.col_offset);
+
+    // SAFETY: The caller transfers exclusive ownership of the target grid's
+    // buffers into the guard for the duration of this operation.
+    let target = unsafe { ScreenGridGuard::take(view.target) };
+    let view = GridView::new(&target, offset);
+    let Some(cell) = view.cell_for_grid(GridId::new(expected_grid), GridPosition::new(row, column))
+    else {
+        return false;
+    };
+
+    // SAFETY: The output pointer was checked for null above and the caller
+    // guarantees valid writable storage.
+    unsafe {
+        output.write(CGridCell::from(cell));
+    }
+    true
+}
+
 /// Selects the requested API grid and reads one complete logical cell.
 ///
 /// An invalid window-grid identity is distinct from a valid grid whose
@@ -6408,6 +6484,34 @@ mod tests {
 
         assert_eq!(inspector.cell(unallocated_window, 0, 0), Err(InvalidGridId));
         assert_eq!(inspector.cell(unknown_window, 0, 0), Err(InvalidGridId));
+    }
+
+    #[test]
+    fn grid_view_translates_cells_and_validates_target_identity() {
+        let mut line_buffer = LineBuffer::new(3);
+        let mut grid = ScreenGrid::new(2, 3, true, &mut line_buffer);
+        grid.handle = 7;
+        grid.chars = "abcdef".chars().map(schar_from_ascii).collect();
+        grid.attrs = vec![1, 2, 3, 4, 5, 6];
+        grid.vcols = vec![10, 11, 12, 20, 21, 22];
+        let view = GridView::new(&grid, GridPosition::new(1, 1));
+
+        assert_eq!(
+            view.cell_for_grid(GridId::new(7), GridPosition::new(0, 1)),
+            Some(GridCell::new(schar_from_ascii('f'), 6, 22))
+        );
+        assert_eq!(
+            view.cell_for_grid(GridId::new(8), GridPosition::new(0, 1)),
+            None
+        );
+        assert_eq!(
+            view.cell_for_grid(GridId::new(7), GridPosition::new(-2, 0)),
+            None
+        );
+        assert_eq!(
+            view.cell_for_grid(GridId::new(7), GridPosition::new(i32::MAX, 0)),
+            None
+        );
     }
 
     #[test]
