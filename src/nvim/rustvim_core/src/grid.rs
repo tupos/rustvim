@@ -321,6 +321,15 @@ enum GridLifecycleChange {
     Invalidated,
 }
 
+/// One request to scroll lines within a window's visible grid region.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct WindowLineScrollRequest {
+    row: i32,
+    line_count: i32,
+    view_origin: GridPosition,
+    view_size: GridSize,
+}
+
 /// Includes final NUL. MAX_MCO is no longer used, but at least 4*(MAX_MCO+1)+1=29
 /// ensures we can fit all composed chars which did fit before.
 static MAX_SCHAR_SIZE: usize = 32;
@@ -870,6 +879,16 @@ impl ScreenGrid {
         !self.chars.is_empty()
     }
 
+    /// Creates the resize output for an allocated grid.
+    fn resize_command_if_allocated(&self) -> Option<(GridOutputTarget, UiCommand<LocalGridSpace>)> {
+        if !self.is_allocated() {
+            return None;
+        }
+        let size = GridSize::try_new(self.rows, self.cols)?;
+        let target = GridOutputTarget::new(self.id(), self.cols);
+        Some((target, UiCommand::GridResize(size)))
+    }
+
     /// Releases cell storage while preserving this grid's stable identity.
     fn release_storage(&mut self) {
         self.chars = Vec::new();
@@ -1373,6 +1392,58 @@ impl ScreenGrid {
         })
     }
 
+    /// Scrolls lines within the visible region of a window grid view.
+    ///
+    /// The operation clips the window dimensions to the target grid and
+    /// translates the requested row through the view origin.
+    fn scroll_window_lines(
+        &mut self,
+        request: WindowLineScrollRequest,
+    ) -> Option<UiCommand<LocalGridSpace>> {
+        if request.row < 0 || request.view_origin.row < 0 || request.view_origin.column < 0 {
+            return None;
+        }
+        let line_count = request.line_count.checked_abs()?;
+        if line_count == 0 {
+            return None;
+        }
+
+        let visible_width = self
+            .cols
+            .checked_sub(request.view_origin.column)?
+            .min(request.view_size.width);
+        let visible_height = self
+            .rows
+            .checked_sub(request.view_origin.row)?
+            .min(request.view_size.height);
+        if visible_width < 0
+            || visible_height < 0
+            || request.row.checked_add(line_count)? >= visible_height
+        {
+            return None;
+        }
+
+        let row = request.row.checked_add(request.view_origin.row)?;
+        let end = visible_height.checked_add(request.view_origin.row)?;
+        if request.line_count < 0 {
+            self.del_lines(
+                row,
+                line_count,
+                end,
+                request.view_origin.column,
+                visible_width,
+            )
+        } else {
+            self.ins_lines(
+                row,
+                line_count,
+                end,
+                request.view_origin.column,
+                visible_width,
+            )
+        }
+    }
+
     fn ins_lines(
         &mut self,
         row: i32,
@@ -1584,6 +1655,11 @@ impl<'grid> GridView<'grid> {
             return None;
         };
         self.target.cell(row, column)
+    }
+
+    /// Reports whether the target grid has `width` columns.
+    fn width_matches_target(&self, width: i32) -> bool {
+        self.target.cols == width
     }
 
     /// Reports whether this view has a target that requires a complete redraw.
@@ -1818,6 +1894,7 @@ static LINE_BUFFER: Mutex<LineBuffer> = Mutex::new(LineBuffer::empty());
 struct LineState {
     row: i32,
     col_offset: i32,
+    target_width: i32,
     max_col: i32,
     first: i32,
     last: i32,
@@ -1834,6 +1911,7 @@ impl LineState {
         Self {
             row: -1,
             col_offset: 0,
+            target_width: 0,
             max_col: 0,
             first: i32::MAX,
             last: 0,
@@ -1852,6 +1930,7 @@ impl LineState {
         self.active = true;
         self.row = row;
         self.col_offset = col;
+        self.target_width = cols;
         self.first = line_buf.len() as i32;
         self.max_col = std::cmp::min(cols, cols - self.col_offset);
         self.last = 0;
@@ -2003,6 +2082,12 @@ impl LineState {
         self.clear_to = end_col;
         self.bg_attr = bg_attr;
         self.clear_attr = clear_attr;
+    }
+
+    /// Mirrors pending cells across the full target-grid width.
+    fn mirror_target_width(&mut self, line_buffer: &mut LineBuffer) {
+        let target_width = self.target_width;
+        self.mirror_cells(target_width, line_buffer);
     }
 
     /// Mirrors pending cells within `width` for right-to-left rendering.
@@ -2274,6 +2359,18 @@ impl CLineGrid {
             (output_target, commands)
         };
         Some((output_target, commands))
+    }
+
+    /// Mirrors and flushes one message line.
+    fn flush_message_line(
+        &mut self,
+        right_left: bool,
+        line_buffer: &mut LineBuffer,
+    ) -> Option<(GridOutputTarget, Vec<OwnedRawLineCommand>)> {
+        if right_left {
+            self.state.mirror_target_width(line_buffer);
+        }
+        self.flush_if_valid_row(line_buffer)
     }
 
     /// Flushes the current line only if its row belongs to the target grid.
@@ -2980,14 +3077,14 @@ pub extern "C" fn grid_line_flush() {
     }
 }
 
-/// flush grid line but only if on a valid row
+/// Mirrors a right-to-left message line and flushes it when its row is valid.
 ///
 /// This is a stopgap until message.c has been refactored to behave
 #[unsafe(no_mangle)]
-pub extern "C" fn grid_line_flush_if_valid_row() {
+pub extern "C" fn grid_flush_message_line(right_left: bool) {
     let output = {
         let mut line_buffer = LineBufferGuard::acquire();
-        with_line_grid(|line_grid| line_grid.flush_if_valid_row(&mut line_buffer))
+        with_line_grid(|line_grid| line_grid.flush_message_line(right_left, &mut line_buffer))
     };
     if let Some((target, commands)) = output {
         target.emit_lines(commands);
@@ -4505,6 +4602,121 @@ pub unsafe extern "C" fn grid_view_requires_redraw(view: *const CGridView) -> bo
     GridView::new(&target, offset).requires_redraw()
 }
 
+/// Reports whether a grid view's target has `width` columns.
+///
+/// # Safety
+///
+/// `view` must be null or point to a valid `CGridView`. Its target, when
+/// non-null, must be a valid, exclusively accessible `CScreenGrid` whose
+/// buffers satisfy the ownership and layout requirements of `ScreenGrid`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn grid_view_width_matches_target(
+    view: *const CGridView,
+    width: libc::c_int,
+) -> bool {
+    if view.is_null() {
+        return false;
+    }
+
+    // SAFETY: The caller guarantees that `view` points to a valid `CGridView`.
+    let view = unsafe { &*view };
+    if view.target.is_null() {
+        return false;
+    }
+    let offset = GridPosition::new(view.row_offset, view.col_offset);
+
+    // SAFETY: The caller transfers exclusive ownership of the target grid's
+    // buffers to the guard for the duration of this operation.
+    let target = unsafe { ScreenGridGuard::take(view.target) };
+    GridView::new(&target, offset).width_matches_target(width)
+}
+
+/// Refreshes the external representation of an allocated message grid.
+///
+/// The resize command and position callback run after grid ownership has been
+/// restored to the C representation.
+///
+/// # Safety
+///
+/// `grid` must point to a valid, exclusively accessible `CScreenGrid`. Its
+/// buffers must satisfy the ownership and layout requirements of `ScreenGrid`.
+/// `emit_position` must remain callable for the duration of this operation.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn grid_refresh_message_ui(
+    grid: *mut CScreenGrid,
+    position: libc::c_int,
+    scrolled: bool,
+    emit_position: CMessageGridPositionEmitter,
+) {
+    if grid.is_null() {
+        return;
+    }
+
+    let resize = {
+        // SAFETY: The caller transfers exclusive ownership of the grid buffers
+        // to the guard for the duration of this operation.
+        let grid = unsafe { ScreenGridGuard::take(grid) };
+        grid.resize_command_if_allocated()
+    };
+    let Some((target, command)) = resize else {
+        return;
+    };
+
+    target.emit(command);
+    // SAFETY: The caller guarantees that the callback is valid. Grid ownership
+    // was restored before this callback can reenter editor code.
+    unsafe {
+        emit_position(position, scrolled);
+    }
+}
+
+/// Scrolls lines within a window grid view.
+///
+/// # Safety
+///
+/// `view` must point to a valid `CGridView`. Its target must point to a valid,
+/// exclusively accessible `CScreenGrid` whose buffers satisfy the ownership
+/// and layout requirements of `ScreenGrid`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn grid_scroll_window_lines(
+    view: *const CGridView,
+    row: libc::c_int,
+    line_count: libc::c_int,
+    view_height: libc::c_int,
+    view_width: libc::c_int,
+) {
+    if view.is_null() {
+        return;
+    }
+    let Some(view_size) = GridSize::try_new(view_height, view_width) else {
+        return;
+    };
+
+    // SAFETY: The caller guarantees that `view` points to a valid `CGridView`.
+    let view = unsafe { &*view };
+    if view.target.is_null() {
+        return;
+    }
+    let request = WindowLineScrollRequest {
+        row,
+        line_count,
+        view_origin: GridPosition::new(view.row_offset, view.col_offset),
+        view_size,
+    };
+
+    let (target, command) = {
+        // SAFETY: The caller transfers exclusive ownership of the target grid
+        // buffers to the guard for the duration of this operation.
+        let mut grid = unsafe { ScreenGridGuard::take(view.target) };
+        let target = GridOutputTarget::new(grid.id(), grid.cols);
+        let command = grid.scroll_window_lines(request);
+        (target, command)
+    };
+    if let Some(command) = command {
+        target.emit(command);
+    }
+}
+
 /// # Safety
 ///
 /// `grid` must point to a valid, exclusively accessible `CScreenGrid`. Any
@@ -5440,32 +5652,6 @@ pub unsafe extern "C" fn grid_ins_lines(
     }
 }
 
-/// # Safety
-///
-/// `grid` must point to a valid, exclusively accessible `CScreenGrid` whose
-/// buffers satisfy the ownership and layout requirements of `ScreenGrid`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn grid_del_lines(
-    grid: *mut CScreenGrid,
-    row: libc::c_int,
-    line_count: libc::c_int,
-    end: libc::c_int,
-    col: libc::c_int,
-    width: libc::c_int,
-) {
-    let (target, command) = {
-        // SAFETY: The caller transfers exclusive ownership of the grid buffers
-        // to the guard.
-        let mut grid = unsafe { ScreenGridGuard::take(grid) };
-        let target = GridOutputTarget::new(grid.id(), grid.cols);
-        let command = grid.del_lines(row, line_count, end, col, width);
-        (target, command)
-    };
-    if let Some(command) = command {
-        target.emit(command);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5541,6 +5727,37 @@ mod tests {
 
         assert_eq!(region, GridRegion::try_new(0..2, 0..3).unwrap());
         assert_eq!(delta, GridDelta::new(-1, 0));
+    }
+
+    #[test]
+    fn window_line_scrolling_clips_to_grid_and_view() {
+        let mut line_buffer = LineBuffer::new(6);
+        let mut grid = ScreenGrid::new(4, 6, true, &mut line_buffer);
+        let request = WindowLineScrollRequest {
+            row: 0,
+            line_count: 1,
+            view_origin: GridPosition::new(1, 2),
+            view_size: GridSize::try_new(3, 5).unwrap(),
+        };
+
+        let command = grid.scroll_window_lines(request).unwrap();
+        let UiCommand::GridScroll { region, delta } = command else {
+            panic!("window line insertion must return a scroll command");
+        };
+
+        assert_eq!(region, GridRegion::try_new(1..4, 2..6).unwrap());
+        assert_eq!(delta, GridDelta::new(-1, 0));
+        assert!(
+            grid.scroll_window_lines(WindowLineScrollRequest { row: 2, ..request })
+                .is_none()
+        );
+        assert!(
+            grid.scroll_window_lines(WindowLineScrollRequest {
+                line_count: i32::MIN,
+                ..request
+            })
+            .is_none()
+        );
     }
 
     #[test]
@@ -6540,6 +6757,24 @@ mod tests {
     }
 
     #[test]
+    fn resize_output_uses_only_allocated_grid_dimensions() {
+        let mut line_buffer = LineBuffer::new(3);
+        let mut grid = ScreenGrid::new(2, 3, true, &mut line_buffer);
+        grid.handle = 7;
+
+        let (target, command) = grid.resize_command_if_allocated().unwrap();
+        assert_eq!(target, GridOutputTarget::new(GridId::new(7), 3));
+        let UiCommand::GridResize(size) = command else {
+            panic!("allocated grid must produce a resize command");
+        };
+        assert_eq!(size, GridSize::try_new(2, 3).unwrap());
+
+        grid.release_storage();
+
+        assert!(grid.resize_command_if_allocated().is_none());
+    }
+
+    #[test]
     fn redraw_state_controls_compositor_and_view_decisions() {
         let mut line_buffer = LineBuffer::new(2);
         let mut grid = ScreenGrid::new(1, 2, true, &mut line_buffer);
@@ -6677,6 +6912,9 @@ mod tests {
         grid.attrs = vec![1, 2, 3, 4, 5, 6];
         grid.vcols = vec![10, 11, 12, 20, 21, 22];
         let view = GridView::new(&grid, GridPosition::new(1, 1));
+
+        assert!(view.width_matches_target(3));
+        assert!(!view.width_matches_target(2));
 
         assert_eq!(
             view.cell_for_grid(GridId::new(7), GridPosition::new(0, 1)),

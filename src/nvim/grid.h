@@ -97,6 +97,7 @@ extern bool grid_requires_compositor_invalidation(ScreenGrid *grid,
 extern void grid_revalidate_for_redraw(ScreenGrid *grid);
 extern void grid_require_full_redraw(ScreenGrid *grid);
 extern bool grid_view_requires_redraw(const GridView *view);
+extern bool grid_view_width_matches_target(const GridView *view, int width);
 extern void grid_initialize_default(ScreenGrid *grid);
 extern bool grid_configure_default(ScreenGrid *grid, int rows, int columns);
 extern WindowGridUpdate grid_configure_for_window(
@@ -122,10 +123,14 @@ extern void grid_reset_message_scroll(ScreenGrid *grid, int position,
                                       MessageGridPositionEmitter set_position);
 extern void grid_flush_message_scroll(ScreenGrid *grid, MessageGridScrollFlushRequest request,
                                       MessageGridPositionEmitter emit_position);
+extern void grid_refresh_message_ui(ScreenGrid *grid, int position, bool scrolled,
+                                    MessageGridPositionEmitter emit_position);
 extern void grid_free(ScreenGrid *grid);
 extern void grid_free_all_mem(void);
 extern bool grid_clear_all(ScreenGrid *grid, bool valid);
 extern void grid_clear_rows(ScreenGrid *grid, int start_row, int end_row, bool valid);
+extern void grid_scroll_window_lines(const GridView *view, int row, int line_count,
+                                     int view_height, int view_width);
 extern ScreenGrid *grid_adjust(GridView *grid, int *row_off, int *col_off);
 extern void grid_invalidate(ScreenGrid *grid);
 extern void grid_invalidate_row(ScreenGrid *grid, int row);
@@ -188,7 +193,7 @@ extern void linebuf_put_char_pair(int col, schar_T first, schar_T second);
 extern void linebuf_fill_vcols(int start_col, int width, colnr_T vcol);
 extern void linebuf_fill_vcols_from(int start_col, int width, colnr_T first_vcol);
 extern void grid_line_flush(void);
-extern void grid_line_flush_if_valid_row(void);
+extern void grid_flush_message_line(bool right_left);
 extern void grid_clear(GridView *grid, int start_row, int end_row, int start_col, int end_col, int attr);
 extern void grid_put_window_line(const GridView *view,
                                  const GridLineSubmissionConfig *config);
@@ -198,7 +203,6 @@ extern void grid_draw_border(ScreenGrid *grid, const GridBorderConfig *config, c
 extern void grid_assign_handle(ScreenGrid *grid);
 
 extern void grid_ins_lines(ScreenGrid *grid, int row, int line_count, int end, int col, int width);
-extern void grid_del_lines(ScreenGrid *grid, int row, int line_count, int end, int col, int width);
 
 extern void alloc_initial_line_buffer(void);
 

@@ -2570,10 +2570,7 @@ static void msg_puts_display(const char *str, int maxlen, int hl_id, int recurse
 
 void msg_line_flush(void)
 {
-  if (cmdmsg_rl) {
-    grid_line_mirror(msg_grid.cols);
-  }
-  grid_line_flush_if_valid_row();
+  grid_flush_message_line(cmdmsg_rl);
 }
 
 void msg_cursor_goto(int row, int col)
@@ -2665,9 +2662,9 @@ void msg_reset_scroll(void)
 
 void msg_ui_refresh(void)
 {
-  if (ui_has(kUIMultigrid) && grid_is_allocated(&msg_grid)) {
-    ui_call_grid_resize(msg_grid.handle, msg_grid.cols, msg_grid.rows);
-    ui_ext_msg_set_pos(msg_grid_pos, msg_scrolled);
+  if (ui_has(kUIMultigrid)) {
+    grid_refresh_message_ui(&msg_grid, msg_grid_pos, msg_scrolled,
+                            ui_ext_msg_set_pos);
   }
 }
 
