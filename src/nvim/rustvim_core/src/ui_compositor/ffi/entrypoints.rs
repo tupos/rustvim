@@ -141,12 +141,27 @@ unsafe fn update_message_position(
     if message_grid.is_null() || default_grid.is_null() || message_grid == default_grid {
         return Err(CompositorError::InvalidLayerState);
     }
+
     let plan = {
-        // SAFETY: The caller transfers exclusive ownership of both grids'
-        // buffers into distinct guards for the duration of this operation.
-        let message_grid = unsafe { ScreenGridGuard::take(message_grid) };
-        let default_grid = unsafe { ScreenGridGuard::take(default_grid) };
-        lock_compositor().set_message_position(&message_grid, &default_grid, request)
+        let message_grid_pointer =
+            NonNull::new(message_grid).ok_or(CompositorError::InvalidLayerState)?;
+        // SAFETY: The caller guarantees that the message grid remains valid
+        // and exclusively accessible for this operation. Registered grids are
+        // resolved through one shared permanent-store borrow.
+        let (grid_store, message_grid_id, _) = unsafe {
+            CompositorGridAccess::try_take_registered_with_candidate(message_grid_pointer)
+        }
+        .ok_or(CompositorError::InvalidLayerState)?;
+        let default_grid_id = grid_store
+            .grid_id_for_cgrid(default_grid)
+            .ok_or(CompositorError::InvalidLayerState)?;
+        let message_grid = grid_store
+            .grid(message_grid_id)
+            .ok_or(CompositorError::InvalidLayerState)?;
+        let default_grid = grid_store
+            .grid(default_grid_id)
+            .ok_or(CompositorError::InvalidLayerState)?;
+        lock_compositor().set_message_position(message_grid, default_grid, request)
     }?;
 
     if let Some(scroll) = plan.scroll {

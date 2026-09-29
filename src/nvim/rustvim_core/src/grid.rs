@@ -5024,13 +5024,17 @@ pub unsafe extern "C" fn grid_configure_for_popup_menu(
 
 /// Prepares the message grid for its requested visibility and size.
 ///
+/// The first call moves the message grid into permanent Rust storage and
+/// leaves an opaque identity in its transitional C structure.
+///
 /// A `ReleaseRequired` result leaves storage intact so C can remove the
 /// compositor layer before calling `grid_release_message`.
 ///
 /// # Safety
 ///
-/// `grid` must point to a valid, exclusively accessible `CScreenGrid`. Any
-/// existing buffers and dimensions must satisfy the ownership and layout
+/// `grid` must remain at a stable address and identify either a permanently
+/// stored grid or a valid, exclusively accessible legacy `CScreenGrid`. Any
+/// legacy buffers and dimensions must satisfy the ownership and layout
 /// requirements of `ScreenGrid`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn grid_prepare_for_messages(
@@ -5057,8 +5061,12 @@ pub unsafe extern "C" fn grid_prepare_for_messages(
         // SAFETY: The caller transfers exclusive ownership of the C grid and
         // its allocations to the guard for the duration of this function.
         let mut grid = unsafe { ScreenGridGuard::take(grid) };
-        grid.prepare_for_messages(mode, &GRID_HANDLE_ALLOCATOR, &mut line_buffer)
+        let transition = grid.prepare_for_messages(mode, &GRID_HANDLE_ALLOCATOR, &mut line_buffer);
+        grid.store_permanently()
+            .expect("message grid must have a unique valid identity");
+        transition
     };
+
     if transition == MessageGridTransition::Resized {
         lock_message_scroll_state().record_resize(scrolled_lines);
     }
@@ -7192,29 +7200,30 @@ mod tests {
     }
 
     #[test]
-    fn screen_grid_guard_resolves_permanent_rust_storage() {
-        let mut line_buffer = LineBuffer::new(2);
+    fn message_grid_preparation_moves_grid_into_permanent_rust_storage() {
+        let mut line_buffer = LineBuffer::new(3);
         let mut grid = ScreenGrid::new(1, 2, true, &mut line_buffer);
         grid.handle = 70_001;
         // SAFETY: Ownership of every grid allocation is transferred to
         // `cgrid`.
         let mut cgrid = unsafe { grid.to_cgrid() };
 
-        // SAFETY: `cgrid` exclusively owns valid grid allocations and remains
-        // at a stable address until the permanent binding is released.
-        let grid_id = unsafe { ScreenGridGuard::take(&raw mut cgrid) }
-            .store_permanently()
-            .unwrap();
+        // SAFETY: `cgrid` exclusively owns valid grid allocations, and its
+        // address remains stable until the permanent binding is released.
+        let transition = unsafe { grid_prepare_for_messages(&raw mut cgrid, 2, 3, true, 0) };
+        let cgrid_pointer = std::ptr::NonNull::new(&raw mut cgrid).unwrap();
+        let grid_id = permanent_grid_id(cgrid_pointer).unwrap();
 
         assert_eq!(grid_id, GridId::new(70_001));
+        assert_eq!(transition, CMessageGridTransition::Resized);
         assert_eq!(cgrid.handle, 70_001);
         assert!(cgrid.chars.is_null());
         assert!(cgrid.attrs.is_null());
         assert!(cgrid.vcols.is_null());
         assert!(cgrid.line_offset.is_null());
 
-        // SAFETY: `cgrid` remains a valid opaque identity for the permanently
-        // stored grid.
+        // SAFETY: `cgrid` is now a valid opaque identity for the permanently
+        // stored message grid.
         assert!(unsafe { grid_is_allocated(&raw const cgrid) });
 
         {
@@ -7222,7 +7231,9 @@ mod tests {
             // grid, and this scope has exclusive access to it.
             let mut grid = unsafe { ScreenGridGuard::take(&raw mut cgrid) };
             grid.chars[0] = schar_from_ascii('x');
+            assert_eq!((grid.rows, grid.cols), (2, 3));
         }
+
         {
             // SAFETY: The previous guard was dropped before reacquiring the
             // permanently stored grid.
@@ -7236,9 +7247,19 @@ mod tests {
         unsafe {
             line_grid.begin_raw_grid(&raw mut cgrid, 0, 0, &mut line_buffer);
         }
-        assert_eq!(line_grid.max_col(), 2);
+        assert_eq!(line_grid.max_col(), 3);
         assert!(!line_grid.row_reaches_grid_end());
         line_grid.cancel();
+
+        // Releasing the message contents must not surrender permanent Rust
+        // ownership or invalidate its stable identity.
+        unsafe {
+            grid_release_message(&raw mut cgrid);
+        }
+        assert_eq!(permanent_grid_id(cgrid_pointer), Some(grid_id));
+        // SAFETY: The C identity still resolves to the permanently stored
+        // message grid.
+        assert!(!unsafe { grid_is_allocated(&raw const cgrid) });
 
         // SAFETY: No grid guard remains, and `cgrid` is exclusively accessible.
         assert!(unsafe { ScreenGridGuard::release_permanent(&raw mut cgrid) });
