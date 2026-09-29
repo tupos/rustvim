@@ -2604,7 +2604,7 @@ void nvim__redraw(Dict(redraw) *opts, Error *err)
 
   win_T *cwin = win ? win : curwin;
   // Allow moving cursor to recently opened window and make sure it is drawn #28868.
-  if (opts->cursor && (!cwin->w_grid.target || !cwin->w_grid.target->valid)) {
+  if (opts->cursor && grid_view_requires_redraw(&cwin->w_grid)) {
     opts->flush = true;
   }
 

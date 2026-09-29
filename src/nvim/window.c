@@ -968,7 +968,7 @@ void ui_ext_win_position(win_T *wp, bool validate)
       }
       ui_check_cursor_grid(wp->w_grid_alloc.handle);
       if (!valid) {
-        wp->w_grid_alloc.valid = false;
+        grid_require_full_redraw(&wp->w_grid_alloc);
         redraw_later(wp, UPD_NOT_VALID);
       }
     } else {

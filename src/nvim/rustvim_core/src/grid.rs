@@ -487,6 +487,33 @@ impl ScreenGrid {
         GridId::new(self.handle)
     }
 
+    /// Reports whether this grid requires a complete redraw.
+    fn requires_redraw(&self) -> bool {
+        !self.valid
+    }
+
+    /// Reports whether a screen update must invalidate composed output.
+    fn requires_compositor_invalidation(&self, clear_requested: bool) -> bool {
+        clear_requested || self.requires_redraw()
+    }
+
+    /// Prepares invalid grid contents for a complete redraw.
+    ///
+    /// Existing attributes are invalidated so subsequent rendering cannot
+    /// reuse stale cells. The grid is then ready to receive the redraw.
+    fn revalidate_for_redraw(&mut self) {
+        if !self.requires_redraw() {
+            return;
+        }
+        self.invalidate();
+        self.valid = true;
+    }
+
+    /// Records that this grid requires a complete redraw.
+    fn require_full_redraw(&mut self) {
+        self.valid = false;
+    }
+
     pub fn from_grid(
         grid: &ScreenGrid,
         rows: i32,
@@ -1557,6 +1584,11 @@ impl<'grid> GridView<'grid> {
             return None;
         };
         self.target.cell(row, column)
+    }
+
+    /// Reports whether this view has a target that requires a complete redraw.
+    fn requires_redraw(&self) -> bool {
+        self.target.requires_redraw()
     }
 }
 
@@ -4382,6 +4414,97 @@ pub unsafe extern "C" fn grid_is_allocated(grid: *const CScreenGrid) -> bool {
     grid.is_some_and(CScreenGrid::is_allocated)
 }
 
+/// Reports whether the current screen update must invalidate composed output.
+///
+/// This combines the requested full-clear state with the default grid's redraw
+/// state without exposing that state to C.
+///
+/// # Safety
+///
+/// `grid` must point to a valid, exclusively accessible `CScreenGrid`. Its
+/// buffers must satisfy the ownership and layout requirements of `ScreenGrid`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn grid_requires_compositor_invalidation(
+    grid: *mut CScreenGrid,
+    clear_requested: bool,
+) -> bool {
+    if grid.is_null() {
+        return true;
+    }
+
+    // SAFETY: The caller transfers exclusive ownership of the grid buffers to
+    // the guard for the duration of this operation.
+    let grid = unsafe { ScreenGridGuard::take(grid) };
+    grid.requires_compositor_invalidation(clear_requested)
+}
+
+/// Revalidates invalid grid contents in preparation for a complete redraw.
+///
+/// A grid that does not require a redraw remains unchanged.
+///
+/// # Safety
+///
+/// `grid` must point to a valid, exclusively accessible `CScreenGrid`. Its
+/// buffers must satisfy the ownership and layout requirements of `ScreenGrid`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn grid_revalidate_for_redraw(grid: *mut CScreenGrid) {
+    if grid.is_null() {
+        return;
+    }
+
+    // SAFETY: The caller transfers exclusive ownership of the grid buffers to
+    // the guard for the duration of this operation.
+    let mut grid = unsafe { ScreenGridGuard::take(grid) };
+    grid.revalidate_for_redraw();
+}
+
+/// Records that a grid requires a complete redraw.
+///
+/// # Safety
+///
+/// `grid` must point to a valid, exclusively accessible `CScreenGrid`. Its
+/// buffers must satisfy the ownership and layout requirements of `ScreenGrid`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn grid_require_full_redraw(grid: *mut CScreenGrid) {
+    if grid.is_null() {
+        return;
+    }
+
+    // SAFETY: The caller transfers exclusive ownership of the grid buffers to
+    // the guard for the duration of this operation.
+    let mut grid = unsafe { ScreenGridGuard::take(grid) };
+    grid.require_full_redraw();
+}
+
+/// Reports whether a grid view requires a complete redraw.
+///
+/// A view without a target requires redraw because it cannot currently render
+/// a cursor.
+///
+/// # Safety
+///
+/// `view` must be null or point to a valid `CGridView`. Its target, when
+/// non-null, must be a valid, exclusively accessible `CScreenGrid` whose
+/// buffers satisfy the ownership and layout requirements of `ScreenGrid`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn grid_view_requires_redraw(view: *const CGridView) -> bool {
+    if view.is_null() {
+        return true;
+    }
+
+    // SAFETY: The caller guarantees that `view` points to a valid `CGridView`.
+    let view = unsafe { &*view };
+    if view.target.is_null() {
+        return true;
+    }
+    let offset = GridPosition::new(view.row_offset, view.col_offset);
+
+    // SAFETY: The caller transfers exclusive ownership of the target grid's
+    // buffers to the guard for the duration of this operation.
+    let target = unsafe { ScreenGridGuard::take(view.target) };
+    GridView::new(&target, offset).requires_redraw()
+}
+
 /// # Safety
 ///
 /// `grid` must point to a valid, exclusively accessible `CScreenGrid`. Any
@@ -6414,6 +6537,29 @@ mod tests {
 
         grid.release_storage();
         assert!(!grid.clear_all(true));
+    }
+
+    #[test]
+    fn redraw_state_controls_compositor_and_view_decisions() {
+        let mut line_buffer = LineBuffer::new(2);
+        let mut grid = ScreenGrid::new(1, 2, true, &mut line_buffer);
+        grid.attrs.fill(7);
+
+        assert!(grid.requires_compositor_invalidation(false));
+        grid.revalidate_for_redraw();
+        assert_eq!(grid.attrs, [-1, -1]);
+        assert!(!grid.requires_compositor_invalidation(false));
+        assert!(grid.requires_compositor_invalidation(true));
+        {
+            let view = GridView::new(&grid, GridPosition::new(0, 0));
+            assert!(!view.requires_redraw());
+        }
+
+        grid.require_full_redraw();
+
+        assert!(grid.requires_compositor_invalidation(false));
+        let view = GridView::new(&grid, GridPosition::new(0, 0));
+        assert!(view.requires_redraw());
     }
 
     #[test]

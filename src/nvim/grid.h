@@ -92,6 +92,11 @@ typedef void (*MessageGridPositionEmitter)(int row, bool scrolled);
 
 extern void grid_alloc(ScreenGrid *grid, int rows, int columns, bool copy, bool valid);
 extern bool grid_is_allocated(const ScreenGrid *grid);
+extern bool grid_requires_compositor_invalidation(ScreenGrid *grid,
+                                                  bool clear_requested);
+extern void grid_revalidate_for_redraw(ScreenGrid *grid);
+extern void grid_require_full_redraw(ScreenGrid *grid);
+extern bool grid_view_requires_redraw(const GridView *view);
 extern void grid_initialize_default(ScreenGrid *grid);
 extern bool grid_configure_default(ScreenGrid *grid, int rows, int columns);
 extern WindowGridUpdate grid_configure_for_window(
