@@ -1643,18 +1643,38 @@ impl<'grid> GridView<'grid> {
         Self { target, offset }
     }
 
+    /// Translates a view-relative position into target-grid coordinates.
+    fn translated_position(&self, position: GridPosition) -> Option<GridPosition> {
+        Some(GridPosition::new(
+            position.row.checked_add(self.offset.row)?,
+            position.column.checked_add(self.offset.column)?,
+        ))
+    }
+
     /// Reads a view-relative cell when the caller's grid identity matches the
     /// view target.
     fn cell_for_grid(&self, expected_grid: GridId, position: GridPosition) -> Option<GridCell> {
         if self.target.id() != expected_grid {
             return None;
         }
-        let row = position.row.checked_add(self.offset.row)?;
-        let column = position.column.checked_add(self.offset.column)?;
-        let (Ok(row), Ok(column)) = (usize::try_from(row), usize::try_from(column)) else {
+        let position = self.translated_position(position)?;
+        let (Ok(row), Ok(column)) = (
+            usize::try_from(position.row),
+            usize::try_from(position.column),
+        ) else {
             return None;
         };
         self.target.cell(row, column)
+    }
+
+    /// Plans one cursor move translated through this view.
+    fn plan_cursor_move(
+        &self,
+        position: GridPosition,
+    ) -> Option<(GridOutputTarget, UiCommand<LocalGridSpace>)> {
+        let position = self.translated_position(position)?;
+        let target = GridOutputTarget::new(self.target.id(), self.target.cols);
+        Some((target, UiCommand::GridCursorGoto(position)))
     }
 
     /// Reports whether the target grid has `width` columns.
@@ -4631,6 +4651,42 @@ pub unsafe extern "C" fn grid_view_width_matches_target(
     GridView::new(&target, offset).width_matches_target(width)
 }
 
+/// Moves the UI cursor through a translated grid view.
+///
+/// Grid ownership is restored before the cursor command is emitted.
+///
+/// # Safety
+///
+/// `view` must be null or point to a valid `CGridView`. Its target, when
+/// non-null, must be a valid, exclusively accessible `CScreenGrid` whose
+/// buffers satisfy the ownership and layout requirements of `ScreenGrid`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn grid_view_cursor_goto(
+    view: *const CGridView,
+    row: libc::c_int,
+    column: libc::c_int,
+) {
+    if view.is_null() {
+        return;
+    }
+
+    // SAFETY: The caller guarantees that `view` points to a valid `CGridView`.
+    let view = unsafe { &*view };
+    if view.target.is_null() {
+        return;
+    }
+    let offset = GridPosition::new(view.row_offset, view.col_offset);
+    let output = {
+        // SAFETY: The caller transfers exclusive ownership of the target
+        // grid's buffers to the guard for the duration of this operation.
+        let target = unsafe { ScreenGridGuard::take(view.target) };
+        GridView::new(&target, offset).plan_cursor_move(GridPosition::new(row, column))
+    };
+    if let Some((target, command)) = output {
+        target.emit(command);
+    }
+}
+
 /// Refreshes the external representation of an allocated message grid.
 ///
 /// The resize command and position callback run after grid ownership has been
@@ -5619,11 +5675,12 @@ pub extern "C" fn schar_from_char(mut c: libc::c_int) -> VimSCharT {
 /// non-null buffers satisfy the ownership and layout requirements of
 /// `ScreenGrid`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn grid_assign_handle(grid: *mut CScreenGrid) {
+pub unsafe extern "C" fn grid_assign_handle(grid: *mut CScreenGrid) -> VimHandleT {
     // SAFETY: The caller transfers exclusive ownership of the grid buffers to
     // the guard.
     let mut grid = unsafe { ScreenGridGuard::take(grid) };
     GRID_HANDLE_ALLOCATOR.assign(&mut grid.handle);
+    grid.id().as_native_handle()
 }
 
 /// # Safety
@@ -6915,6 +6972,12 @@ mod tests {
 
         assert!(view.width_matches_target(3));
         assert!(!view.width_matches_target(2));
+        let (target, command) = view.plan_cursor_move(GridPosition::new(0, 1)).unwrap();
+        assert_eq!(target, GridOutputTarget::new(GridId::new(7), 3));
+        let UiCommand::GridCursorGoto(position) = command else {
+            panic!("a view cursor move must produce a cursor command");
+        };
+        assert_eq!(position, GridPosition::new(1, 2));
 
         assert_eq!(
             view.cell_for_grid(GridId::new(7), GridPosition::new(0, 1)),

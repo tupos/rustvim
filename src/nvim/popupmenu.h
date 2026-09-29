@@ -21,6 +21,7 @@ typedef struct {
 } pumitem_T;
 
 EXTERN ScreenGrid pum_grid INIT( = SCREEN_GRID_INIT);
+EXTERN handle_T pum_grid_handle INIT( = 0);
 
 /// state for pum_ext_select_item.
 EXTERN struct {

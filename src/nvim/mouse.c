@@ -1848,7 +1848,7 @@ win_T *mouse_find_win_outer(int *gridp, int *rowp, int *colp)
 
 static win_T *mouse_find_grid_win(int *gridp, int *rowp, int *colp)
 {
-  if (*gridp == msg_grid.handle) {
+  if (*gridp == msg_grid_handle) {
     *rowp += msg_grid_pos;
     *gridp = DEFAULT_GRID_HANDLE;
   } else if (*gridp > 1) {
@@ -1875,7 +1875,7 @@ static win_T *mouse_find_grid_win(int *gridp, int *rowp, int *colp)
       }
     }
 
-    if (found && hit.grid_handle == pum_grid.handle) {
+    if (found && hit.grid_handle == pum_grid_handle) {
       *gridp = hit.grid_handle;
       *rowp = hit.row;
       *colp = hit.column;

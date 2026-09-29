@@ -351,7 +351,9 @@ void pum_display(pumitem_T *array, int size, int selected, bool array_changed, i
 
     if (target_win != NULL) {
       // ext_popupmenu should always anchor to the default grid when multigrid is disabled
-      pum_anchor_grid = target_win->w_grid.target->handle;
+      pum_anchor_grid = target_win->w_grid.target == &default_grid
+                        ? DEFAULT_GRID_HANDLE
+                        : target_win->w_grid_handle;
       pum_win_row += target_win->w_grid.row_offset;
       cursor_col += target_win->w_grid.col_offset;
       if (target_win->w_grid.target != &default_grid) {
@@ -657,14 +659,14 @@ void pum_redraw(void)
     }
   }
   bool blending = p_pb > 0 || fconfig.shadow;
-  grid_assign_handle(&pum_grid);
+  pum_grid_handle = grid_assign_handle(&pum_grid);
 
   pum_left_col = pum_col - col_off;
   pum_right_col = pum_left_col + grid_width;
   bool moved = ui_comp_put_grid(&pum_grid, pum_row, pum_left_col,
                                 pum_height + border_width, grid_width + border_width, pum_zindex,
                                 blending, false, true, true,
-                                curwin ? curwin->w_grid_alloc.handle : 0);
+                                curwin ? curwin->w_grid_handle : 0);
   bool invalid_grid = moved || pum_invalid;
   pum_invalid = false;
   must_redraw_pum = false;
@@ -673,7 +675,7 @@ void pum_redraw(void)
   int grid_columns = grid_width + border_width;
   if (grid_configure_for_popup_menu(
         &pum_grid, grid_height, grid_columns, invalid_grid)) {
-    ui_call_grid_resize(pum_grid.handle, grid_columns, grid_height);
+    ui_call_grid_resize(pum_grid_handle, grid_columns, grid_height);
   }
   if (ui_has(kUIMultigrid)) {
     pum_pos_ui_flush(true);
@@ -1306,8 +1308,8 @@ void pum_check_clear(void)
     } else {
       ui_comp_remove_grid(&pum_grid);
       if (ui_has(kUIMultigrid)) {
-        ui_call_win_close(pum_grid.handle);
-        ui_call_grid_destroy(pum_grid.handle);
+        ui_call_win_close(pum_grid_handle);
+        ui_call_grid_destroy(pum_grid_handle);
       }
       // TODO(bfredl): consider keeping float grids allocated.
       grid_free(&pum_grid);
@@ -1427,7 +1429,7 @@ static void pum_position_at_mouse(int min_width)
       }
     }
   }
-  if (pum_grid.handle != 0 && grid == pum_grid.handle) {
+  if (pum_grid_handle != 0 && grid == pum_grid_handle) {
     // Repositioning the menu by right-clicking on itself
     row += pum_row;
     col += pum_left_col;
@@ -1492,7 +1494,7 @@ static void pum_select_mouse_pos(void)
     mouse_find_win_outer(&grid, &row, &col);
   }
 
-  if (grid == pum_grid.handle) {
+  if (grid == pum_grid_handle) {
     // Offset by 1 when border width is 2 (non-shadow border)
     int border_offset = pum_border_width() == 2 ? 1 : 0;
     int item = row - border_offset;
@@ -1656,7 +1658,9 @@ void pum_make_popup(const char *path_name, int use_mouse_pos)
                 + (curwin->w_p_rl ? curwin->w_view_width - curwin->w_wcol - 1
                                   : curwin->w_wcol);
     if (ui_has(kUIMultigrid)) {
-      mouse_grid = curwin->w_grid.target->handle;
+      mouse_grid = curwin->w_grid.target == &default_grid
+                   ? DEFAULT_GRID_HANDLE
+                   : curwin->w_grid_handle;
     } else if (curwin->w_grid.target != &default_grid) {
       mouse_grid = 0;
       mouse_row += curwin->w_winrow;
@@ -1673,13 +1677,13 @@ void pum_make_popup(const char *path_name, int use_mouse_pos)
 void pum_pos_ui_flush(bool force)
 {
   if (force || (ui_has(kUIMultigrid) && pum_is_drawn && !pum_external
-                && pum_grid.handle != 0
-                && ui_comp_grid_publication_pending(pum_grid.handle))) {
-    int compositor_index = ui_comp_take_grid_publication(pum_grid.handle);
+                && pum_grid_handle != 0
+                && ui_comp_grid_publication_pending(pum_grid_handle))) {
+    int compositor_index = ui_comp_take_grid_publication(pum_grid_handle);
     assert(compositor_index > 0);
     const char *anchor = pum_above ? "SW" : "NW";
     int row_off = pum_above ? -pum_height : 0;
-    ui_call_win_float_pos(pum_grid.handle, -1, cstr_as_string(anchor), pum_anchor_grid,
+    ui_call_win_float_pos(pum_grid_handle, -1, cstr_as_string(anchor), pum_anchor_grid,
                           pum_row - row_off - pum_win_row_offset, pum_left_col - pum_win_col_offset,
                           false, pum_zindex, compositor_index, pum_row, pum_left_col);
   }

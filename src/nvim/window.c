@@ -877,13 +877,14 @@ void ui_ext_win_position(win_T *wp, bool validate)
 {
   wp->w_pos_changed = false;
   if (!wp->w_floating) {
-    ui_call_win_pos(wp->w_grid_alloc.handle, wp->handle, wp->w_winrow,
+    ui_call_win_pos(wp->w_grid_handle, wp->handle, wp->w_winrow,
                     wp->w_wincol, wp->w_width, wp->w_height);
     return;
   }
 
   WinConfig c = wp->w_config;
   if (!c.external) {
+    handle_T anchor_grid_handle = DEFAULT_GRID_HANDLE;
     ScreenGrid *grid = &default_grid;
     Float row = c.row;
     Float col = c.col;
@@ -906,8 +907,11 @@ void ui_ext_win_position(win_T *wp, bool validate)
         grid = grid_adjust(&win->w_grid, &row_off, &col_off);
         row += row_off;
         col += col_off;
+        anchor_grid_handle = grid == &default_grid
+                             ? DEFAULT_GRID_HANDLE
+                             : win->w_grid_handle;
         if (grid != &default_grid) {
-          if (!ui_comp_grid_origin(grid->handle, &anchor_grid_row, &anchor_grid_col)) {
+          if (!ui_comp_grid_origin(anchor_grid_handle, &anchor_grid_row, &anchor_grid_col)) {
             anchor_grid_row = win->w_winrow;
             anchor_grid_col = win->w_wincol;
           }
@@ -955,30 +959,30 @@ void ui_ext_win_position(win_T *wp, bool validate)
       ui_comp_put_grid(&wp->w_grid_alloc, comp_row, comp_col,
                        wp->w_height_outer, wp->w_width_outer, c.zindex,
                        wp->w_p_winbl > 0 || c.shadow, valid, false, c.mouse,
-                       curwin ? curwin->w_grid_alloc.handle : 0);
+                       curwin ? curwin->w_grid_handle : 0);
       if (ui_has(kUIMultigrid)) {
         int compositor_index =
-          ui_comp_take_grid_publication(wp->w_grid_alloc.handle);
+          ui_comp_take_grid_publication(wp->w_grid_handle);
         assert(compositor_index > 0);
         String anchor = cstr_as_string(float_anchor_str[c.anchor]);
-        ui_call_win_float_pos(wp->w_grid_alloc.handle, wp->handle, anchor,
-                              grid->handle, row, col, c.mouse,
+        ui_call_win_float_pos(wp->w_grid_handle, wp->handle, anchor,
+                              anchor_grid_handle, row, col, c.mouse,
                               c.zindex, compositor_index,
                               wp->w_winrow, wp->w_wincol);
       }
-      ui_check_cursor_grid(wp->w_grid_alloc.handle);
+      ui_check_cursor_grid(wp->w_grid_handle);
       if (!valid) {
         grid_require_full_redraw(&wp->w_grid_alloc);
         redraw_later(wp, UPD_NOT_VALID);
       }
     } else {
       if (ui_has(kUIMultigrid)) {
-        ui_call_win_hide(wp->w_grid_alloc.handle);
+        ui_call_win_hide(wp->w_grid_handle);
       }
       ui_comp_remove_grid(&wp->w_grid_alloc);
     }
   } else {
-    ui_call_win_external_pos(wp->w_grid_alloc.handle, wp->handle);
+    ui_call_win_external_pos(wp->w_grid_handle, wp->handle);
   }
 }
 
@@ -1034,7 +1038,7 @@ void ui_ext_win_viewport(win_T *wp)
       // interact with incomplete final line? Diff filler lines?
       ev_botline = line_count;
     }
-    ui_call_win_viewport(wp->w_grid_alloc.handle, wp->handle, wp->w_topline - 1, ev_botline,
+    ui_call_win_viewport(wp->w_grid_handle, wp->handle, wp->w_topline - 1, ev_botline,
                          wp->w_cursor.lnum - 1, wp->w_cursor.col, line_count, delta);
     wp->w_viewport_invalid = false;
     wp->w_viewport_last_topline = wp->w_topline;
@@ -1376,7 +1380,7 @@ win_T *win_split_ins(int size, int flags, win_T *new_wp, int dir, frame_T *to_fl
       wp->w_pos_changed = true;
     } else {
       // No longer a float, a non-multigrid UI shouldn't draw it as such
-      ui_call_win_hide(wp->w_grid_alloc.handle);
+      ui_call_win_hide(wp->w_grid_handle);
       win_free_grid(wp, true);
     }
 
@@ -1782,7 +1786,7 @@ win_T *win_find_by_grid_handle(handle_T handle)
   FUNC_ATTR_PURE FUNC_ATTR_WARN_UNUSED_RESULT
 {
   FOR_ALL_WINDOWS_IN_TAB(wp, curtab) {
-    if (wp->w_grid_alloc.handle == handle) {
+    if (wp->w_grid_handle == handle) {
       return wp;
     }
   }
@@ -2972,7 +2976,7 @@ int win_close(win_T *win, bool free_buf, bool force)
 
   bool was_floating = win->w_floating;
   if (ui_has(kUIMultigrid)) {
-    ui_call_win_close(win->w_grid_alloc.handle);
+    ui_call_win_close(win->w_grid_handle);
   }
 
   if (win->w_floating) {
@@ -3286,7 +3290,7 @@ bool win_close_othertab(win_T *win, int free_buf, tabpage_T *tp, bool force)
   }
 
   if (ui_has(kUIMultigrid)) {
-    ui_call_win_close(win->w_grid_alloc.handle);
+    ui_call_win_close(win->w_grid_handle);
   }
   if (win->w_floating) {
     ui_comp_remove_grid(&win->w_grid_alloc);
@@ -5506,7 +5510,7 @@ win_T *win_alloc(win_T *after, bool hidden)
   new_wp->handle = ++last_win_id;
   pmap_put(int)(&window_handles, new_wp->handle, new_wp);
 
-  grid_assign_handle(&new_wp->w_grid_alloc);
+  new_wp->w_grid_handle = grid_assign_handle(&new_wp->w_grid_alloc);
 
   // Init w: variables.
   new_wp->w_vars = tv_dict_alloc();
@@ -5697,13 +5701,14 @@ void win_free(win_T *wp, tabpage_T *tp)
 
 void win_free_grid(win_T *wp, bool reinit)
 {
-  if (wp->w_grid_alloc.handle != 0 && ui_has(kUIMultigrid)) {
-    ui_call_grid_destroy(wp->w_grid_alloc.handle);
+  if (wp->w_grid_handle != 0 && ui_has(kUIMultigrid)) {
+    ui_call_grid_destroy(wp->w_grid_handle);
   }
   grid_free(&wp->w_grid_alloc);
   if (reinit) {
     // if a float is turned into a split, the grid data structure will be reused
     CLEAR_FIELD(wp->w_grid_alloc);
+    wp->w_grid_handle = grid_assign_handle(&wp->w_grid_alloc);
   }
 }
 
@@ -5734,7 +5739,8 @@ void win_grid_alloc(win_T *wp)
   WindowGridUpdate update = grid_configure_for_window(
     &wp->w_grid_alloc, &wp->w_grid, total_rows, total_cols,
     use_dedicated_grid, row_offset, col_offset);
-  if (update.grid_handle == 0) {
+  wp->w_grid_handle = update.grid_handle;
+  if (wp->w_grid_handle == 0) {
     return;
   }
 
@@ -5746,8 +5752,8 @@ void win_grid_alloc(win_T *wp)
   // requires every grid size to be resent, or the UI requires multigrid
   // events.
   if ((resizing_screen || update.resized) && use_dedicated_grid) {
-    ui_call_grid_resize(update.grid_handle, total_cols, total_rows);
-    ui_check_cursor_grid(update.grid_handle);
+    ui_call_grid_resize(wp->w_grid_handle, total_cols, total_rows);
+    ui_check_cursor_grid(wp->w_grid_handle);
   }
 }
 
@@ -7147,7 +7153,7 @@ void win_set_inner_size(win_T *wp, bool valid_cursor)
   wp->w_wincol_off = wp->w_border_adj[3];
 
   if (ui_has(kUIMultigrid)) {
-    ui_call_win_viewport_margins(wp->w_grid_alloc.handle, wp->handle,
+    ui_call_win_viewport_margins(wp->w_grid_handle, wp->handle,
                                  wp->w_winrow_off, wp->w_border_adj[2],
                                  wp->w_wincol_off, wp->w_border_adj[1]);
   }
@@ -7960,17 +7966,17 @@ void win_ui_flush(bool validate)
 {
   FOR_ALL_TAB_WINDOWS(tp, wp) {
     if ((wp->w_pos_changed
-         || ui_comp_grid_publication_pending(wp->w_grid_alloc.handle))
+         || ui_comp_grid_publication_pending(wp->w_grid_handle))
         && grid_is_allocated(&wp->w_grid_alloc)) {
       if (tp == curtab) {
         ui_ext_win_position(wp, validate);
       } else {
-        ui_call_win_hide(wp->w_grid_alloc.handle);
+        ui_call_win_hide(wp->w_grid_handle);
         wp->w_pos_changed = false;
       }
-      if (ui_comp_grid_publication_pending(wp->w_grid_alloc.handle)) {
+      if (ui_comp_grid_publication_pending(wp->w_grid_handle)) {
         int compositor_index =
-          ui_comp_take_grid_publication(wp->w_grid_alloc.handle);
+          ui_comp_take_grid_publication(wp->w_grid_handle);
         assert(compositor_index > 0);
       }
     }

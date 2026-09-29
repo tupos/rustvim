@@ -98,6 +98,7 @@ extern void grid_revalidate_for_redraw(ScreenGrid *grid);
 extern void grid_require_full_redraw(ScreenGrid *grid);
 extern bool grid_view_requires_redraw(const GridView *view);
 extern bool grid_view_width_matches_target(const GridView *view, int width);
+extern void grid_view_cursor_goto(const GridView *view, int row, int col);
 extern void grid_initialize_default(ScreenGrid *grid);
 extern bool grid_configure_default(ScreenGrid *grid, int rows, int columns);
 extern WindowGridUpdate grid_configure_for_window(
@@ -200,7 +201,7 @@ extern void grid_put_window_line(const GridView *view,
 extern void grid_draw_border(ScreenGrid *grid, const GridBorderConfig *config, const int *adj,
                              int winbl, int win_hl_attr_normal);
 
-extern void grid_assign_handle(ScreenGrid *grid);
+extern handle_T grid_assign_handle(ScreenGrid *grid);
 
 extern void grid_ins_lines(ScreenGrid *grid, int row, int line_count, int end, int col, int width);
 

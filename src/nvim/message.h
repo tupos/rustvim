@@ -44,6 +44,7 @@ EXTERN bool msg_ext_fast INIT( = true);
 /// allocated grid for messages. Used unless ext_messages is active.
 /// See also the description at msg_scroll_flush()
 EXTERN ScreenGrid msg_grid INIT( = SCREEN_GRID_INIT);
+EXTERN handle_T msg_grid_handle INIT( = 0);
 EXTERN int msg_grid_pos INIT( = 0);
 
 /// "adjusted" message grid. This grid accepts positions relative to

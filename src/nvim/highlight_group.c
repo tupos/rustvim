@@ -2312,7 +2312,7 @@ void highlight_changed(void)
         clear_cmdline = true;
         HlAttrs attrs = syn_attr2entry(highlight_attr[hlf]);
         ui_comp_update_grid_layer(
-          msg_grid.handle, kZIndexMessages, attrs.hl_blend > -1, false);
+          msg_grid_handle, kZIndexMessages, attrs.hl_blend > -1, false);
       }
       ui_call_hl_group_set(cstr_as_string(hlf_names[hlf]),
                            highlight_attr[hlf]);

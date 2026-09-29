@@ -168,8 +168,8 @@ static void ui_ext_msg_set_pos(int row, bool scrolled)
 {
   char buf[MAX_SCHAR_SIZE];
   size_t size = schar_get(buf, curwin->w_p_fcs_chars.msgsep);
-  int compositor_index = ui_comp_take_grid_publication(msg_grid.handle);
-  ui_call_msg_set_pos(msg_grid.handle, row, scrolled,
+  int compositor_index = ui_comp_take_grid_publication(msg_grid_handle);
+  ui_call_msg_set_pos(msg_grid_handle, row, scrolled,
                       (String){ .data = buf, .size = size }, kZIndexMessages,
                       compositor_index);
 }
@@ -188,6 +188,7 @@ bool msg_use_grid(void)
 
 void msg_grid_validate(void)
 {
+  msg_grid_handle = grid_assign_handle(&msg_grid);
   bool should_alloc = msg_use_grid();
   int max_rows = Rows - (int)p_ch;
   MessageGridTransition transition = grid_prepare_for_messages(
@@ -201,14 +202,14 @@ void msg_grid_validate(void)
     bool blending = syn_attr2entry(highlight_attr[HLF_MSG]).hl_blend > -1;
     ui_comp_put_grid(&msg_grid, pos, 0, Rows, Columns,
                      kZIndexMessages, blending, false, true, false,
-                     curwin ? curwin->w_grid_alloc.handle : 0);
-    ui_call_grid_resize(msg_grid.handle, Columns, Rows);
+                     curwin ? curwin->w_grid_handle : 0);
+    ui_call_grid_resize(msg_grid_handle, Columns, Rows);
 
     msg_grid_adj.target = &msg_grid;
   } else if (transition == kMessageGridReleaseRequired) {
     ui_comp_remove_grid(&msg_grid);
     grid_release_message(&msg_grid);
-    ui_call_grid_destroy(msg_grid.handle);
+    ui_call_grid_destroy(msg_grid_handle);
     msg_grid_adj.row_offset = 0;
     msg_grid_adj.target = &default_grid;
     redraw_cmdline = true;
@@ -2578,8 +2579,7 @@ void msg_cursor_goto(int row, int col)
   if (cmdmsg_rl) {
     col = Columns - 1 - col;
   }
-  ScreenGrid *grid = grid_adjust(&msg_grid_adj, &row, &col);
-  ui_grid_cursor_goto(grid->handle, row, col);
+  grid_view_cursor_goto(&msg_grid_adj, row, col);
 }
 
 /// @return  true when ":filter pattern" was used and "msg" does not match
@@ -2671,7 +2671,7 @@ void msg_ui_refresh(void)
 void msg_ui_flush(void)
 {
   if (ui_has(kUIMultigrid) && grid_is_allocated(&msg_grid)
-      && ui_comp_grid_publication_pending(msg_grid.handle)) {
+      && ui_comp_grid_publication_pending(msg_grid_handle)) {
     ui_ext_msg_set_pos(msg_grid_pos, msg_scrolled);
   }
 }
