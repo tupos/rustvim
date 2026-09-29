@@ -21,11 +21,11 @@ use crate::{
 use std::{
     borrow::Cow,
     cell::RefCell,
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     ffi::CStr,
     ops::Range,
     sync::{
-        Mutex, MutexGuard,
+        LazyLock, Mutex, MutexGuard,
         atomic::{AtomicI32, Ordering},
     },
 };
@@ -40,6 +40,7 @@ pub use line_buffer::LineBuffer;
 use line_buffer::{LineTextRenderOptions, LineTextVirtualColumns};
 use line_submission::{LineSubmission, SmoothScrollMarker};
 pub(crate) use row::{GridRow, GridRowSegment};
+use store::{GridStoreResult, StoredGridGuard, lock_grid_store};
 use tabstops::TabStops;
 use virtual_text::{VirtualText, VirtualTextChunk, VirtualTextRenderOptions};
 
@@ -1155,9 +1156,8 @@ impl ScreenGrid {
             return output;
         }
         let row = row as usize;
-        let invalid_row = unsafe {
-            self.chars.as_mut_ptr() != default_grid.chars && self.is_invalid_row(row) && col == 0
-        };
+        let invalid_row =
+            self.id() != GridId::new(DEFAULT_GRID_HANDLE) && self.is_invalid_row(row) && col == 0;
         let offset_to = self.line_offset[row] + col_offset as usize;
         let max_offset_to = self.line_offset[row] + self.cols as usize;
 
@@ -1689,34 +1689,137 @@ impl<'grid> GridView<'grid> {
     }
 }
 
-/// Temporary Rust ownership of the allocations exposed by a C screen grid.
+static PERMANENT_GRID_BINDINGS: LazyLock<Mutex<HashMap<usize, GridId>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Acquires the temporary mapping from C grid addresses to Rust identities.
+fn lock_permanent_grid_bindings() -> MutexGuard<'static, HashMap<usize, GridId>> {
+    PERMANENT_GRID_BINDINGS
+        .try_lock()
+        .expect("permanent grid bindings are already borrowed")
+}
+
+/// Returns the stable address used to recognize one temporary C identity.
+fn cgrid_address(cgrid: std::ptr::NonNull<CScreenGrid>) -> usize {
+    cgrid.as_ptr() as usize
+}
+
+/// Resolves a C grid address when its grid has permanent Rust ownership.
+fn permanent_grid_id(cgrid: std::ptr::NonNull<CScreenGrid>) -> Option<GridId> {
+    lock_permanent_grid_bindings()
+        .get(&cgrid_address(cgrid))
+        .copied()
+}
+
+/// Storage selected for one grid operation at the C boundary.
+enum ScreenGridStorage {
+    /// Allocations temporarily taken from the legacy C representation.
+    Legacy(Option<ScreenGrid>),
+    /// A direct borrow from permanent Rust storage.
+    Permanent(StoredGridGuard),
+}
+
+/// Exclusive Rust access to a screen grid received through the C boundary.
 ///
-/// The C structure remains at a stable address while this guard exists so
-/// synchronous C callbacks can inspect its fields as non-owning views. The
-/// allocations are returned to that structure when the guard is dropped.
-#[must_use = "dropping the guard restores ownership to the C screen grid"]
+/// Legacy grids temporarily transfer their allocations and receive them back
+/// when this guard is dropped. Permanently stored grids use the C address only
+/// as an opaque identity and remain owned by `GridStore`.
+#[must_use = "the guard keeps exclusive ownership of the selected screen grid"]
 pub(crate) struct ScreenGridGuard {
     cgrid: std::ptr::NonNull<CScreenGrid>,
-    grid: Option<ScreenGrid>,
+    storage: ScreenGridStorage,
 }
 
 impl ScreenGridGuard {
-    /// Takes temporary ownership of a C screen grid's allocations.
+    /// Resolves a C grid identity to exclusive Rust grid access.
     ///
     /// # Safety
     ///
-    /// `cgrid` must point to a valid, exclusively owned `CScreenGrid` and
-    /// remain valid until this guard is dropped. Its buffers must satisfy the
-    /// ownership and layout requirements of `ScreenGrid::take_from_cgrid`.
+    /// `cgrid` must identify either a permanently registered grid or a valid,
+    /// exclusively owned legacy `CScreenGrid`. A legacy grid must remain valid
+    /// until this guard is dropped, and its buffers must satisfy the ownership
+    /// and layout requirements of `ScreenGrid::take_from_cgrid`.
     pub(crate) unsafe fn take(cgrid: *mut CScreenGrid) -> Self {
         let cgrid = std::ptr::NonNull::new(cgrid).expect("screen grid is nullptr");
+        let permanent_grid_id = permanent_grid_id(cgrid);
+        if let Some(grid_id) = permanent_grid_id {
+            let grid = StoredGridGuard::acquire(grid_id)
+                .expect("permanent C grid identity must resolve to its Rust grid");
+            return Self {
+                cgrid,
+                storage: ScreenGridStorage::Permanent(grid),
+            };
+        }
+
         // SAFETY: The caller guarantees exclusive ownership of the C grid and
         // its allocations for the lifetime of this guard.
         let grid = unsafe { ScreenGrid::take_from_cgrid(&mut *cgrid.as_ptr()) };
         Self {
             cgrid,
-            grid: Some(grid),
+            storage: ScreenGridStorage::Legacy(Some(grid)),
         }
+    }
+
+    /// Moves a legacy grid into permanent Rust storage.
+    ///
+    /// The C structure is replaced with an opaque identity after registration.
+    pub(crate) fn store_permanently(mut self) -> GridStoreResult<GridId> {
+        if let ScreenGridStorage::Permanent(grid) = &self.storage {
+            return Ok(grid.id());
+        }
+
+        let ScreenGridStorage::Legacy(grid) = &mut self.storage else {
+            unreachable!("all screen-grid storage variants are handled");
+        };
+        let grid_id = grid
+            .as_ref()
+            .expect("legacy screen-grid guard does not own a grid")
+            .id();
+
+        {
+            let mut store = lock_grid_store();
+            store.validate_registration(grid_id)?;
+            let grid = grid
+                .take()
+                .expect("legacy screen-grid guard does not own a grid");
+            store
+                .register(grid)
+                .expect("validated grid registration must succeed");
+        }
+
+        let previous = lock_permanent_grid_bindings().insert(cgrid_address(self.cgrid), grid_id);
+        assert!(
+            previous.is_none(),
+            "C grid address must not already identify permanent storage"
+        );
+
+        // SAFETY: This guard has exclusive access to the C representation.
+        // Its former allocations now belong to the permanent Rust store.
+        unsafe {
+            *self.cgrid.as_ptr() = CScreenGrid::opaque(grid_id);
+        }
+        Ok(grid_id)
+    }
+
+    /// Removes and drops a grid that is permanently bound to `cgrid`.
+    ///
+    /// Returns whether the C address identified permanent storage.
+    ///
+    /// # Safety
+    ///
+    /// `cgrid` must be null or point to an exclusively accessible
+    /// `CScreenGrid`.
+    unsafe fn release_permanent(cgrid: *mut CScreenGrid) -> bool {
+        let Some(cgrid) = std::ptr::NonNull::new(cgrid) else {
+            return false;
+        };
+        let Some(grid_id) = lock_permanent_grid_bindings().remove(&cgrid_address(cgrid)) else {
+            return false;
+        };
+        lock_grid_store()
+            .remove(grid_id)
+            .expect("permanent C grid identity must resolve to its Rust grid");
+        true
     }
 }
 
@@ -1724,26 +1827,34 @@ impl std::ops::Deref for ScreenGridGuard {
     type Target = ScreenGrid;
 
     fn deref(&self) -> &Self::Target {
-        self.grid
-            .as_ref()
-            .expect("screen grid guard does not own a grid")
+        match &self.storage {
+            ScreenGridStorage::Legacy(grid) => grid
+                .as_ref()
+                .expect("legacy screen-grid guard does not own a grid"),
+            ScreenGridStorage::Permanent(grid) => grid,
+        }
     }
 }
 
 impl std::ops::DerefMut for ScreenGridGuard {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        self.grid
-            .as_mut()
-            .expect("screen grid guard does not own a grid")
+        match &mut self.storage {
+            ScreenGridStorage::Legacy(grid) => grid
+                .as_mut()
+                .expect("legacy screen-grid guard does not own a grid"),
+            ScreenGridStorage::Permanent(grid) => grid,
+        }
     }
 }
 
 impl Drop for ScreenGridGuard {
     fn drop(&mut self) {
-        let grid = self
-            .grid
-            .take()
-            .expect("screen grid guard does not own a grid");
+        let ScreenGridStorage::Legacy(grid) = &mut self.storage else {
+            return;
+        };
+        let Some(grid) = grid.take() else {
+            return;
+        };
         // SAFETY: This guard uniquely owns the Rust grid and the C destination
         // remains valid until the guard is dropped.
         unsafe {
@@ -2288,8 +2399,11 @@ impl CLineGrid {
     ) {
         let target = std::ptr::NonNull::new(grid).expect("screen grid is nullptr");
         assert!(self.target.is_none());
-        // SAFETY: The caller guarantees that `target` points to a valid grid.
-        let cols = unsafe { target.as_ref().cols };
+        let cols = {
+            // SAFETY: The caller guarantees exclusive access to the target
+            // grid for this operation.
+            unsafe { ScreenGridGuard::take(target.as_ptr()) }.cols
+        };
         self.state.begin(cols, row, col, line_buf);
         self.target = Some(target);
     }
@@ -2402,8 +2516,11 @@ impl CLineGrid {
         line_buf: &mut LineBuffer,
     ) -> Option<(GridOutputTarget, Vec<OwnedRawLineCommand>)> {
         let target = self.target();
-        // SAFETY: The active target remains valid until the matching flush.
-        let rows = unsafe { target.as_ref().rows };
+        let rows = {
+            // SAFETY: The active target remains exclusively accessible until
+            // the matching flush.
+            unsafe { ScreenGridGuard::take(target.as_ptr()) }.rows
+        };
         if self.state.row < 0 || self.state.row >= rows {
             if (unsafe { rdb_flags } & RdbFlags::Invalid as u32) != 0 {
                 panic!("rdb_flags & RdbFlags::Invalid != 0");
@@ -2423,8 +2540,12 @@ impl CLineGrid {
     /// Reports whether the active row reaches or exceeds the target grid.
     fn row_reaches_grid_end(&self) -> bool {
         let target = self.target();
-        // SAFETY: The active target remains valid until the matching flush.
-        self.state.row >= unsafe { target.as_ref().rows }
+        let rows = {
+            // SAFETY: The active target remains exclusively accessible until
+            // the matching flush.
+            unsafe { ScreenGridGuard::take(target.as_ptr()) }.rows
+        };
+        self.state.row >= rows
     }
 
     /// Discards the active operation without writing its buffered contents.
@@ -3422,6 +3543,24 @@ pub struct CScreenGrid {
     valid: bool,
 
     throttled: bool,
+}
+
+impl CScreenGrid {
+    /// Creates the temporary C representation of a Rust-owned grid identity.
+    fn opaque(grid_id: GridId) -> Self {
+        Self {
+            handle: grid_id.as_native_handle(),
+            chars: std::ptr::null_mut(),
+            attrs: std::ptr::null_mut(),
+            vcols: std::ptr::null_mut(),
+            line_offset: std::ptr::null_mut(),
+            dirty_col: std::ptr::null_mut(),
+            rows: 0,
+            cols: 0,
+            valid: false,
+            throttled: false,
+        }
+    }
 }
 
 /// C representation of a pending message-grid lifecycle transition.
@@ -4526,10 +4665,17 @@ pub extern "C" fn alloc_initial_line_buffer() {
 /// `grid` must be null or point to a valid, readable `CScreenGrid`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn grid_is_allocated(grid: *const CScreenGrid) -> bool {
-    // SAFETY: The caller guarantees that a non-null pointer is valid and
-    // readable. `as_ref` converts a null pointer to `None`.
-    let grid = unsafe { grid.as_ref() };
-    grid.is_some_and(CScreenGrid::is_allocated)
+    let Some(cgrid) = std::ptr::NonNull::new(grid.cast_mut()) else {
+        return false;
+    };
+    if let Some(grid_id) = permanent_grid_id(cgrid) {
+        return StoredGridGuard::acquire(grid_id)
+            .expect("permanent C grid identity must resolve to its Rust grid")
+            .is_allocated();
+    }
+
+    // SAFETY: The caller guarantees that this legacy C grid is readable.
+    unsafe { cgrid.as_ref() }.is_allocated()
 }
 
 /// Reports whether the current screen update must invalidate composed output.
@@ -5245,8 +5391,14 @@ pub unsafe extern "C" fn grid_configure_for_window(
 ///
 /// `grid` must point to a valid, exclusively accessible `CScreenGrid`. Its
 /// non-null buffer pointers must own compatible, unreclaimed Rust allocations.
+/// It may instead be an opaque identity registered with the permanent store.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn grid_free(grid: *mut CScreenGrid) {
+    // SAFETY: The caller guarantees exclusive access to this grid identity.
+    if unsafe { ScreenGridGuard::release_permanent(grid) } {
+        return;
+    }
+
     // SAFETY: The caller transfers ownership of every grid allocation.
     let _owned_grid = unsafe { ScreenGrid::take_from_cgrid(&mut *grid) };
 
@@ -7036,6 +7188,59 @@ mod tests {
             restored_grid.chars.as_slice(),
             &[schar_from_ascii('x'), schar_from_ascii(' ')]
         );
+    }
+
+    #[test]
+    fn screen_grid_guard_resolves_permanent_rust_storage() {
+        let mut line_buffer = LineBuffer::new(2);
+        let mut grid = ScreenGrid::new(1, 2, true, &mut line_buffer);
+        grid.handle = 70_001;
+        // SAFETY: Ownership of every grid allocation is transferred to
+        // `cgrid`.
+        let mut cgrid = unsafe { grid.to_cgrid() };
+
+        // SAFETY: `cgrid` exclusively owns valid grid allocations and remains
+        // at a stable address until the permanent binding is released.
+        let grid_id = unsafe { ScreenGridGuard::take(&raw mut cgrid) }
+            .store_permanently()
+            .unwrap();
+
+        assert_eq!(grid_id, GridId::new(70_001));
+        assert_eq!(cgrid.handle, 70_001);
+        assert!(cgrid.chars.is_null());
+        assert!(cgrid.attrs.is_null());
+        assert!(cgrid.vcols.is_null());
+        assert!(cgrid.line_offset.is_null());
+
+        // SAFETY: `cgrid` remains a valid opaque identity for the permanently
+        // stored grid.
+        assert!(unsafe { grid_is_allocated(&raw const cgrid) });
+
+        {
+            // SAFETY: The stable C address identifies the registered Rust
+            // grid, and this scope has exclusive access to it.
+            let mut grid = unsafe { ScreenGridGuard::take(&raw mut cgrid) };
+            grid.chars[0] = schar_from_ascii('x');
+        }
+        {
+            // SAFETY: The previous guard was dropped before reacquiring the
+            // permanently stored grid.
+            let grid = unsafe { ScreenGridGuard::take(&raw mut cgrid) };
+            assert_eq!(grid.chars[0], schar_from_ascii('x'));
+        }
+
+        let mut line_grid = CLineGrid::new();
+        // SAFETY: The stable C address identifies the registered Rust grid and
+        // remains valid for the complete line operation.
+        unsafe {
+            line_grid.begin_raw_grid(&raw mut cgrid, 0, 0, &mut line_buffer);
+        }
+        assert_eq!(line_grid.max_col(), 2);
+        assert!(!line_grid.row_reaches_grid_end());
+        line_grid.cancel();
+
+        // SAFETY: No grid guard remains, and `cgrid` is exclusively accessible.
+        assert!(unsafe { ScreenGridGuard::release_permanent(&raw mut cgrid) });
     }
 
     #[test]

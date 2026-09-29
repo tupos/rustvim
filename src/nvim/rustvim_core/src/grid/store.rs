@@ -1,6 +1,10 @@
 #![forbid(unsafe_code)]
 
-use std::collections::{HashMap, HashSet, hash_map::Entry};
+use std::{
+    collections::{HashMap, HashSet, hash_map::Entry},
+    ops::{Deref, DerefMut},
+    sync::{LazyLock, Mutex, MutexGuard},
+};
 
 use super::{GridId, ScreenGrid};
 
@@ -46,12 +50,7 @@ impl GridStore {
     /// Registers one grid under its existing stable identity.
     pub(crate) fn register(&mut self, grid: ScreenGrid) -> GridStoreResult<GridId> {
         let grid_id = grid.id();
-        if grid_id.as_native_handle() <= 0 {
-            return Err(GridStoreError::InvalidIdentity(grid_id));
-        }
-        if self.retired.contains(&grid_id) {
-            return Err(GridStoreError::RetiredIdentity(grid_id));
-        }
+        self.validate_registration(grid_id)?;
 
         match self.grids.entry(grid_id) {
             Entry::Vacant(entry) => {
@@ -60,6 +59,20 @@ impl GridStore {
             }
             Entry::Occupied(_) => Err(GridStoreError::AlreadyRegistered(grid_id)),
         }
+    }
+
+    /// Validates an identity before its grid is moved into this store.
+    pub(super) fn validate_registration(&self, grid_id: GridId) -> GridStoreResult<()> {
+        if grid_id.as_native_handle() <= 0 {
+            return Err(GridStoreError::InvalidIdentity(grid_id));
+        }
+        if self.retired.contains(&grid_id) {
+            return Err(GridStoreError::RetiredIdentity(grid_id));
+        }
+        if self.grids.contains_key(&grid_id) {
+            return Err(GridStoreError::AlreadyRegistered(grid_id));
+        }
+        Ok(())
     }
 
     /// Borrows one registered grid.
@@ -88,6 +101,48 @@ impl GridStore {
             "a live grid identity cannot already be retired"
         );
         Ok(grid)
+    }
+}
+
+static GRID_STORE: LazyLock<Mutex<GridStore>> = LazyLock::new(|| Mutex::new(GridStore::new()));
+
+/// Acquires exclusive access to permanent screen-grid storage.
+pub(super) fn lock_grid_store() -> MutexGuard<'static, GridStore> {
+    GRID_STORE
+        .try_lock()
+        .expect("permanent grid store is already borrowed")
+}
+
+/// One exclusive borrow of a permanently stored screen grid.
+pub(super) struct StoredGridGuard {
+    store: MutexGuard<'static, GridStore>,
+    grid_id: GridId,
+}
+
+impl StoredGridGuard {
+    /// Borrows a registered grid until this guard is dropped.
+    pub(super) fn acquire(grid_id: GridId) -> GridStoreResult<Self> {
+        let store = lock_grid_store();
+        store.grid(grid_id)?;
+        Ok(Self { store, grid_id })
+    }
+}
+
+impl Deref for StoredGridGuard {
+    type Target = ScreenGrid;
+
+    fn deref(&self) -> &Self::Target {
+        self.store
+            .grid(self.grid_id)
+            .expect("stored grid disappeared while borrowed")
+    }
+}
+
+impl DerefMut for StoredGridGuard {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.store
+            .grid_mut(self.grid_id)
+            .expect("stored grid disappeared while mutably borrowed")
     }
 }
 

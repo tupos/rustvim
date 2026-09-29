@@ -275,7 +275,7 @@ pub(in crate::ui_compositor) fn replace_compositor_grid_bindings(
     Ok(())
 }
 
-/// Initializes compositor layer ownership and its default-grid binding.
+/// Moves the default grid into permanent storage and initializes its binding.
 ///
 /// # Safety
 ///
@@ -286,11 +286,12 @@ pub(in crate::ui_compositor) unsafe fn initialize_grid_bindings(
 ) -> CompositorResult<GridId> {
     let default_cgrid = NonNull::new(default_grid).ok_or(CompositorError::InvalidLayerState)?;
 
-    let default_grid_id = {
+    let default_grid_id = unsafe {
         // SAFETY: The caller transfers exclusive ownership for this scope.
-        let default_grid = unsafe { ScreenGridGuard::take(default_grid) };
-        default_grid.id()
-    };
+        ScreenGridGuard::take(default_grid)
+    }
+    .store_permanently()
+    .map_err(|_| CompositorError::InvalidLayerState)?;
     let c_grids = CCompositorGridBindings::try_new(HashMap::from([(
         default_grid_id,
         CCompositorGridBinding {
