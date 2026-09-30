@@ -91,7 +91,7 @@ typedef struct {
 typedef void (*MessageGridPositionEmitter)(int row, bool scrolled);
 
 extern void grid_alloc(ScreenGrid *grid, int rows, int columns, bool copy, bool valid);
-extern bool grid_is_allocated(const ScreenGrid *grid);
+extern bool grid_is_allocated(handle_T grid_handle);
 extern bool grid_requires_compositor_invalidation(ScreenGrid *grid,
                                                   bool clear_requested);
 extern void grid_revalidate_for_redraw(ScreenGrid *grid);

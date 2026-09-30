@@ -587,7 +587,7 @@ void draw_tabline(void)
   int attr_fill = HL_ATTR(HLF_TPF);
   bool use_sep_chars = (t_colors < 8);
 
-  if (!grid_is_allocated(&default_grid)) {
+  if (!grid_is_allocated(DEFAULT_GRID_HANDLE)) {
     return;
   }
   redraw_tabline = false;

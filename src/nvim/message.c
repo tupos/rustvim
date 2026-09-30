@@ -183,7 +183,7 @@ void msg_grid_set_pos(int row, bool scrolled)
 
 bool msg_use_grid(void)
 {
-  return grid_is_allocated(&default_grid) && !ui_has(kUIMessages);
+  return grid_is_allocated(DEFAULT_GRID_HANDLE) && !ui_has(kUIMessages);
 }
 
 void msg_grid_validate(void)
@@ -2377,7 +2377,7 @@ void msg_puts_len(const char *const str, const ptrdiff_t len, int hl_id, bool hi
       msg_col = saved_msg_col;
     }
   }
-  if (!msg_use_printf() || (headless_mode && grid_is_allocated(&default_grid))) {
+  if (!msg_use_printf() || (headless_mode && grid_is_allocated(DEFAULT_GRID_HANDLE))) {
     msg_puts_display(str, (int)len, hl_id, false);
   }
 
@@ -2670,7 +2670,7 @@ void msg_ui_refresh(void)
 
 void msg_ui_flush(void)
 {
-  if (ui_has(kUIMultigrid) && grid_is_allocated(&msg_grid)
+  if (ui_has(kUIMultigrid) && grid_is_allocated(msg_grid_handle)
       && ui_comp_grid_publication_pending(msg_grid_handle)) {
     ui_ext_msg_set_pos(msg_grid_pos, msg_scrolled);
   }
@@ -3250,7 +3250,7 @@ void msg_clr_eos_force(void)
 
   // TODO(bfredl): ugly, this state should already been validated at this
   // point. But msg_clr_eos() is called in a lot of places.
-  if (grid_is_allocated(&msg_grid) && msg_row < msg_grid_pos) {
+  if (grid_is_allocated(msg_grid_handle) && msg_row < msg_grid_pos) {
     msg_grid_validate();
     if (msg_row < msg_grid_pos) {
       msg_row = msg_grid_pos;

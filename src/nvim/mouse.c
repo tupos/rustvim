@@ -1488,7 +1488,7 @@ retnomove:
     if (grid == 0) {
       // Shared-grid view offsets already include the window origin. Dedicated
       // grids only include offsets within the window.
-      if (grid_is_allocated(&curwin->w_grid_alloc)) {
+      if (grid_is_allocated(curwin->w_grid_handle)) {
         row -= curwin->w_winrow;
         col -= curwin->w_wincol;
       }
@@ -1853,7 +1853,7 @@ static win_T *mouse_find_grid_win(int *gridp, int *rowp, int *colp)
     *gridp = DEFAULT_GRID_HANDLE;
   } else if (*gridp > 1) {
     win_T *wp = win_find_by_grid_handle(*gridp);
-    if (wp && grid_is_allocated(&wp->w_grid_alloc)
+    if (wp && grid_is_allocated(wp->w_grid_handle)
         && !(wp->w_floating && !wp->w_config.mouse)) {
       *rowp = MIN(*rowp - wp->w_grid.row_offset, wp->w_view_height - 1);
       *colp = MIN(*colp - wp->w_grid.col_offset, wp->w_view_width - 1);

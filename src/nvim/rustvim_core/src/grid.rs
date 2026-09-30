@@ -4619,24 +4619,16 @@ pub extern "C" fn alloc_initial_line_buffer() {
     line_buffer.realloc(unsafe { globals::Columns as usize });
 }
 
-/// Reports whether a C screen grid currently owns cell buffers.
+/// Reports whether a stored grid currently owns cell buffers.
 ///
-/// # Safety
-///
-/// `grid` must be null or point to a valid, readable `CScreenGrid`.
+/// Missing, invalid, and retired identities are not allocated.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn grid_is_allocated(grid: *const CScreenGrid) -> bool {
-    let Some(cgrid) = std::ptr::NonNull::new(grid.cast_mut()) else {
+pub extern "C" fn grid_is_allocated(grid_handle: VimHandleT) -> bool {
+    if grid_handle <= 0 {
         return false;
-    };
-    if let Some(grid_id) = permanent_grid_id(cgrid) {
-        return StoredGridGuard::acquire(grid_id)
-            .expect("permanent C grid identity must resolve to its Rust grid")
-            .is_allocated();
     }
 
-    // SAFETY: The caller guarantees that this legacy C grid is readable.
-    unsafe { cgrid.as_ref() }.is_allocated()
+    StoredGridGuard::acquire(GridId::new(grid_handle)).is_ok_and(|grid| grid.is_allocated())
 }
 
 /// Reports whether the current screen update must invalidate composed output.
@@ -7227,20 +7219,31 @@ mod tests {
     }
 
     #[test]
-    fn c_grid_reports_whether_cell_buffers_are_allocated() {
+    fn stored_grid_reports_whether_cell_buffers_are_allocated() {
         let mut line_buffer = LineBuffer::new(1);
         let grid = ScreenGrid::new(1, 1, true, &mut line_buffer);
         // SAFETY: Ownership of every grid allocation is transferred to
         // `cgrid`.
         let mut cgrid = unsafe { grid.to_cgrid() };
+        // SAFETY: `cgrid` owns valid grid allocations and remains at a stable
+        // address until its permanent binding is released.
+        let grid_handle = unsafe { grid_assign_handle(&raw mut cgrid) };
 
-        // SAFETY: `cgrid` is valid and remains readable for this call.
-        assert!(unsafe { grid_is_allocated(&raw const cgrid) });
-        // SAFETY: `grid_is_allocated` explicitly accepts a null pointer.
-        assert!(!unsafe { grid_is_allocated(std::ptr::null()) });
+        assert!(grid_is_allocated(grid_handle));
 
-        // SAFETY: `cgrid` still uniquely owns every transferred allocation.
-        let _grid = unsafe { ScreenGrid::take_from_cgrid(&mut cgrid) };
+        {
+            let mut grid = StoredGridGuard::acquire(GridId::new(grid_handle)).unwrap();
+            grid.release_storage();
+        }
+        assert!(!grid_is_allocated(grid_handle));
+
+        // SAFETY: `cgrid` remains the exclusive stable identity for its
+        // permanently stored grid.
+        unsafe {
+            grid_free(&raw mut cgrid);
+        }
+        assert!(!grid_is_allocated(grid_handle));
+        assert!(!grid_is_allocated(0));
     }
 
     #[test]
@@ -7291,9 +7294,7 @@ mod tests {
         assert!(cgrid.vcols.is_null());
         assert!(cgrid.line_offset.is_null());
 
-        // SAFETY: `cgrid` is now a valid opaque identity for the permanently
-        // stored message grid.
-        assert!(unsafe { grid_is_allocated(&raw const cgrid) });
+        assert!(grid_is_allocated(assigned_handle));
 
         {
             // SAFETY: The stable C address identifies the registered Rust
@@ -7326,9 +7327,7 @@ mod tests {
             grid_release_message(&raw mut cgrid);
         }
         assert_eq!(permanent_grid_id(cgrid_pointer), Some(grid_id));
-        // SAFETY: The C identity still resolves to the permanently stored
-        // message grid.
-        assert!(!unsafe { grid_is_allocated(&raw const cgrid) });
+        assert!(!grid_is_allocated(assigned_handle));
 
         // SAFETY: No grid guard remains, and `cgrid` is exclusively accessible.
         assert!(unsafe { ScreenGridGuard::release_permanent(&raw mut cgrid) });
