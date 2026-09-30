@@ -1573,6 +1573,7 @@ impl GridInspectionTarget {
     fn from_requested_handle(
         requested_handle: i64,
         popup_grid_id: GridId,
+        window_grid_id: Option<GridId>,
     ) -> Result<Self, InvalidGridId> {
         let requested_grid_id = i32::try_from(requested_handle).ok().map(GridId::new);
         if requested_grid_id == Some(popup_grid_id) {
@@ -1581,11 +1582,14 @@ impl GridInspectionTarget {
         if requested_handle <= i64::from(DEFAULT_GRID_HANDLE) {
             return Ok(Self::Default);
         }
-        requested_grid_id.map(Self::Window).ok_or(InvalidGridId)
+        match requested_grid_id {
+            Some(grid_id) if Some(grid_id) == window_grid_id => Ok(Self::Window(grid_id)),
+            _ => Err(InvalidGridId),
+        }
     }
 }
 
-/// Indicates that no allocated window grid matches an inspection request.
+/// Indicates that no supported grid identity matches an inspection request.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct InvalidGridId;
 
@@ -5732,58 +5736,50 @@ pub unsafe extern "C" fn grid_view_get_cell(
 ///
 /// An invalid window-grid identity is distinct from a valid grid whose
 /// coordinates do not identify a cell.
+/// Grid contents are resolved directly from permanent Rust storage.
 ///
 /// # Safety
 ///
-/// `default_grid` and `popup_grid` must point to distinct, valid, exclusively
-/// accessible `CScreenGrid` values whose buffers satisfy the ownership and
-/// layout requirements of `ScreenGrid`. `window_grid` must be null or point to
-/// a third such grid. `output` must point to valid, properly aligned writable
-/// `CGridCell` storage that does not alias any grid.
+/// `output` must point to valid, properly aligned writable `CGridCell` storage.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn grid_inspect_cell(
-    default_grid_ptr: *mut CScreenGrid,
-    popup_grid: *mut CScreenGrid,
-    window_grid: *mut CScreenGrid,
+    popup_grid_handle: VimHandleT,
+    window_grid_handle: VimHandleT,
     requested_grid: i64,
     row: i64,
     column: i64,
     output: *mut CGridCell,
 ) -> CGridCellInspectionResult {
-    if default_grid_ptr.is_null() || popup_grid.is_null() || output.is_null() {
+    if output.is_null() {
         return CGridCellInspectionResult::InvalidGrid;
     }
 
-    let popup_grid_id = {
-        // SAFETY: The caller guarantees exclusive access to the valid popup
-        // grid for this short identity lookup.
-        unsafe { ScreenGridGuard::take(popup_grid) }.id()
-    };
-
-    let target = match GridInspectionTarget::from_requested_handle(requested_grid, popup_grid_id) {
+    let popup_grid_id = GridId::new(popup_grid_handle);
+    let window_grid_id =
+        (window_grid_handle > DEFAULT_GRID_HANDLE).then_some(GridId::new(window_grid_handle));
+    let target = match GridInspectionTarget::from_requested_handle(
+        requested_grid,
+        popup_grid_id,
+        window_grid_id,
+    ) {
         Ok(target) => target,
         Err(InvalidGridId) => return CGridCellInspectionResult::InvalidGrid,
     };
 
-    let selected_grid = match target {
-        GridInspectionTarget::Default => default_grid_ptr,
-        GridInspectionTarget::PopupMenu => popup_grid,
-        GridInspectionTarget::Window(_) => {
-            let Some(window_grid) = std::ptr::NonNull::new(window_grid) else {
-                return CGridCellInspectionResult::InvalidGrid;
-            };
-            window_grid.as_ptr()
+    let selected_grid_id = match target {
+        GridInspectionTarget::Default => GridId::new(DEFAULT_GRID_HANDLE),
+        GridInspectionTarget::PopupMenu if popup_grid_handle == 0 => {
+            return CGridCellInspectionResult::MissingCell;
         }
+        GridInspectionTarget::PopupMenu => popup_grid_id,
+        GridInspectionTarget::Window(grid_id) => grid_id,
     };
-    // SAFETY: The caller guarantees exclusive access to every supplied grid.
-    // The popup identity guard was dropped before borrowing the selected grid.
-    let selected_grid = unsafe { ScreenGridGuard::take(selected_grid) };
-
-    if let GridInspectionTarget::Window(grid_id) = target
-        && (selected_grid.id() != grid_id || !selected_grid.is_allocated())
-    {
+    let Ok(selected_grid) = StoredGridGuard::acquire(selected_grid_id) else {
         return CGridCellInspectionResult::InvalidGrid;
-    }
+    };
+    if matches!(target, GridInspectionTarget::Window(_)) && !selected_grid.is_allocated() {
+        return CGridCellInspectionResult::InvalidGrid;
+    };
 
     let (Ok(row), Ok(column)) = (usize::try_from(row), usize::try_from(column)) else {
         return CGridCellInspectionResult::MissingCell;
@@ -7125,22 +7121,72 @@ mod tests {
     #[test]
     fn cell_inspection_interprets_grid_handles() {
         let popup_grid_id = GridId::new(7);
+        let window_grid_id = GridId::new(8);
         assert_eq!(
-            GridInspectionTarget::from_requested_handle(1, popup_grid_id),
+            GridInspectionTarget::from_requested_handle(1, popup_grid_id, Some(window_grid_id)),
             Ok(GridInspectionTarget::Default)
         );
         assert_eq!(
-            GridInspectionTarget::from_requested_handle(7, popup_grid_id),
+            GridInspectionTarget::from_requested_handle(7, popup_grid_id, Some(window_grid_id)),
             Ok(GridInspectionTarget::PopupMenu)
         );
         assert_eq!(
-            GridInspectionTarget::from_requested_handle(8, popup_grid_id),
+            GridInspectionTarget::from_requested_handle(8, popup_grid_id, Some(window_grid_id)),
             Ok(GridInspectionTarget::Window(GridId::new(8)))
         );
         assert_eq!(
-            GridInspectionTarget::from_requested_handle(i64::from(i32::MAX) + 1, popup_grid_id),
+            GridInspectionTarget::from_requested_handle(9, popup_grid_id, Some(window_grid_id)),
             Err(InvalidGridId)
         );
+        assert_eq!(
+            GridInspectionTarget::from_requested_handle(8, popup_grid_id, None),
+            Err(InvalidGridId)
+        );
+        assert_eq!(
+            GridInspectionTarget::from_requested_handle(
+                i64::from(i32::MAX) + 1,
+                popup_grid_id,
+                Some(window_grid_id),
+            ),
+            Err(InvalidGridId)
+        );
+    }
+
+    #[test]
+    fn cell_inspection_reads_a_permanently_stored_window_grid() {
+        let mut line_buffer = LineBuffer::new(1);
+        let mut grid = ScreenGrid::new(1, 1, true, &mut line_buffer);
+        grid.chars[0] = schar_from_ascii('x');
+        grid.attrs[0] = 12;
+        grid.vcols[0] = 34;
+        // SAFETY: Ownership of every grid allocation is transferred to
+        // `cgrid`.
+        let mut cgrid = unsafe { grid.to_cgrid() };
+        // SAFETY: `cgrid` owns valid grid allocations and remains at a stable
+        // address until its permanent binding is released.
+        let grid_handle = unsafe { grid_assign_handle(&raw mut cgrid) };
+        let mut cell = CGridCell::default();
+
+        // SAFETY: `cell` is valid writable storage.
+        let result = unsafe {
+            grid_inspect_cell(0, grid_handle, i64::from(grid_handle), 0, 0, &raw mut cell)
+        };
+
+        assert_eq!(result, CGridCellInspectionResult::Found);
+        assert_eq!(
+            cell,
+            CGridCell {
+                character: schar_from_ascii('x'),
+                attribute: 12,
+                virtual_column: 34,
+            }
+        );
+
+        // SAFETY: `cgrid` remains the exclusive stable identity for its
+        // permanently stored grid.
+        unsafe {
+            grid_free(&raw mut cgrid);
+        }
     }
 
     #[test]

@@ -2072,11 +2072,11 @@ Array nvim__inspect_cell(Integer grid, Integer row, Integer col, Arena *arena, E
   Array ret = ARRAY_DICT_INIT;
 
   win_T *wp = grid > 1 ? win_find_by_grid_handle((handle_T)grid) : NULL;
-  ScreenGrid *window_grid = wp == NULL ? NULL : &wp->w_grid_alloc;
+  handle_T window_grid_handle = wp == NULL ? 0 : wp->w_grid_handle;
 
   GridCell cell;
   GridCellInspectionResult inspection = grid_inspect_cell(
-    &default_grid, &pum_grid, window_grid, grid, row, col, &cell);
+    pum_grid_handle, window_grid_handle, grid, row, col, &cell);
   VALIDATE_INT(inspection != kGridCellInspectionInvalidGrid, "grid handle", grid, {
     return ret;
   });

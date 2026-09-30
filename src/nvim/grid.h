@@ -153,9 +153,9 @@ extern bool grid_view_get_cell(
   const GridView *view, handle_T expected_grid,
   int row, int col, GridCell *cell);
 extern GridCellInspectionResult grid_inspect_cell(
-  ScreenGrid *default_grid, ScreenGrid *popup_grid,
-  ScreenGrid *window_grid, int64_t requested_grid,
-  int64_t row, int64_t col, GridCell *cell);
+  handle_T popup_grid_handle, handle_T window_grid_handle,
+  int64_t requested_grid, int64_t row, int64_t col,
+  GridCell *cell);
 extern schar_T schar_from_char(int c);
 
 extern void grid_line_start(GridView *view, int row);
