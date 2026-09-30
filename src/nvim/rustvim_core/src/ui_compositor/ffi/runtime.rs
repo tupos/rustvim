@@ -5,7 +5,7 @@ use std::sync::{Mutex, MutexGuard};
 use crate::{
     defines::OptInt,
     globals,
-    grid::{ComposedGridSpace, VimSAttrT},
+    grid::{ComposedGridSpace, VimSAttrT, lock_grid_store},
     ui::output::{UiCommand, UiOutput},
 };
 
@@ -13,7 +13,6 @@ use super::super::{
     CompositorDebugHighlights, CompositorRecomposeArea, CompositorRuntime,
     emit_compositor_debug_line, lock_compositor,
 };
-use super::grid_store::CompositorGridAccess;
 
 unsafe extern "C" {
     static mut p_wd: OptInt;
@@ -89,9 +88,7 @@ impl CompositorRuntime {
             return;
         }
         let area = {
-            let Some(grid_store) = CompositorGridAccess::try_take_registered() else {
-                return;
-            };
+            let grid_store = lock_grid_store();
             lock_compositor().clip_recompose_area(&grid_store, requested_area.clone())
         };
         let Ok(area) = area else {

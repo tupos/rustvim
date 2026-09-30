@@ -6,19 +6,16 @@ use crate::{
     defines::{CVimString, Integer},
     grid::{
         CGridCell, CScreenGrid, GridId, ScreenGridGuard, VimHandleT, VimSAttrT, VimSCharT,
-        default_grid as c_default_grid, msg_grid as c_msg_grid, schar_from_buf,
+        default_grid as c_default_grid, lock_grid_store, schar_from_buf,
     },
 };
 
 use super::super::*;
-use super::{
-    NvimOutput, compositor_runtime_snapshot,
-    grid_store::{
-        CompositorGridAccess, clear_grid_bindings, initialize_grid_bindings,
-        replace_compositor_grid_bindings,
-    },
-    initialize_debug_highlights,
-};
+use super::{NvimOutput, compositor_runtime_snapshot, initialize_debug_highlights};
+
+unsafe extern "C" {
+    static mut msg_grid_handle: VimHandleT;
+}
 
 /// C representation of a compositor grid hit.
 #[repr(C)]
@@ -39,13 +36,37 @@ impl From<CompositorGridHit> for CCompositorGridHit {
     }
 }
 
+/// Returns the current message-grid identity when one has been assigned.
+fn current_message_grid_id() -> Option<GridId> {
+    // SAFETY: Compositor events read Neovim globals synchronously on the main
+    // thread.
+    let grid_handle = unsafe { msg_grid_handle };
+    (grid_handle > 0).then_some(GridId::new(grid_handle))
+}
+
+/// Moves the default grid into permanent Rust storage.
+///
+/// # Safety
+///
+/// `default_grid` must point to a valid, exclusively accessible C grid whose
+/// buffers satisfy the ownership and layout requirements of `ScreenGrid`.
+unsafe fn initialize_default_grid(default_grid: *mut CScreenGrid) -> CompositorResult<GridId> {
+    unsafe {
+        // SAFETY: The caller transfers exclusive ownership for this scope.
+        ScreenGridGuard::take(default_grid)
+    }
+    .store_permanently()
+    .map_err(|_| CompositorError::InvalidLayerState)
+}
+
 /// Initializes the compositor with the process-global default grid.
 #[unsafe(no_mangle)]
 pub extern "C" fn ui_comp_init() {
     // SAFETY: Initialization runs on Neovim's main thread before compositor
     // operations begin, and the default grid remains process-global.
-    let default_grid_id = unsafe { initialize_grid_bindings(&raw mut c_default_grid) }
-        .expect("compositor grid bindings must initialize exactly once");
+    let default_grid_id = unsafe { initialize_default_grid(&raw mut c_default_grid) }
+        .expect("default grid must move into permanent storage exactly once");
+
     lock_compositor()
         .initialize_layers(default_grid_id)
         .expect("compositor layers must initialize exactly once");
@@ -57,7 +78,6 @@ pub extern "C" fn ui_comp_free_all_mem() {
     lock_compositor()
         .clear_layers()
         .expect("compositor layers must be initialized");
-    clear_grid_bindings().expect("compositor grid bindings must be initialized");
     lock_compositor_buffer_pool().release();
 }
 
@@ -118,50 +138,23 @@ pub extern "C" fn ui_comp_grid_resize(grid: Integer, width: Integer, height: Int
 }
 
 /// Updates message-grid state and executes its scrolling and recomposition.
-///
-/// Both explicit grids and all registered compositor layers are restored
-/// before this function emits a scroll event, visualizes an operation, or
-/// recomposes an area.
-///
-/// # Safety
-///
-/// `message_grid` must point to a valid, exclusively accessible `CScreenGrid`
-/// whose buffers satisfy the ownership and layout requirements of
-/// `ScreenGrid`.
-///
-/// `default_grid` must point to a second valid, exclusively accessible
-/// `CScreenGrid` whose buffers satisfy the same requirements.
-unsafe fn update_message_position(
-    message_grid: *mut CScreenGrid,
-    default_grid: *mut CScreenGrid,
+fn update_message_position(
+    message_grid_id: GridId,
     request: CompositorMessagePositionRequest,
     runtime: CompositorRuntime,
     output: &mut impl UiOutput<ComposedGridSpace>,
 ) -> CompositorResult<()> {
-    if message_grid.is_null() || default_grid.is_null() || message_grid == default_grid {
+    let default_grid_id = GridId::new(1);
+    if message_grid_id == default_grid_id {
         return Err(CompositorError::InvalidLayerState);
     }
 
     let plan = {
-        let message_grid_pointer =
-            NonNull::new(message_grid).ok_or(CompositorError::InvalidLayerState)?;
-        // SAFETY: The caller guarantees that the message grid remains valid
-        // and exclusively accessible for this operation. Registered grids are
-        // resolved through one shared permanent-store borrow.
-        let (grid_store, message_grid_id, _) = unsafe {
-            CompositorGridAccess::try_take_registered_with_candidate(message_grid_pointer)
-        }
-        .ok_or(CompositorError::InvalidLayerState)?;
-        let default_grid_id = grid_store
-            .grid_id_for_cgrid(default_grid)
-            .ok_or(CompositorError::InvalidLayerState)?;
-        let message_grid = grid_store
-            .grid(message_grid_id)
-            .ok_or(CompositorError::InvalidLayerState)?;
+        let grid_store = lock_grid_store();
         let default_grid = grid_store
             .grid(default_grid_id)
             .ok_or(CompositorError::InvalidLayerState)?;
-        lock_compositor().set_message_position(message_grid, default_grid, request)
+        lock_compositor().set_message_position(message_grid_id, default_grid, request)
     }?;
 
     if let Some(scroll) = plan.scroll {
@@ -171,9 +164,7 @@ unsafe fn update_message_position(
         });
     }
     if let Some(area) = plan.recompose {
-        // SAFETY: The caller satisfies the helper's message-grid requirements.
-        // The earlier guards were dropped above.
-        unsafe { recompose_area_from_registered_grids(message_grid, area, runtime, output) }
+        recompose_area_from_registered_grids(Some(message_grid_id), area, runtime, output)
             .map_err(|_| CompositorError::RecompositionFailed)?;
     }
     Ok(())
@@ -187,14 +178,18 @@ unsafe fn update_message_position(
 /// readable bytes for the duration of this call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ui_comp_msg_set_pos(
-    _grid: Integer,
+    grid: Integer,
     row: Integer,
     scrolled: bool,
     separator_character: CVimString,
     z_index: Integer,
     _compositor_index: Integer,
 ) {
-    let (Ok(row), Ok(z_index)) = (i32::try_from(row), i32::try_from(z_index)) else {
+    let (Ok(grid), Ok(row), Ok(z_index)) = (
+        i32::try_from(grid),
+        i32::try_from(row),
+        i32::try_from(z_index),
+    ) else {
         panic!("message-grid position must fit native compositor values");
     };
     let runtime = compositor_runtime_snapshot().expect("compositor runtime must be valid");
@@ -209,43 +204,24 @@ pub unsafe extern "C" fn ui_comp_msg_set_pos(
     );
     let mut output = NvimOutput;
 
-    // SAFETY: Neovim's global default and message grids are distinct and are
-    // exclusively accessed on the main thread during this generated event.
-    unsafe {
-        update_message_position(
-            &raw mut c_msg_grid,
-            &raw mut c_default_grid,
-            request,
-            runtime,
-            &mut output,
-        )
-    }
-    .expect("message-grid position update must preserve compositor invariants");
+    update_message_position(GridId::new(grid), request, runtime, &mut output)
+        .expect("message-grid position update must preserve compositor invariants");
 }
 
 /// Returns the screen area occupied by one registered grid.
 pub(in crate::ui_compositor) fn recompose_area_for_registered_grid(
     grid_id: GridId,
 ) -> CompositorResult<CompositorRecomposeArea> {
-    let grid_store =
-        CompositorGridAccess::try_take_registered().ok_or(CompositorError::InvalidLayerState)?;
+    let grid_store = lock_grid_store();
     lock_compositor().recompose_area_for_grid(&grid_store, grid_id)
 }
 
 /// Recomposes the screen area occupied by one grid when drawing is enabled.
-///
-/// # Safety
-///
-/// `grid` must point to an exclusively accessible C grid whose buffers satisfy
-/// the ownership and layout requirements of `ScreenGrid`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ui_comp_compose_grid(grid: *mut CScreenGrid) {
-    let grid = NonNull::new(grid).expect("grid to recompose must not be null");
-    let grid_id = {
-        // SAFETY: The caller transfers exclusive ownership for this scope.
-        let grid = unsafe { ScreenGridGuard::take(grid.as_ptr()) };
-        grid.id()
-    };
+pub extern "C" fn ui_comp_compose_grid(grid_handle: Integer) {
+    let grid_handle =
+        i32::try_from(grid_handle).expect("grid handle must fit the compositor grid identity");
+    let grid_id = GridId::new(grid_handle);
 
     if !lock_compositor().should_draw() {
         return;
@@ -255,21 +231,17 @@ pub unsafe extern "C" fn ui_comp_compose_grid(grid: *mut CScreenGrid) {
         recompose_area_for_registered_grid(grid_id).expect("grid to recompose must be registered");
     let mut output = NvimOutput;
 
-    // SAFETY: The grid guard was dropped above. The process-global message
-    // grid is exclusively accessed on Neovim's main thread.
-    unsafe {
-        recompose_area_from_registered_grids(&raw mut c_msg_grid, area, runtime, &mut output)
-    }
-    .expect("grid recomposition must preserve compositor invariants");
+    recompose_area_from_registered_grids(current_message_grid_id(), area, runtime, &mut output)
+        .expect("grid recomposition must preserve compositor invariants");
 }
 
 /// Places a new or existing grid in the registered compositor layers.
 ///
-/// A new binding is published before recomposition. An existing grid is
-/// restored to its requested placement even if recomposing an exposed area
-/// fails. Every grid lease is released before invoking the callback.
+/// An existing grid is restored to its requested placement even if recomposing
+/// an exposed area fails. The grid-store borrow is released before invoking
+/// the callback.
 pub(in crate::ui_compositor) fn place_grid_in_registered_layers(
-    grid_store: CompositorGridAccess,
+    grid_store: impl GridAccess,
     target: CompositorGridPlacementTarget,
     current_window_layer: Option<usize>,
     request: CompositorGridPlacementRequest,
@@ -277,20 +249,12 @@ pub(in crate::ui_compositor) fn place_grid_in_registered_layers(
 ) -> CompositorResult<CompositorGridPlacementOutcome> {
     let preparation = {
         let grid_store = grid_store;
-        let preparation = lock_compositor().prepare_grid_placement(
+        lock_compositor().prepare_grid_placement(
             &grid_store,
             target,
             current_window_layer,
             request,
-        )?;
-
-        if !target.was_registered {
-            let replacement_bindings = grid_store
-                .ffi_bindings()
-                .ok_or(CompositorError::InvalidLayerState)?;
-            replace_compositor_grid_bindings(replacement_bindings)?;
-        }
-        preparation
+        )?
     };
 
     let outcome = CompositorGridPlacementOutcome::from_moved(preparation.plan.moved);
@@ -313,61 +277,27 @@ pub(in crate::ui_compositor) fn place_grid_in_registered_layers(
     Ok(outcome)
 }
 
-/// Places a new or existing grid in the registered compositor layer stack.
-///
-/// Rust determines whether the candidate is already registered and performs
-/// either repositioning or insertion. Grid ownership is restored before every
-/// recomposition operation.
-///
-/// # Safety
-///
-/// If `grid` is not registered, it must satisfy
-/// `CompositorGridAccess::try_take_registered_with_candidate` requirements.
-/// `current_window_grid_handle` may be zero or identify a registered grid.
-///
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn ui_comp_put_grid(
-    grid: *mut CScreenGrid,
-    row: libc::c_int,
-    column: libc::c_int,
-    height: libc::c_int,
-    width: libc::c_int,
-    z_index: libc::c_int,
-    blending: bool,
-    valid: bool,
-    on_top: bool,
-    accepts_mouse_input: bool,
-    current_window_grid_handle: Integer,
+/// Places one validated grid in the registered compositor layer stack.
+fn place_registered_grid(
+    grid_id: GridId,
+    current_window_grid_id: Option<GridId>,
+    message_grid_id: Option<GridId>,
+    request: CompositorGridPlacementRequest,
+    runtime: CompositorRuntime,
 ) -> bool {
-    let grid = NonNull::new(grid).expect("grid to place must not be null");
-    let placement = CompositorGridPlacement::try_new(row, column, height, width)
-        .expect("grid placement dimensions must be nonnegative");
-    let request = CompositorGridPlacementRequest::new(
-        placement,
-        z_index,
-        blending,
-        valid,
-        on_top,
-        accepts_mouse_input,
-    );
-    let runtime = compositor_runtime_snapshot().expect("compositor runtime must be valid");
-    let current_window_grid_id = match i32::try_from(current_window_grid_handle) {
-        Ok(0) => None,
-        Ok(handle) => Some(GridId::new(handle)),
-        Err(_) => panic!("current-window grid handle must fit GridId"),
-    };
-
-    // SAFETY: The caller satisfies the candidate ownership requirements.
-    let Some((grid_store, grid_id, was_registered)) =
-        (unsafe { CompositorGridAccess::try_take_registered_with_candidate(grid) })
-    else {
+    let grid_store = lock_grid_store();
+    if grid_store.grid(grid_id).is_none() {
         return false;
-    };
+    }
     let (target, current_window_layer) = {
         let compositor = lock_compositor();
+        let was_registered = compositor
+            .layer_index(grid_id)
+            .expect("compositor layers must be initialized")
+            .is_some();
         let target = compositor
             .grid_placement_target(grid_id, was_registered)
-            .expect("grid binding and compositor layers must agree");
+            .expect("grid identity and compositor layers must agree");
         let current_window_layer = current_window_grid_id
             .map(|grid_id| compositor.layer_index(grid_id))
             .transpose()
@@ -377,12 +307,8 @@ pub unsafe extern "C" fn ui_comp_put_grid(
     };
     let mut output = NvimOutput;
     let recompose_area = |area| {
-        // SAFETY: Every grid guard is dropped before this closure. The
-        // process-global message grid is accessed on Neovim's main thread.
-        unsafe {
-            recompose_area_from_registered_grids(&raw mut c_msg_grid, area, runtime, &mut output)
-        }
-        .map_err(|_| CompositorError::RecompositionFailed)
+        recompose_area_from_registered_grids(message_grid_id, area, runtime, &mut output)
+            .map_err(|_| CompositorError::RecompositionFailed)
     };
     place_grid_in_registered_layers(
         grid_store,
@@ -395,27 +321,70 @@ pub unsafe extern "C" fn ui_comp_put_grid(
     .did_move()
 }
 
+/// Places a new or existing regular grid in the compositor layer stack.
+///
+/// Rust determines whether the identity is already registered and performs
+/// either repositioning or insertion. The grid-store borrow is released
+/// before every recomposition operation.
+///
+/// `current_window_grid_handle` may be zero or identify a registered grid.
+#[unsafe(no_mangle)]
+pub extern "C" fn ui_comp_put_grid(
+    grid_handle: Integer,
+    row: libc::c_int,
+    column: libc::c_int,
+    height: libc::c_int,
+    width: libc::c_int,
+    z_index: libc::c_int,
+    blending: bool,
+    valid: bool,
+    on_top: bool,
+    accepts_mouse_input: bool,
+    current_window_grid_handle: Integer,
+) -> bool {
+    let grid_handle =
+        i32::try_from(grid_handle).expect("grid handle must fit the compositor grid identity");
+    let current_window_grid_id = match i32::try_from(current_window_grid_handle) {
+        Ok(0) => None,
+        Ok(handle) => Some(GridId::new(handle)),
+        Err(_) => panic!("current-window grid handle must fit GridId"),
+    };
+    let placement = CompositorGridPlacement::try_new(row, column, height, width)
+        .expect("grid placement dimensions must be nonnegative");
+    let request = CompositorGridPlacementRequest::new(
+        placement,
+        z_index,
+        blending,
+        valid,
+        on_top,
+        accepts_mouse_input,
+    );
+    let runtime = compositor_runtime_snapshot().expect("compositor runtime must be valid");
+
+    place_registered_grid(
+        GridId::new(grid_handle),
+        current_window_grid_id,
+        current_message_grid_id(),
+        request,
+        runtime,
+    )
+}
+
 /// Applies one cursor update and publishes any resulting layer movement.
 pub(in crate::ui_compositor) fn apply_cursor_update_to_registered_grids(
     request: CompositorCursorRequest,
 ) -> CompositorResult<CompositorCursorUpdate> {
-    let grid_store =
-        CompositorGridAccess::try_take_registered().ok_or(CompositorError::InvalidLayerState)?;
+    let grid_store = lock_grid_store();
     lock_compositor().move_cursor(&grid_store, request)
 }
 
 /// Applies one cursor update to the compositor layer stack.
 ///
 /// Any required layer movement is completed before recomposition and cursor
-/// output are emitted. Every grid is restored before visualization or UI
-/// callbacks.
-///
-/// # Safety
-///
-/// `message_grid` must satisfy the message-grid requirements of
-/// `recompose_area_from_registered_grids`.
-unsafe fn process_grid_cursor_goto(
-    message_grid: *mut CScreenGrid,
+/// output are emitted. Grid-store borrows are released before visualization
+/// or UI callbacks.
+fn process_grid_cursor_goto(
+    message_grid_id: Option<GridId>,
     request: CompositorCursorRequest,
     output: &mut impl UiOutput<ComposedGridSpace>,
 ) -> CompositorResult<()> {
@@ -430,9 +399,7 @@ unsafe fn process_grid_cursor_goto(
 
     let runtime = compositor_runtime_snapshot().ok_or(CompositorError::InvalidGeometry)?;
     for area in recompose_areas {
-        // SAFETY: The caller satisfies the helper's message-grid requirements.
-        // The cursor-update guards were dropped.
-        unsafe { recompose_area_from_registered_grids(message_grid, area, runtime, output) }?;
+        recompose_area_from_registered_grids(message_grid_id, area, runtime, output)?;
     }
 
     if plan.emit {
@@ -458,9 +425,7 @@ pub extern "C" fn ui_comp_grid_cursor_goto(grid_handle: Integer, row: Integer, c
     };
     let mut output = NvimOutput;
 
-    // SAFETY: Neovim's message grid is exclusively accessed on the main
-    // thread during this generated event.
-    unsafe { process_grid_cursor_goto(&raw mut c_msg_grid, request, &mut output) }
+    process_grid_cursor_goto(current_message_grid_id(), request, &mut output)
         .expect("cursor update must preserve compositor invariants");
 }
 
@@ -493,63 +458,38 @@ pub extern "C" fn ui_comp_update_grid_layer(
     .expect("layer policy update must preserve compositor invariants");
 }
 
-/// Removes one registered grid and publishes the reduced C bindings.
+/// Removes one registered grid from the compositor layer stack.
 pub(in crate::ui_compositor) fn remove_registered_layer(
-    mut grid_store: CompositorGridAccess,
+    grid_store: impl GridAccess,
     layer_index: usize,
 ) -> CompositorResult<CompositorLayerRemoval> {
-    let (grid_id, removal) = {
-        let mut compositor = lock_compositor();
-        let grid_id = compositor.layer_id(layer_index)?;
-        let removal = compositor.remove_layer(&grid_store, layer_index)?;
-        (grid_id, removal)
-    };
-    grid_store.remove_binding(grid_id)?;
-    let remaining_bindings = grid_store
-        .ffi_bindings()
-        .ok_or(CompositorError::InvalidLayerState)?;
-    replace_compositor_grid_bindings(remaining_bindings)?;
-    Ok(removal)
+    lock_compositor().remove_layer(&grid_store, layer_index)
 }
 
 /// Removes one grid from the registered layer stack and recomposes its area.
 ///
 /// An unregistered grid is an expected successful no-op.
-///
-/// # Safety
-///
-/// `grid` must point to an exclusively accessible non-default C grid whose
-/// buffers satisfy the ownership and layout requirements of `ScreenGrid`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ui_comp_remove_grid(grid: *mut CScreenGrid) {
-    let grid = NonNull::new(grid).expect("grid to remove must not be null");
-    assert_ne!(grid.as_ptr(), &raw mut c_default_grid);
-    let grid_id = {
-        // SAFETY: The caller transfers exclusive ownership for this scope.
-        let grid = unsafe { ScreenGridGuard::take(grid.as_ptr()) };
-        grid.id()
-    };
-
-    let grid_store =
-        CompositorGridAccess::try_take_registered().expect("compositor registry must be valid");
+pub extern "C" fn ui_comp_remove_grid(grid_handle: Integer) {
+    let grid_handle =
+        i32::try_from(grid_handle).expect("grid handle must fit the compositor grid identity");
+    assert_ne!(grid_handle, 1);
+    let grid_id = GridId::new(grid_handle);
     let Some(layer_index) = lock_compositor()
         .layer_index(grid_id)
         .expect("compositor layers must be initialized")
     else {
         return;
     };
+    let grid_store = lock_grid_store();
     let removal = remove_registered_layer(grid_store, layer_index)
         .expect("registered layer removal must preserve compositor invariants");
 
     if let Some(area) = removal.recompose_area {
         let runtime = compositor_runtime_snapshot().expect("compositor runtime must be valid");
         let mut output = NvimOutput;
-        // SAFETY: The reduced registry has been published, and the caller
-        // accesses the process-global message grid on Neovim's main thread.
-        unsafe {
-            recompose_area_from_registered_grids(&raw mut c_msg_grid, area, runtime, &mut output)
-        }
-        .expect("removed layer area must be recomposed");
+        recompose_area_from_registered_grids(current_message_grid_id(), area, runtime, &mut output)
+            .expect("removed layer area must be recomposed");
     }
 }
 
@@ -557,8 +497,7 @@ pub unsafe extern "C" fn ui_comp_remove_grid(grid: *mut CScreenGrid) {
 /// coordinate.
 ///
 /// Returns `false` when no overlay contains the coordinate or compositor state
-/// is unavailable. Every temporarily owned grid is restored before this
-/// function returns.
+/// is unavailable.
 ///
 /// # Safety
 ///
@@ -572,9 +511,7 @@ pub unsafe extern "C" fn ui_comp_get_cell_at_coord(
     let Some(output) = NonNull::new(output) else {
         return false;
     };
-    let Some(grid_store) = CompositorGridAccess::try_take_registered() else {
-        return false;
-    };
+    let grid_store = lock_grid_store();
     let Ok(Some(cell)) = lock_compositor().cell_at(&grid_store, ComposedPosition::new(row, column))
     else {
         return false;
@@ -591,7 +528,6 @@ pub unsafe extern "C" fn ui_comp_get_cell_at_coord(
 /// Finds the topmost mouse-enabled non-default grid at one screen coordinate.
 ///
 /// Returns `false` when no matching grid exists or registered state is invalid.
-/// Every temporarily owned grid is restored before this function returns.
 ///
 /// # Safety
 ///
@@ -606,9 +542,7 @@ pub unsafe extern "C" fn ui_comp_find_mouse_grid_at_coord(
     let Some(output) = NonNull::new(output) else {
         return false;
     };
-    let Some(grid_store) = CompositorGridAccess::try_take_registered() else {
-        return false;
-    };
+    let grid_store = lock_grid_store();
     let Ok(Some(hit)) = lock_compositor().grid_at(
         &grid_store,
         ComposedPosition::new(row, column),
@@ -632,30 +566,26 @@ pub unsafe extern "C" fn ui_comp_find_mouse_grid_at_coord(
 ///
 /// # Safety
 ///
-/// `grid` must point to a valid, exclusively accessible `CScreenGrid` whose
-/// buffers satisfy the ownership and layout requirements of `ScreenGrid`.
 /// `output` must point to valid, properly aligned writable `CGridCell` storage.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ui_comp_grid_get_cell_at(
-    grid: *mut CScreenGrid,
+    grid_handle: Integer,
     origin_row: libc::c_int,
     origin_column: libc::c_int,
     row: libc::c_int,
     column: libc::c_int,
     output: *mut CGridCell,
 ) -> bool {
-    let Some(output) = NonNull::new(output) else {
+    let (Ok(grid_handle), Some(output)) = (i32::try_from(grid_handle), NonNull::new(output)) else {
         return false;
     };
-    if grid.is_null() {
-        return false;
-    }
 
-    // SAFETY: The caller transfers exclusive ownership of the grid buffers
-    // into the guard for the duration of this operation.
-    let grid = unsafe { ScreenGridGuard::take(grid) };
+    let grid_store = lock_grid_store();
+    let Some(grid) = grid_store.grid(GridId::new(grid_handle)) else {
+        return false;
+    };
     let Some(cell) =
-        PositionedGrid::try_new(&grid, ComposedPosition::new(origin_row, origin_column))
+        PositionedGrid::try_new(grid, ComposedPosition::new(origin_row, origin_column))
             .and_then(|grid| grid.cell(ComposedPosition::new(row, column)))
     else {
         return false;
@@ -676,32 +606,27 @@ pub unsafe extern "C" fn ui_comp_grid_get_cell_at(
 ///
 /// # Safety
 ///
-/// `grid` must point to a valid, exclusively accessible `CScreenGrid` whose
-/// buffers satisfy the ownership and layout requirements of `ScreenGrid`.
 /// `output` must point to valid, properly aligned writable
 /// `CCompositorGridHit` storage.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ui_comp_grid_hit_at_coord(
-    grid: *mut CScreenGrid,
+    grid_handle: Integer,
     origin_row: libc::c_int,
     origin_column: libc::c_int,
     row: libc::c_int,
     column: libc::c_int,
     output: *mut CCompositorGridHit,
 ) -> bool {
-    let Some(output) = NonNull::new(output) else {
+    let (Ok(grid_handle), Some(output)) = (i32::try_from(grid_handle), NonNull::new(output)) else {
         return false;
     };
-    if grid.is_null() {
-        return false;
-    }
 
-    // SAFETY: The caller transfers exclusive ownership of the grid buffers
-    // into the guard for the duration of this operation.
-    let grid = unsafe { ScreenGridGuard::take(grid) };
-    let Some(hit) =
-        PositionedGrid::try_new(&grid, ComposedPosition::new(origin_row, origin_column))
-            .and_then(|grid| grid.hit(ComposedPosition::new(row, column)))
+    let grid_store = lock_grid_store();
+    let Some(grid) = grid_store.grid(GridId::new(grid_handle)) else {
+        return false;
+    };
+    let Some(hit) = PositionedGrid::try_new(grid, ComposedPosition::new(origin_row, origin_column))
+        .and_then(|grid| grid.hit(ComposedPosition::new(row, column)))
     else {
         return false;
     };
@@ -775,15 +700,14 @@ pub extern "C" fn ui_comp_take_grid_publication(grid_handle: Integer) -> libc::c
         .expect("compositor layer index must fit the C UI event representation")
 }
 
-/// Checks cursor coverage after acquiring the registered legacy grids.
+/// Checks cursor coverage while borrowing the permanent grid store.
 pub(in crate::ui_compositor) fn cursor_is_covered_by_registered_layers(
     current_grid: CompositorCursorGrid,
     row: i32,
     column: i32,
     minimum_z_index_gap: u32,
 ) -> CompositorResult<bool> {
-    let grid_store =
-        CompositorGridAccess::try_take_registered().ok_or(CompositorError::InvalidLayerState)?;
+    let grid_store = lock_grid_store();
     lock_compositor().is_cursor_covered(
         &grid_store,
         current_grid,
@@ -816,55 +740,30 @@ pub extern "C" fn ui_comp_cursor_is_covered_by_higher_layer(
 }
 
 /// Composes and submits one validated line from registered compositor grids.
-///
-/// # Safety
-///
-/// When `request.row` is the message-separator row, `message_grid` must
-/// either identify one registered grid or identify another exclusively
-/// accessible grid satisfying the `ScreenGrid` ownership and layout
-/// requirements.
-unsafe fn compose_line_from_registered_grids(
-    message_grid: *mut CScreenGrid,
+fn compose_line_from_registered_grids(
+    message_grid_id: Option<GridId>,
     request: CompositorLineInput,
     output: &mut impl UiOutput<ComposedGridSpace>,
 ) -> CompositorResult<()> {
     let separator_active = lock_compositor()
         .message_separator_character_at(request.row)
         .is_some();
-    if separator_active && message_grid.is_null() {
-        return Err(CompositorError::InvalidLayerState);
-    }
-
     let mut line_buffer = acquire_compositor_buffer();
-    let submission = (|| -> CompositorResult<CompositorSubmission> {
-        let grid_store = CompositorGridAccess::try_take_registered()
-            .ok_or(CompositorError::InvalidLayerState)?;
-        let message_grid_id = separator_active
-            .then(|| grid_store.grid_id_for_cgrid(message_grid))
-            .flatten();
-        let separate_message_grid = separator_active && message_grid_id.is_none();
-
-        let message_grid_guard = separate_message_grid.then(|| {
-            // SAFETY: The non-null message grid is distinct from every layer
-            // pointer and the caller transfers ownership for this operation.
-            unsafe { ScreenGridGuard::take(message_grid) }
-        });
-
+    let submission = {
+        let grid_store = lock_grid_store();
         let message_grid = if separator_active {
-            Some(match message_grid_id {
-                Some(grid_id) => grid_store
-                    .grid(grid_id)
+            let message_grid_id = message_grid_id.ok_or(CompositorError::InvalidLayerState)?;
+            Some(
+                grid_store
+                    .grid(message_grid_id)
                     .ok_or(CompositorError::InvalidLayerState)?,
-                None => message_grid_guard
-                    .as_deref()
-                    .ok_or(CompositorError::InvalidLayerState)?,
-            })
+            )
         } else {
             None
         };
-
-        lock_compositor().compose_line(&mut line_buffer, &grid_store, message_grid, &request)
-    })()?;
+        let compositor = lock_compositor();
+        compositor.compose_line(&mut line_buffer, &grid_store, message_grid, &request)
+    }?;
 
     let output_range = submission.start_col..submission.end_col;
     let characters = line_buffer
@@ -894,62 +793,39 @@ unsafe fn compose_line_from_registered_grids(
 }
 
 /// Composes and submits a clipped screen area from registered compositor grids.
-///
-/// # Safety
-///
-/// When a requested row is the message-separator row, `message_grid` must
-/// either identify one registered grid or identify another exclusively
-/// accessible grid satisfying the `ScreenGrid` ownership and layout
-/// requirements. Grid ownership is restored before each synchronous UI call
-/// so compositor callbacks may reenter C safely.
-unsafe fn compose_area_from_registered_grids(
-    message_grid: *mut CScreenGrid,
+fn compose_area_from_registered_grids(
+    message_grid_id: Option<GridId>,
     request: CompositorAreaRequest,
     output: &mut impl UiOutput<ComposedGridSpace>,
 ) -> CompositorResult<()> {
     let plan = {
-        let grid_store = CompositorGridAccess::try_take_registered()
-            .ok_or(CompositorError::InvalidLayerState)?;
+        let grid_store = lock_grid_store();
         lock_compositor().plan_recompose_area(&grid_store, request)?
     };
 
     for line in plan.into_line_inputs() {
-        // SAFETY: The caller satisfies the documented message-grid
-        // requirements. The temporary clipping guards and every preceding
-        // line's guards were dropped before this helper takes ownership.
-        unsafe { compose_line_from_registered_grids(message_grid, line, output) }?;
+        compose_line_from_registered_grids(message_grid_id, line, output)?;
     }
     Ok(())
 }
 
 /// Visualizes and composes one screen area from registered grids.
-///
-/// # Safety
-///
-/// When a requested row is the message-separator row, `message_grid` must
-/// either identify one registered grid or identify another exclusively
-/// accessible grid satisfying the `ScreenGrid` ownership and layout
-/// requirements.
-unsafe fn recompose_area_from_registered_grids(
-    message_grid: *mut CScreenGrid,
+fn recompose_area_from_registered_grids(
+    message_grid_id: Option<GridId>,
     area: CompositorRecomposeArea,
     runtime: CompositorRuntime,
     output: &mut impl UiOutput<ComposedGridSpace>,
 ) -> CompositorResult<()> {
     runtime.visualize(&area, runtime.debug_highlights.recomposed, true, output);
 
-    // SAFETY: The caller satisfies the helper's message-grid requirements.
-    // Debug visualization completed without retaining any grid guard.
-    unsafe {
-        compose_area_from_registered_grids(
-            message_grid,
-            CompositorAreaRequest {
-                area,
-                settings: runtime.line_settings,
-            },
-            output,
-        )
-    }
+    compose_area_from_registered_grids(
+        message_grid_id,
+        CompositorAreaRequest {
+            area,
+            settings: runtime.line_settings,
+        },
+        output,
+    )
 }
 
 /// Processes one complete raw-line event against registered compositor grids.
@@ -961,10 +837,9 @@ unsafe fn recompose_area_from_registered_grids(
 /// initialized elements.
 ///
 /// A disabled compositor or a grid handle absent from the registered layers
-/// produces a successful no-op. `message_grid` is used only for pointer
-/// identity and may be null.
+/// produces a successful no-op.
 unsafe fn process_raw_line(
-    message_grid: *mut CScreenGrid,
+    message_grid_id: Option<GridId>,
     grid_id: GridId,
     request: CompositorRawLineRequest,
     clear_attribute: VimSAttrT,
@@ -973,11 +848,9 @@ unsafe fn process_raw_line(
     output: &mut impl UiOutput<ComposedGridSpace>,
 ) -> CompositorResult<()> {
     let operation = {
-        let grid_store = CompositorGridAccess::try_take_registered()
-            .ok_or(CompositorError::InvalidLayerState)?;
+        let grid_store = lock_grid_store();
         let compositor = lock_compositor();
-        let message_layer_index = grid_store
-            .grid_id_for_cgrid(message_grid)
+        let message_layer_index = message_grid_id
             .map(|grid_id| compositor.layer_index(grid_id))
             .transpose()?
             .flatten();
@@ -1012,21 +885,16 @@ unsafe fn process_raw_line(
                 true,
                 output,
             );
-            // SAFETY: The caller satisfies the documented message-grid
-            // requirements. The previous guards were dropped before this
-            // helper takes ownership again.
-            unsafe {
-                compose_line_from_registered_grids(
-                    message_grid,
-                    CompositorLineInput {
-                        row: plan.row,
-                        columns: plan.columns.start..plan.clear_column,
-                        flags: plan.flags,
-                        settings: runtime.line_settings,
-                    },
-                    output,
-                )
-            }
+            compose_line_from_registered_grids(
+                message_grid_id,
+                CompositorLineInput {
+                    row: plan.row,
+                    columns: plan.columns.start..plan.clear_column,
+                    flags: plan.flags,
+                    settings: runtime.line_settings,
+                },
+                output,
+            )
         }
         CompositorRawLineAction::Forward => {
             let payload_len = plan
@@ -1126,11 +994,10 @@ pub unsafe extern "C" fn ui_comp_raw_line(
     .expect("raw-line columns must be ordered");
     let mut output = NvimOutput;
 
-    // SAFETY: The generated caller supplies the documented cell arrays, and
-    // Neovim's message grid is exclusively accessed on the main thread.
+    // SAFETY: The generated caller supplies the documented cell arrays.
     unsafe {
         process_raw_line(
-            &raw mut c_msg_grid,
+            current_message_grid_id(),
             GridId::new(grid),
             request,
             clear_attr,
@@ -1144,23 +1011,18 @@ pub unsafe extern "C" fn ui_comp_raw_line(
 
 /// Processes one complete grid scroll against registered compositor grids.
 ///
-/// # Safety
-///
 /// A disabled compositor or a grid handle absent from the registered layers
-/// produces a successful no-op. `message_grid` is used only for pointer
-/// identity and may be null.
-unsafe fn process_scroll(
-    message_grid: *mut CScreenGrid,
+/// produces a successful no-op.
+fn process_scroll(
+    message_grid_id: Option<GridId>,
     grid_id: GridId,
     request: CompositorScrollRequest,
     output: &mut impl UiOutput<ComposedGridSpace>,
 ) -> CompositorResult<()> {
     let operation = {
-        let grid_store = CompositorGridAccess::try_take_registered()
-            .ok_or(CompositorError::InvalidLayerState)?;
+        let grid_store = lock_grid_store();
         let compositor = lock_compositor();
-        let message_layer_index = grid_store
-            .grid_id_for_cgrid(message_grid)
+        let message_layer_index = message_grid_id
             .map(|grid_id| compositor.layer_index(grid_id))
             .transpose()?
             .flatten();
@@ -1188,21 +1050,16 @@ unsafe fn process_scroll(
                 output,
             );
             for row in rows {
-                // SAFETY: The caller satisfies the documented message-grid
-                // requirements. The planning guards were dropped before this
-                // helper takes ownership again.
-                unsafe {
-                    compose_line_from_registered_grids(
-                        message_grid,
-                        CompositorLineInput {
-                            row,
-                            columns: region.columns.clone(),
-                            flags: LineFlags::default(),
-                            settings: runtime.line_settings,
-                        },
-                        output,
-                    )
-                }?;
+                compose_line_from_registered_grids(
+                    message_grid_id,
+                    CompositorLineInput {
+                        row,
+                        columns: region.columns.clone(),
+                        flags: LineFlags::default(),
+                        settings: runtime.line_settings,
+                    },
+                    output,
+                )?;
             }
         }
     }
@@ -1235,8 +1092,11 @@ pub extern "C" fn ui_comp_grid_scroll(
         .expect("grid-scroll region must be ordered");
     let mut output = NvimOutput;
 
-    // SAFETY: Neovim's message grid is exclusively accessed on the main
-    // thread during this generated event.
-    unsafe { process_scroll(&raw mut c_msg_grid, GridId::new(grid), request, &mut output) }
-        .expect("grid-scroll processing must preserve compositor invariants");
+    process_scroll(
+        current_message_grid_id(),
+        GridId::new(grid),
+        request,
+        &mut output,
+    )
+    .expect("grid-scroll processing must preserve compositor invariants");
 }

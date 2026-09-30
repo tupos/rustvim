@@ -22,12 +22,12 @@ extern void ui_comp_detach(void);
 extern void ui_comp_update_grid_layer(
   Integer grid_handle, int z_index, bool blending, bool accepts_mouse_input);
 extern bool ui_comp_put_grid(
-  ScreenGrid *grid, int row, int column, int height, int width,
+  Integer grid_handle, int row, int column, int height, int width,
   int z_index, bool blending, bool valid, bool on_top,
   bool accepts_mouse_input,
   Integer current_window_grid_handle);
-extern void ui_comp_remove_grid(ScreenGrid *grid);
-extern void ui_comp_compose_grid(ScreenGrid *grid);
+extern void ui_comp_remove_grid(Integer grid_handle);
+extern void ui_comp_compose_grid(Integer grid_handle);
 
 extern bool ui_comp_set_screen_valid(bool valid);
 
@@ -49,10 +49,10 @@ extern bool ui_comp_find_mouse_grid_at_coord(
   int row, int column, CompositorGridHit *hit);
 
 extern bool ui_comp_grid_get_cell_at(
-  ScreenGrid *grid, int origin_row, int origin_column,
+  Integer grid_handle, int origin_row, int origin_column,
   int row, int column, GridCell *cell);
 extern bool ui_comp_grid_hit_at_coord(
-  ScreenGrid *grid, int origin_row, int origin_column,
+  Integer grid_handle, int origin_row, int origin_column,
   int row, int column, CompositorGridHit *hit);
 
 extern bool ui_comp_grid_origin(Integer grid_handle, int *row, int *column);

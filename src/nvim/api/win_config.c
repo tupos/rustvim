@@ -709,7 +709,7 @@ restore_curwin:
     // Remove grid if present. More reliable than checking curtab, as tabpage_check_windows may not
     // run when temporarily switching tabpages, meaning grids may be stale from another tabpage!
     // (e.g: ctx_switch with kCtxNoDisplay)
-    ui_comp_remove_grid(&win->w_grid_alloc);
+    ui_comp_remove_grid(win->w_grid_handle);
 
     // Redraw tabline, update window's hl attribs, etc. Set must_redraw here, as redraw_later might
     // not if w_redr_type >= UPD_NOT_VALID was set in the old tabpage.

@@ -956,7 +956,7 @@ void ui_ext_win_position(win_T *wp, bool validate)
     wp->w_wincol = comp_col;
 
     if (!c.hide) {
-      ui_comp_put_grid(&wp->w_grid_alloc, comp_row, comp_col,
+      ui_comp_put_grid(wp->w_grid_handle, comp_row, comp_col,
                        wp->w_height_outer, wp->w_width_outer, c.zindex,
                        wp->w_p_winbl > 0 || c.shadow, valid, false, c.mouse,
                        curwin ? curwin->w_grid_handle : 0);
@@ -979,7 +979,7 @@ void ui_ext_win_position(win_T *wp, bool validate)
       if (ui_has(kUIMultigrid)) {
         ui_call_win_hide(wp->w_grid_handle);
       }
-      ui_comp_remove_grid(&wp->w_grid_alloc);
+      ui_comp_remove_grid(wp->w_grid_handle);
     }
   } else {
     ui_call_win_external_pos(wp->w_grid_handle, wp->handle);
@@ -1375,7 +1375,7 @@ win_T *win_split_ins(int size, int flags, win_T *new_wp, int dir, frame_T *to_fl
     // make the contents of the new window the same as the current one
     win_init(wp, curwin, flags);
   } else if (wp->w_floating) {
-    ui_comp_remove_grid(&wp->w_grid_alloc);
+    ui_comp_remove_grid(wp->w_grid_handle);
     if (ui_has(kUIMultigrid)) {
       wp->w_pos_changed = true;
     } else {
@@ -2980,7 +2980,7 @@ int win_close(win_T *win, bool free_buf, bool force)
   }
 
   if (win->w_floating) {
-    ui_comp_remove_grid(&win->w_grid_alloc);
+    ui_comp_remove_grid(win->w_grid_handle);
     assert(first_tabpage != NULL);  // suppress clang "Dereference of NULL pointer"
     if (win->w_config.external) {
       FOR_ALL_TABS(tp) {
@@ -3293,7 +3293,7 @@ bool win_close_othertab(win_T *win, int free_buf, tabpage_T *tp, bool force)
     ui_call_win_close(win->w_grid_handle);
   }
   if (win->w_floating) {
-    ui_comp_remove_grid(&win->w_grid_alloc);
+    ui_comp_remove_grid(win->w_grid_handle);
   }
 
   // About to free the window. Remember its final buffer for terminal_check_size/TabClosed,
@@ -4865,7 +4865,7 @@ static void tabpage_check_windows(tabpage_T *old_curtab)
         win_remove(wp, old_curtab);
         win_append(lastwin_nofloating(NULL), wp, NULL);
       } else {
-        ui_comp_remove_grid(&wp->w_grid_alloc);
+        ui_comp_remove_grid(wp->w_grid_handle);
       }
     }
     wp->w_pos_changed = true;

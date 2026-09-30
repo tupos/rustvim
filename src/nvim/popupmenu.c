@@ -663,7 +663,7 @@ void pum_redraw(void)
 
   pum_left_col = pum_col - col_off;
   pum_right_col = pum_left_col + grid_width;
-  bool moved = ui_comp_put_grid(&pum_grid, pum_row, pum_left_col,
+  bool moved = ui_comp_put_grid(pum_grid_handle, pum_row, pum_left_col,
                                 pum_height + border_width, grid_width + border_width, pum_zindex,
                                 blending, false, true, true,
                                 curwin ? curwin->w_grid_handle : 0);
@@ -1306,7 +1306,7 @@ void pum_check_clear(void)
     if (pum_external) {
       ui_call_popupmenu_hide();
     } else {
-      ui_comp_remove_grid(&pum_grid);
+      ui_comp_remove_grid(pum_grid_handle);
       if (ui_has(kUIMultigrid)) {
         ui_call_win_close(pum_grid_handle);
         ui_call_grid_destroy(pum_grid_handle);
@@ -1346,7 +1346,7 @@ void pum_invalidate(void)
 
 void pum_recompose(void)
 {
-  ui_comp_compose_grid(&pum_grid);
+  ui_comp_compose_grid(pum_grid_handle);
 }
 
 void pum_ext_select_item(int item, bool insert, bool finish)

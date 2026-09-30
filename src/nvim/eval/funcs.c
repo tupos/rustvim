@@ -5772,15 +5772,14 @@ static bool screenchar_get_cell(int row, int col, GridCell *cell)
   }
 
   FOR_ALL_WINDOWS_IN_TAB(wp, curtab) {
-    ScreenGrid *window_grid = &wp->w_grid_alloc;
     if (!wp->w_config.hide
         && ui_comp_grid_get_cell_at(
-          window_grid, wp->w_winrow, wp->w_wincol, row, col, cell)) {
+          wp->w_grid_handle, wp->w_winrow, wp->w_wincol, row, col, cell)) {
       return true;
     }
   }
 
-  return ui_comp_grid_get_cell_at(&default_grid, 0, 0, row, col, cell);
+  return ui_comp_grid_get_cell_at(DEFAULT_GRID_HANDLE, 0, 0, row, col, cell);
 }
 
 /// "screenattr()" function

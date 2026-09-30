@@ -1864,10 +1864,9 @@ static win_T *mouse_find_grid_win(int *gridp, int *rowp, int *colp)
     bool found = ui_comp_find_mouse_grid_at_coord(*rowp, *colp, &hit);
     if (!found && ui_has(kUIMultigrid)) {
       FOR_ALL_WINDOWS_IN_TAB(wp, curtab) {
-        ScreenGrid *window_grid = &wp->w_grid_alloc;
         if (wp->w_config.mouse
             && ui_comp_grid_hit_at_coord(
-              window_grid, wp->w_winrow, wp->w_wincol, *rowp, *colp,
+              wp->w_grid_handle, wp->w_winrow, wp->w_wincol, *rowp, *colp,
               &hit)) {
           found = true;
           break;
