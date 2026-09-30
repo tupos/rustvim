@@ -478,7 +478,7 @@ int update_screen(void)
     type = MAX(type, UPD_CLEAR);
   }
 
-  if (grid_requires_compositor_invalidation(&default_grid,
+  if (grid_requires_compositor_invalidation(DEFAULT_GRID_HANDLE,
                                             type >= UPD_CLEAR)) {
     ui_comp_set_screen_valid(false);
   }
@@ -546,7 +546,7 @@ int update_screen(void)
     // must_redraw may be set indirectly, avoid another redraw later
     must_redraw = 0;
   } else {
-    grid_revalidate_for_redraw(&default_grid);
+    grid_revalidate_for_redraw(DEFAULT_GRID_HANDLE);
   }
 
   // might need to clear space on default_grid for the message area.
@@ -2616,7 +2616,7 @@ void screen_invalidate_highlights(void)
 {
   FOR_ALL_WINDOWS_IN_TAB(wp, curtab) {
     redraw_later(wp, UPD_NOT_VALID);
-    grid_require_full_redraw(&wp->w_grid_alloc);
+    grid_require_full_redraw(wp->w_grid_handle);
   }
 }
 

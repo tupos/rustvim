@@ -972,7 +972,7 @@ void ui_ext_win_position(win_T *wp, bool validate)
       }
       ui_check_cursor_grid(wp->w_grid_handle);
       if (!valid) {
-        grid_require_full_redraw(&wp->w_grid_alloc);
+        grid_require_full_redraw(wp->w_grid_handle);
         redraw_later(wp, UPD_NOT_VALID);
       }
     } else {

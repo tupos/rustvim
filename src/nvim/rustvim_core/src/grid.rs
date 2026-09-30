@@ -4633,64 +4633,36 @@ pub extern "C" fn grid_is_allocated(grid_handle: VimHandleT) -> bool {
 
 /// Reports whether the current screen update must invalidate composed output.
 ///
-/// This combines the requested full-clear state with the default grid's redraw
-/// state without exposing that state to C.
-///
-/// # Safety
-///
-/// `grid` must point to a valid, exclusively accessible `CScreenGrid`. Its
-/// buffers must satisfy the ownership and layout requirements of `ScreenGrid`.
+/// This combines the requested full-clear state with the stored grid's redraw
+/// state. A missing identity conservatively requires compositor invalidation.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn grid_requires_compositor_invalidation(
-    grid: *mut CScreenGrid,
+pub extern "C" fn grid_requires_compositor_invalidation(
+    grid_handle: VimHandleT,
     clear_requested: bool,
 ) -> bool {
-    if grid.is_null() {
+    let Ok(grid) = StoredGridGuard::acquire(GridId::new(grid_handle)) else {
         return true;
-    }
+    };
 
-    // SAFETY: The caller transfers exclusive ownership of the grid buffers to
-    // the guard for the duration of this operation.
-    let grid = unsafe { ScreenGridGuard::take(grid) };
     grid.requires_compositor_invalidation(clear_requested)
 }
 
 /// Revalidates invalid grid contents in preparation for a complete redraw.
 ///
 /// A grid that does not require a redraw remains unchanged.
-///
-/// # Safety
-///
-/// `grid` must point to a valid, exclusively accessible `CScreenGrid`. Its
-/// buffers must satisfy the ownership and layout requirements of `ScreenGrid`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn grid_revalidate_for_redraw(grid: *mut CScreenGrid) {
-    if grid.is_null() {
-        return;
+pub extern "C" fn grid_revalidate_for_redraw(grid_handle: VimHandleT) {
+    if let Ok(mut grid) = StoredGridGuard::acquire(GridId::new(grid_handle)) {
+        grid.revalidate_for_redraw();
     }
-
-    // SAFETY: The caller transfers exclusive ownership of the grid buffers to
-    // the guard for the duration of this operation.
-    let mut grid = unsafe { ScreenGridGuard::take(grid) };
-    grid.revalidate_for_redraw();
 }
 
 /// Records that a grid requires a complete redraw.
-///
-/// # Safety
-///
-/// `grid` must point to a valid, exclusively accessible `CScreenGrid`. Its
-/// buffers must satisfy the ownership and layout requirements of `ScreenGrid`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn grid_require_full_redraw(grid: *mut CScreenGrid) {
-    if grid.is_null() {
-        return;
+pub extern "C" fn grid_require_full_redraw(grid_handle: VimHandleT) {
+    if let Ok(mut grid) = StoredGridGuard::acquire(GridId::new(grid_handle)) {
+        grid.require_full_redraw();
     }
-
-    // SAFETY: The caller transfers exclusive ownership of the grid buffers to
-    // the guard for the duration of this operation.
-    let mut grid = unsafe { ScreenGridGuard::take(grid) };
-    grid.require_full_redraw();
 }
 
 /// Reports whether a grid view requires a complete redraw.
@@ -7230,6 +7202,12 @@ mod tests {
         let grid_handle = unsafe { grid_assign_handle(&raw mut cgrid) };
 
         assert!(grid_is_allocated(grid_handle));
+        assert!(grid_requires_compositor_invalidation(grid_handle, false));
+        grid_revalidate_for_redraw(grid_handle);
+        assert!(!grid_requires_compositor_invalidation(grid_handle, false));
+        assert!(grid_requires_compositor_invalidation(grid_handle, true));
+        grid_require_full_redraw(grid_handle);
+        assert!(grid_requires_compositor_invalidation(grid_handle, false));
 
         {
             let mut grid = StoredGridGuard::acquire(GridId::new(grid_handle)).unwrap();
@@ -7244,6 +7222,9 @@ mod tests {
         }
         assert!(!grid_is_allocated(grid_handle));
         assert!(!grid_is_allocated(0));
+        assert!(grid_requires_compositor_invalidation(grid_handle, false));
+        grid_revalidate_for_redraw(grid_handle);
+        grid_require_full_redraw(grid_handle);
     }
 
     #[test]
