@@ -5314,14 +5314,18 @@ pub unsafe extern "C" fn grid_flush_message_scroll(
 /// Applies the complete allocation and validity transition for one window
 /// grid and updates its C-facing view.
 ///
+/// The first successful configuration moves the window grid into permanent
+/// Rust storage and leaves an opaque identity in its C structure.
+///
 /// Returns the configured grid identity and whether dedicated storage was
 /// allocated or resized. The window subsystem uses that result for border
 /// redraw and UI resize notification.
 ///
 /// # Safety
 ///
-/// `grid` must point to a valid, exclusively accessible `CScreenGrid`. Any
-/// existing buffers and dimensions must satisfy the ownership and layout
+/// `grid` must remain at a stable address and identify either a permanently
+/// stored grid or a valid, exclusively accessible legacy `CScreenGrid`. Any
+/// legacy buffers and dimensions must satisfy the ownership and layout
 /// requirements of `ScreenGrid`. `view` must point to a valid, exclusively
 /// writable `CGridView`.
 #[unsafe(no_mangle)]
@@ -5357,11 +5361,15 @@ pub unsafe extern "C" fn grid_configure_for_window(
         // SAFETY: The caller transfers exclusive ownership of the C grid and
         // its allocations to the guard for the duration of this operation.
         let mut rust_grid = unsafe { ScreenGridGuard::take(grid) };
-        rust_grid.configure_window_view(
+        let update = rust_grid.configure_window_view(
             mode,
             GridPosition::new(row_offset, col_offset),
             &mut line_buffer,
-        )
+        );
+        rust_grid
+            .store_permanently()
+            .expect("window grid must have a unique valid identity");
+        update
     };
 
     // SAFETY: The caller guarantees exclusive writable access to `view`.
@@ -6086,6 +6094,70 @@ mod tests {
             grid.configure_for_window(WindowGridMode::Shared, &mut line_buffer),
             GridLifecycleChange::Unchanged
         );
+    }
+
+    #[test]
+    fn window_grid_configuration_moves_grid_into_permanent_rust_storage() {
+        let mut line_buffer = LineBuffer::new(2);
+        let mut grid = ScreenGrid::new(1, 2, true, &mut line_buffer);
+        grid.handle = 70_002;
+        // SAFETY: Ownership of every grid allocation is transferred to
+        // `cgrid`.
+        let mut cgrid = unsafe { grid.to_cgrid() };
+        let mut view = CGridView {
+            target: std::ptr::null_mut(),
+            row_offset: 0,
+            col_offset: 0,
+        };
+
+        // SAFETY: `cgrid` exclusively owns valid grid allocations, both
+        // objects remain at stable addresses, and `view` is writable.
+        let shared_update =
+            unsafe { grid_configure_for_window(&raw mut cgrid, &raw mut view, 0, 0, false, 3, 4) };
+        let cgrid_pointer = std::ptr::NonNull::new(&raw mut cgrid).unwrap();
+        let grid_id = permanent_grid_id(cgrid_pointer).unwrap();
+
+        assert_eq!(grid_id, GridId::new(70_002));
+        assert_eq!(shared_update.grid_handle, 70_002);
+        assert!(!shared_update.resized);
+        assert_eq!(view.target, &raw mut default_grid);
+        assert_eq!((view.row_offset, view.col_offset), (3, 4));
+        assert!(cgrid.chars.is_null());
+        assert!(cgrid.attrs.is_null());
+        assert!(cgrid.vcols.is_null());
+        assert!(cgrid.line_offset.is_null());
+
+        {
+            // SAFETY: The stable C address identifies the registered Rust
+            // grid, and this scope has exclusive access to it.
+            let grid = unsafe { ScreenGridGuard::take(&raw mut cgrid) };
+            assert!(!grid.is_allocated());
+        }
+
+        // SAFETY: The previous guard was dropped, both objects remain at
+        // stable addresses, and `view` is writable.
+        let dedicated_update =
+            unsafe { grid_configure_for_window(&raw mut cgrid, &raw mut view, 2, 3, true, 1, 2) };
+
+        assert_eq!(dedicated_update.grid_handle, 70_002);
+        assert!(dedicated_update.resized);
+        assert_eq!(view.target, &raw mut cgrid);
+        assert_eq!((view.row_offset, view.col_offset), (1, 2));
+        assert_eq!(permanent_grid_id(cgrid_pointer), Some(grid_id));
+
+        {
+            // SAFETY: The previous guard was dropped before reacquiring the
+            // permanently stored grid.
+            let grid = unsafe { ScreenGridGuard::take(&raw mut cgrid) };
+            assert_eq!((grid.rows, grid.cols), (2, 3));
+            assert!(grid.is_allocated());
+        }
+
+        // SAFETY: No grid guard remains, and `cgrid` is exclusively accessible.
+        unsafe {
+            grid_free(&raw mut cgrid);
+        }
+        assert_eq!(permanent_grid_id(cgrid_pointer), None);
     }
 
     #[test]
