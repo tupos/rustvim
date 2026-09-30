@@ -4947,17 +4947,14 @@ pub unsafe extern "C" fn grid_configure_default(
 }
 
 /// Applies the complete resize or invalidation transition for the popup-menu
-/// grid. The first successful configuration moves the grid into permanent
-/// Rust storage and leaves an opaque identity in its transitional C structure.
+/// grid.
 ///
 /// Returns whether storage was allocated or resized.
 ///
 /// # Safety
 ///
-/// `grid` must remain at a stable address and identify either a permanently
-/// stored grid or a valid, exclusively accessible legacy `CScreenGrid`. Any
-/// legacy buffers and dimensions must satisfy the ownership and layout
-/// requirements of `ScreenGrid`.
+/// `grid` must remain at its registered stable address and identify the
+/// permanently stored popup-menu grid.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn grid_configure_for_popup_menu(
     grid: *mut CScreenGrid,
@@ -4977,8 +4974,6 @@ pub unsafe extern "C" fn grid_configure_for_popup_menu(
     // allocations to the guard for the duration of this operation.
     let mut grid = unsafe { ScreenGridGuard::take(grid) };
     let change = grid.configure_for_popup_menu(size, contents_invalid, &mut line_buffer);
-    grid.store_permanently()
-        .expect("popup-menu grid must have a unique valid identity");
     change == GridLifecycleChange::Resized
 }
 
@@ -5005,18 +5000,13 @@ pub unsafe extern "C" fn grid_release_popup_menu(grid: *mut CScreenGrid) {
 
 /// Prepares the message grid for its requested visibility and size.
 ///
-/// The first call moves the message grid into permanent Rust storage and
-/// leaves an opaque identity in its transitional C structure.
-///
 /// A `ReleaseRequired` result leaves storage intact so C can remove the
 /// compositor layer before calling `grid_release_message`.
 ///
 /// # Safety
 ///
-/// `grid` must remain at a stable address and identify either a permanently
-/// stored grid or a valid, exclusively accessible legacy `CScreenGrid`. Any
-/// legacy buffers and dimensions must satisfy the ownership and layout
-/// requirements of `ScreenGrid`.
+/// `grid` must remain at its registered stable address and identify the
+/// permanently stored message grid.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn grid_prepare_for_messages(
     grid: *mut CScreenGrid,
@@ -5042,10 +5032,7 @@ pub unsafe extern "C" fn grid_prepare_for_messages(
         // SAFETY: The caller transfers exclusive ownership of the C grid and
         // its allocations to the guard for the duration of this function.
         let mut grid = unsafe { ScreenGridGuard::take(grid) };
-        let transition = grid.prepare_for_messages(mode, &GRID_HANDLE_ALLOCATOR, &mut line_buffer);
-        grid.store_permanently()
-            .expect("message grid must have a unique valid identity");
-        transition
+        grid.prepare_for_messages(mode, &GRID_HANDLE_ALLOCATOR, &mut line_buffer)
     };
 
     if transition == MessageGridTransition::Resized {
@@ -5314,19 +5301,14 @@ pub unsafe extern "C" fn grid_flush_message_scroll(
 /// Applies the complete allocation and validity transition for one window
 /// grid and updates its C-facing view.
 ///
-/// The first successful configuration moves the window grid into permanent
-/// Rust storage and leaves an opaque identity in its C structure.
-///
 /// Returns the configured grid identity and whether dedicated storage was
 /// allocated or resized. The window subsystem uses that result for border
 /// redraw and UI resize notification.
 ///
 /// # Safety
 ///
-/// `grid` must remain at a stable address and identify either a permanently
-/// stored grid or a valid, exclusively accessible legacy `CScreenGrid`. Any
-/// legacy buffers and dimensions must satisfy the ownership and layout
-/// requirements of `ScreenGrid`. `view` must point to a valid, exclusively
+/// `grid` must remain at its registered stable address and identify a
+/// permanently stored window grid. `view` must point to a valid, exclusively
 /// writable `CGridView`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn grid_configure_for_window(
@@ -5361,15 +5343,11 @@ pub unsafe extern "C" fn grid_configure_for_window(
         // SAFETY: The caller transfers exclusive ownership of the C grid and
         // its allocations to the guard for the duration of this operation.
         let mut rust_grid = unsafe { ScreenGridGuard::take(grid) };
-        let update = rust_grid.configure_window_view(
+        rust_grid.configure_window_view(
             mode,
             GridPosition::new(row_offset, col_offset),
             &mut line_buffer,
-        );
-        rust_grid
-            .store_permanently()
-            .expect("window grid must have a unique valid identity");
-        update
+        )
     };
 
     // SAFETY: The caller guarantees exclusive writable access to `view`.
@@ -5835,10 +5813,15 @@ pub extern "C" fn schar_from_char(mut c: libc::c_int) -> VimSCharT {
     VimSCharT::from_le_bytes(bytes)
 }
 
+/// Assigns a stable identity and moves a grid into permanent Rust storage.
+///
+/// Repeated calls preserve the existing identity and storage.
+///
 /// # Safety
 ///
-/// `grid` must point to a valid, exclusively accessible `CScreenGrid` whose
-/// non-null buffers satisfy the ownership and layout requirements of
+/// `grid` must remain at a stable address and identify either a permanently
+/// stored grid or a valid, exclusively accessible legacy `CScreenGrid`. Any
+/// legacy buffers must satisfy the ownership and layout requirements of
 /// `ScreenGrid`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn grid_assign_handle(grid: *mut CScreenGrid) -> VimHandleT {
@@ -5846,7 +5829,9 @@ pub unsafe extern "C" fn grid_assign_handle(grid: *mut CScreenGrid) -> VimHandle
     // the guard.
     let mut grid = unsafe { ScreenGridGuard::take(grid) };
     GRID_HANDLE_ALLOCATOR.assign(&mut grid.handle);
-    grid.id().as_native_handle()
+    grid.store_permanently()
+        .expect("assigned grid must have a unique valid identity")
+        .as_native_handle()
 }
 
 /// # Safety
@@ -6099,29 +6084,32 @@ mod tests {
     #[test]
     fn window_grid_configuration_moves_grid_into_permanent_rust_storage() {
         let mut line_buffer = LineBuffer::new(2);
-        let mut grid = ScreenGrid::new(1, 2, true, &mut line_buffer);
-        grid.handle = 70_002;
+        let grid = ScreenGrid::new(1, 2, true, &mut line_buffer);
         // SAFETY: Ownership of every grid allocation is transferred to
         // `cgrid`.
         let mut cgrid = unsafe { grid.to_cgrid() };
+        // SAFETY: `cgrid` owns valid grid allocations and remains at a stable
+        // address until its permanent binding is released.
+        let assigned_handle = unsafe { grid_assign_handle(&raw mut cgrid) };
+        let cgrid_pointer = std::ptr::NonNull::new(&raw mut cgrid).unwrap();
+        let grid_id = permanent_grid_id(cgrid_pointer).unwrap();
         let mut view = CGridView {
             target: std::ptr::null_mut(),
             row_offset: 0,
             col_offset: 0,
         };
 
-        // SAFETY: `cgrid` exclusively owns valid grid allocations, both
-        // objects remain at stable addresses, and `view` is writable.
+        // SAFETY: `cgrid` is a registered opaque identity, both objects remain
+        // at stable addresses, and `view` is writable.
         let shared_update =
             unsafe { grid_configure_for_window(&raw mut cgrid, &raw mut view, 0, 0, false, 3, 4) };
-        let cgrid_pointer = std::ptr::NonNull::new(&raw mut cgrid).unwrap();
-        let grid_id = permanent_grid_id(cgrid_pointer).unwrap();
 
-        assert_eq!(grid_id, GridId::new(70_002));
-        assert_eq!(shared_update.grid_handle, 70_002);
+        assert_eq!(grid_id, GridId::new(assigned_handle));
+        assert_eq!(shared_update.grid_handle, assigned_handle);
         assert!(!shared_update.resized);
         assert_eq!(view.target, &raw mut default_grid);
         assert_eq!((view.row_offset, view.col_offset), (3, 4));
+        assert_eq!(cgrid.handle, assigned_handle);
         assert!(cgrid.chars.is_null());
         assert!(cgrid.attrs.is_null());
         assert!(cgrid.vcols.is_null());
@@ -6139,7 +6127,7 @@ mod tests {
         let dedicated_update =
             unsafe { grid_configure_for_window(&raw mut cgrid, &raw mut view, 2, 3, true, 1, 2) };
 
-        assert_eq!(dedicated_update.grid_handle, 70_002);
+        assert_eq!(dedicated_update.grid_handle, assigned_handle);
         assert!(dedicated_update.resized);
         assert_eq!(view.target, &raw mut cgrid);
         assert_eq!((view.row_offset, view.col_offset), (1, 2));
@@ -7233,23 +7221,25 @@ mod tests {
     }
 
     #[test]
-    fn message_grid_preparation_moves_grid_into_permanent_rust_storage() {
+    fn assigned_message_grid_remains_permanent_through_preparation() {
         let mut line_buffer = LineBuffer::new(3);
-        let mut grid = ScreenGrid::new(1, 2, true, &mut line_buffer);
-        grid.handle = 70_001;
+        let grid = ScreenGrid::new(1, 2, true, &mut line_buffer);
         // SAFETY: Ownership of every grid allocation is transferred to
         // `cgrid`.
         let mut cgrid = unsafe { grid.to_cgrid() };
-
-        // SAFETY: `cgrid` exclusively owns valid grid allocations, and its
-        // address remains stable until the permanent binding is released.
-        let transition = unsafe { grid_prepare_for_messages(&raw mut cgrid, 2, 3, true, 0) };
+        // SAFETY: `cgrid` owns valid grid allocations and remains at a stable
+        // address until its permanent binding is released.
+        let assigned_handle = unsafe { grid_assign_handle(&raw mut cgrid) };
         let cgrid_pointer = std::ptr::NonNull::new(&raw mut cgrid).unwrap();
         let grid_id = permanent_grid_id(cgrid_pointer).unwrap();
 
-        assert_eq!(grid_id, GridId::new(70_001));
+        // SAFETY: `cgrid` is a registered opaque identity and remains at its
+        // stable address.
+        let transition = unsafe { grid_prepare_for_messages(&raw mut cgrid, 2, 3, true, 0) };
+
+        assert_eq!(grid_id, GridId::new(assigned_handle));
         assert_eq!(transition, CMessageGridTransition::Resized);
-        assert_eq!(cgrid.handle, 70_001);
+        assert_eq!(cgrid.handle, assigned_handle);
         assert!(cgrid.chars.is_null());
         assert!(cgrid.attrs.is_null());
         assert!(cgrid.vcols.is_null());
