@@ -106,6 +106,7 @@ extern WindowGridUpdate grid_configure_for_window(
   bool use_dedicated_grid, int row_offset, int col_offset);
 extern bool grid_configure_for_popup_menu(ScreenGrid *grid, int rows, int columns,
                                           bool contents_invalid);
+extern void grid_release_popup_menu(ScreenGrid *grid);
 extern MessageGridTransition grid_prepare_for_messages(ScreenGrid *grid, int rows, int columns,
                                                        bool should_allocate,
                                                        int scrolled_lines);

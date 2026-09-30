@@ -4991,14 +4991,16 @@ pub unsafe extern "C" fn grid_configure_default(
 }
 
 /// Applies the complete resize or invalidation transition for the popup-menu
-/// grid.
+/// grid. The first successful configuration moves the grid into permanent
+/// Rust storage and leaves an opaque identity in its transitional C structure.
 ///
 /// Returns whether storage was allocated or resized.
 ///
 /// # Safety
 ///
-/// `grid` must point to a valid, exclusively accessible `CScreenGrid`. Any
-/// existing buffers and dimensions must satisfy the ownership and layout
+/// `grid` must remain at a stable address and identify either a permanently
+/// stored grid or a valid, exclusively accessible legacy `CScreenGrid`. Any
+/// legacy buffers and dimensions must satisfy the ownership and layout
 /// requirements of `ScreenGrid`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn grid_configure_for_popup_menu(
@@ -5016,10 +5018,33 @@ pub unsafe extern "C" fn grid_configure_for_popup_menu(
 
     let mut line_buffer = LineBufferGuard::acquire();
     // SAFETY: The caller transfers exclusive ownership of the C grid and its
-    // allocations to the guard for the duration of this function.
+    // allocations to the guard for the duration of this operation.
     let mut grid = unsafe { ScreenGridGuard::take(grid) };
-    grid.configure_for_popup_menu(size, contents_invalid, &mut line_buffer)
-        == GridLifecycleChange::Resized
+    let change = grid.configure_for_popup_menu(size, contents_invalid, &mut line_buffer);
+    grid.store_permanently()
+        .expect("popup-menu grid must have a unique valid identity");
+    change == GridLifecycleChange::Resized
+}
+
+/// Releases popup-menu cell storage while retaining its permanent identity.
+///
+/// The popup menu reuses its grid handle when it is displayed again. Final
+/// removal from `GridStore` therefore occurs only during editor shutdown.
+///
+/// # Safety
+///
+/// `grid` must remain at its registered stable address and identify the
+/// permanently stored popup-menu grid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn grid_release_popup_menu(grid: *mut CScreenGrid) {
+    if grid.is_null() {
+        return;
+    }
+
+    // SAFETY: The caller guarantees exclusive access to the registered grid
+    // for the duration of this operation.
+    let mut grid = unsafe { ScreenGridGuard::take(grid) };
+    grid.release_storage();
 }
 
 /// Prepares the message grid for its requested visibility and size.
@@ -5430,11 +5455,12 @@ pub unsafe extern "C" fn grid_free(grid: *mut CScreenGrid) {
 /// all other users of the grids, line buffer, and glyph mapping have stopped.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn grid_free_all_mem() {
-    // SAFETY: The caller guarantees exclusive shutdown-time access to both
+    // SAFETY: The caller guarantees exclusive shutdown-time access to the
     // global grids and their Rust-owned allocations.
     unsafe {
         grid_free(&raw mut default_grid);
         grid_free(&raw mut msg_grid);
+        grid_free(&raw mut pum_grid);
     }
 
     *lock_message_scroll_state() = MessageScrollState::new();
@@ -6137,6 +6163,21 @@ mod tests {
         assert_eq!(grid.chars[0], schar_from_ascii('x'));
         assert_eq!(grid.attrs[0], 12);
         assert_eq!(grid.attrs[2], -1);
+
+        grid.release_storage();
+
+        assert_eq!(grid.id(), GridId::new(9));
+        assert!(!grid.is_allocated());
+        assert_eq!(
+            grid.configure_for_popup_menu(
+                GridSize::try_new(2, 3).unwrap(),
+                false,
+                &mut line_buffer,
+            ),
+            GridLifecycleChange::Resized
+        );
+        assert_eq!(grid.id(), GridId::new(9));
+        assert!(grid.is_allocated());
     }
 
     #[test]

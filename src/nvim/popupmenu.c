@@ -1311,8 +1311,7 @@ void pum_check_clear(void)
         ui_call_win_close(pum_grid_handle);
         ui_call_grid_destroy(pum_grid_handle);
       }
-      // TODO(bfredl): consider keeping float grids allocated.
-      grid_free(&pum_grid);
+      grid_release_popup_menu(&pum_grid);
     }
     pum_is_drawn = false;
     pum_external = false;
