@@ -159,16 +159,10 @@ void conceal_check_cursor_line(void)
   curs_columns(curwin, true);
 }
 
-/// Resize default_grid to Rows and Columns.
+/// Resize the Rust-owned default grid to Rows and Columns.
 ///
-/// Allocate default_grid.chars[] and other grid arrays.
-///
-/// There may be some time between setting Rows and Columns and (re)allocating
-/// default_grid arrays.  This happens when starting up and when
-/// (manually) changing the screen size.  Always use default_grid.rows and
-/// default_grid.cols to access items in default_grid.chars[].  Use Rows and
-/// Columns for positioning text etc. where the final size of the screen is
-/// needed.
+/// There may be some time between setting Rows and Columns and resizing the
+/// grid storage. This happens during startup and manual screen resizing.
 ///
 /// @return  whether resizing has been done
 bool default_grid_alloc(void)
@@ -183,16 +177,8 @@ bool default_grid_alloc(void)
   }
   resizing = true;
 
-  // Resize the screen buffers only when the configured dimensions changed.
-  // - Allocate new arrays for default_grid
-  // - Move lines from the old arrays into the new arrays, clear extra
-  //   lines (unless the screen is going to be cleared).
-  // - Free the old arrays.
-  //
-  // If anything fails, make grid arrays NULL, so we don't do anything!
-  // Continuing with the old arrays may result in a crash, because the
-  // size is wrong.
-  bool resized = grid_configure_default(&default_grid, Rows, Columns);
+  // Resize the Rust-owned storage only when the configured dimensions changed.
+  bool resized = grid_configure_default(Rows, Columns);
   if (!resized) {
     resizing = false;
     return false;
@@ -209,7 +195,7 @@ void screenclear(void)
 {
   msg_check_for_delay(false);
 
-  if (starting == NO_SCREEN || !grid_clear_all(&default_grid, true)) {
+  if (starting == NO_SCREEN || !grid_clear_default(true)) {
     return;
   }
 
@@ -493,7 +479,7 @@ int update_screen(void)
     // UPD_CLEAR is already handled
     if (type == UPD_NOT_VALID && !ui_has(kUIMultigrid) && msg_scrolled) {
       was_invalidated = ui_comp_set_screen_valid(false);
-      grid_clear_rows(&default_grid, valid, Rows - (int)p_ch, false);
+      grid_clear_default_rows(valid, Rows - (int)p_ch, false);
       FOR_ALL_WINDOWS_IN_TAB(wp, curtab) {
         if (wp->w_floating) {
           continue;

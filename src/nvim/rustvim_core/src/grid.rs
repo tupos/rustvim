@@ -349,6 +349,7 @@ fn lock_glyph_mapping() -> MutexGuard<'static, GlyphMapping> {
 }
 
 const DEFAULT_GRID_HANDLE: VimHandleT = 1;
+pub(crate) const DEFAULT_GRID_ID: GridId = GridId::new(DEFAULT_GRID_HANDLE);
 
 /// Assigns monotonically increasing handles to newly created grids.
 struct GridHandleAllocator {
@@ -4862,51 +4863,33 @@ pub unsafe extern "C" fn grid_alloc(
     *grid = resized_grid;
 }
 
-/// Assigns the reserved identity to the default screen grid.
-///
-/// # Safety
-///
-/// `grid` must point to a valid, exclusively accessible `CScreenGrid`. Any
-/// existing buffers and dimensions must satisfy the ownership and layout
-/// requirements of `ScreenGrid`.
+/// Assigns and permanently stores the default screen grid.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn grid_initialize_default(grid: *mut CScreenGrid) {
-    if grid.is_null() {
-        return;
-    }
-
-    // SAFETY: The caller transfers exclusive ownership of the C grid and its
-    // allocations to the guard for the duration of this function.
-    let mut grid = unsafe { ScreenGridGuard::take(grid) };
+pub extern "C" fn grid_initialize_default() {
+    // SAFETY: Initialization has exclusive main-thread access to the
+    // process-global default-grid representation.
+    let mut grid = unsafe { ScreenGridGuard::take(&raw mut default_grid) };
     grid.initialize_as_default();
+    let grid_id = grid
+        .store_permanently()
+        .expect("default grid must enter permanent storage exactly once");
+    assert_eq!(grid_id, DEFAULT_GRID_ID);
 }
 
 /// Resizes the default screen grid when its configured dimensions changed.
 ///
 /// Returns whether a resize was performed.
 ///
-/// # Safety
-///
-/// `grid` must point to a valid, exclusively accessible `CScreenGrid`. Any
-/// existing buffers and dimensions must satisfy the ownership and layout
-/// requirements of `ScreenGrid`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn grid_configure_default(
-    grid: *mut CScreenGrid,
-    rows: libc::c_int,
-    columns: libc::c_int,
-) -> bool {
-    if grid.is_null() {
-        return false;
-    }
+pub extern "C" fn grid_configure_default(rows: libc::c_int, columns: libc::c_int) -> bool {
     let Some(size) = GridSize::try_new(rows, columns) else {
         return false;
     };
 
     let mut line_buffer = LineBufferGuard::acquire();
-    // SAFETY: The caller transfers exclusive ownership of the C grid and its
-    // allocations to the guard for the duration of this function.
-    let mut grid = unsafe { ScreenGridGuard::take(grid) };
+    let Ok(mut grid) = StoredGridGuard::acquire(DEFAULT_GRID_ID) else {
+        return false;
+    };
     grid.configure_as_default(size, &mut line_buffer) == GridLifecycleChange::Resized
 }
 
@@ -5384,19 +5367,11 @@ pub unsafe extern "C" fn grid_free_all_mem() {
 
 /// Clears every allocated logical row.
 ///
-/// # Safety
-///
-/// `grid` must point to a valid, exclusively accessible `CScreenGrid` whose
-/// buffers satisfy the ownership and layout requirements of `ScreenGrid`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn grid_clear_all(grid: *mut CScreenGrid, valid: bool) -> bool {
-    if grid.is_null() {
+pub extern "C" fn grid_clear_default(valid: bool) -> bool {
+    let Ok(mut grid) = StoredGridGuard::acquire(DEFAULT_GRID_ID) else {
         return false;
-    }
-
-    // SAFETY: The caller transfers exclusive ownership of the grid buffers to
-    // the guard.
-    let mut grid = unsafe { ScreenGridGuard::take(grid) };
+    };
     grid.clear_all(valid)
 }
 
@@ -5404,29 +5379,20 @@ pub unsafe extern "C" fn grid_clear_all(grid: *mut CScreenGrid, valid: bool) -> 
 ///
 /// Rows beyond the allocated grid are ignored.
 ///
-/// # Safety
-///
-/// `grid` must point to a valid, exclusively accessible `CScreenGrid` whose
-/// buffers satisfy the ownership and layout requirements of `ScreenGrid`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn grid_clear_rows(
-    grid: *mut CScreenGrid,
+pub extern "C" fn grid_clear_default_rows(
     start_row: libc::c_int,
     end_row: libc::c_int,
     valid: bool,
 ) {
-    if grid.is_null() {
-        return;
-    }
     let (Ok(start_row), Ok(end_row)) = (usize::try_from(start_row), usize::try_from(end_row))
     else {
         return;
     };
 
-    // SAFETY: The caller transfers exclusive ownership of the grid buffers to
-    // the guard.
-    let mut grid = unsafe { ScreenGridGuard::take(grid) };
-    grid.clear_rows(start_row..end_row, valid);
+    if let Ok(mut grid) = StoredGridGuard::acquire(DEFAULT_GRID_ID) {
+        grid.clear_rows(start_row..end_row, valid);
+    }
 }
 
 /// @param buf need not be NUL terminated, but may not contain embedded NULs.

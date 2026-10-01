@@ -5,8 +5,8 @@ use std::{ptr::NonNull, slice};
 use crate::{
     defines::{CVimString, Integer},
     grid::{
-        CGridCell, CScreenGrid, GridId, ScreenGridGuard, VimHandleT, VimSAttrT, VimSCharT,
-        default_grid as c_default_grid, lock_grid_store, schar_from_buf,
+        CGridCell, DEFAULT_GRID_ID, GridId, VimHandleT, VimSAttrT, VimSCharT, lock_grid_store,
+        schar_from_buf,
     },
 };
 
@@ -44,31 +44,18 @@ fn current_message_grid_id() -> Option<GridId> {
     (grid_handle > 0).then_some(GridId::new(grid_handle))
 }
 
-/// Moves the default grid into permanent Rust storage.
-///
-/// # Safety
-///
-/// `default_grid` must point to a valid, exclusively accessible C grid whose
-/// buffers satisfy the ownership and layout requirements of `ScreenGrid`.
-unsafe fn initialize_default_grid(default_grid: *mut CScreenGrid) -> CompositorResult<GridId> {
-    unsafe {
-        // SAFETY: The caller transfers exclusive ownership for this scope.
-        ScreenGridGuard::take(default_grid)
-    }
-    .store_permanently()
-    .map_err(|_| CompositorError::InvalidLayerState)
-}
-
 /// Initializes the compositor with the process-global default grid.
 #[unsafe(no_mangle)]
 pub extern "C" fn ui_comp_init() {
-    // SAFETY: Initialization runs on Neovim's main thread before compositor
-    // operations begin, and the default grid remains process-global.
-    let default_grid_id = unsafe { initialize_default_grid(&raw mut c_default_grid) }
-        .expect("default grid must move into permanent storage exactly once");
+    {
+        let grids = lock_grid_store();
+        grids
+            .grid(DEFAULT_GRID_ID)
+            .expect("default grid must be registered before compositor initialization");
+    }
 
     lock_compositor()
-        .initialize_layers(default_grid_id)
+        .initialize_layers(DEFAULT_GRID_ID)
         .expect("compositor layers must initialize exactly once");
 }
 
@@ -124,7 +111,7 @@ pub extern "C" fn ui_comp_grid_resize(grid: Integer, width: Integer, height: Int
     };
     let size =
         GridSize::try_new(height, width).expect("grid-resize dimensions must be nonnegative");
-    if GridId::new(grid) != GridId::new(1) {
+    if GridId::new(grid) != DEFAULT_GRID_ID {
         return;
     }
     let plan = lock_compositor()
@@ -144,15 +131,14 @@ fn update_message_position(
     runtime: CompositorRuntime,
     output: &mut impl UiOutput<ComposedGridSpace>,
 ) -> CompositorResult<()> {
-    let default_grid_id = GridId::new(1);
-    if message_grid_id == default_grid_id {
+    if message_grid_id == DEFAULT_GRID_ID {
         return Err(CompositorError::InvalidLayerState);
     }
 
     let plan = {
         let grid_store = lock_grid_store();
         let default_grid = grid_store
-            .grid(default_grid_id)
+            .grid(DEFAULT_GRID_ID)
             .ok_or(CompositorError::InvalidLayerState)?;
         lock_compositor().set_message_position(message_grid_id, default_grid, request)
     }?;
