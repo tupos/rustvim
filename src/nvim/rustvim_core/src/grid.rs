@@ -119,29 +119,6 @@ impl DirtyColumns {
     fn take(&mut self, row: usize) -> Option<VimDirtyColT> {
         self.columns.get_mut(row).map(std::mem::take)
     }
-
-    /// Transfers ownership to the raw representation stored in `CScreenGrid`.
-    fn into_raw(self) -> *mut VimDirtyColT {
-        Box::into_raw(self.columns) as *mut VimDirtyColT
-    }
-
-    /// Reclaims ownership from the raw representation stored in `CScreenGrid`.
-    ///
-    /// # Safety
-    ///
-    /// `columns` must be null or uniquely own a Rust boxed slice containing
-    /// exactly `rows` initialized values.
-    unsafe fn from_raw(columns: *mut VimDirtyColT, rows: usize) -> Option<Self> {
-        if columns.is_null() {
-            return None;
-        }
-        let columns = std::ptr::slice_from_raw_parts_mut(columns, rows);
-        Some(Self {
-            // SAFETY: The caller guarantees that this is the unique pointer
-            // produced by `DirtyColumns::into_raw` with the same row count.
-            columns: unsafe { Box::from_raw(columns) },
-        })
-    }
 }
 
 /// Storage mode selected by the window subsystem for one screen grid.
@@ -950,71 +927,6 @@ impl ScreenGrid {
         self.dirty_columns.as_mut()?.take(row)
     }
 
-    /// Takes ownership of every allocation stored in a C screen grid.
-    ///
-    /// The C pointer fields remain available as non-owning views because
-    /// synchronous C UI callbacks may inspect this or other global grids while
-    /// the Rust operation is active.
-    ///
-    /// # Safety
-    ///
-    /// Every non-null buffer pointer in `cgrid` must have been produced by
-    /// `ScreenGrid::to_cgrid`, must remain uniquely owned by `cgrid`, and must
-    /// describe the lengths implied by `rows` and `cols`. Until ownership is
-    /// returned with `ScreenGrid::to_cgrid`, the C pointers must not be
-    /// reclaimed, reallocated, or used to create another owner.
-    pub(crate) unsafe fn take_from_cgrid(cgrid: &mut CScreenGrid) -> Self {
-        let num_cells = cgrid.rows as usize * cgrid.cols as usize;
-        // SAFETY: The caller guarantees ownership and the cell-buffer lengths.
-        let chars = unsafe { take_c_buffer(cgrid.chars, num_cells) };
-        // SAFETY: The caller guarantees ownership and the cell-buffer lengths.
-        let attrs = unsafe { take_c_buffer(cgrid.attrs, num_cells) };
-        // SAFETY: The caller guarantees ownership and the cell-buffer lengths.
-        let vcols = unsafe { take_c_buffer(cgrid.vcols, num_cells) };
-        // SAFETY: The caller guarantees ownership and the row-buffer length.
-        let line_offset = unsafe { take_c_buffer(cgrid.line_offset, cgrid.rows as usize) };
-        // SAFETY: The caller guarantees ownership and the row-buffer length.
-        let dirty_columns = unsafe { DirtyColumns::from_raw(cgrid.dirty_col, cgrid.rows as usize) };
-
-        Self {
-            handle: cgrid.handle,
-            chars,
-            attrs,
-            vcols,
-            line_offset,
-            dirty_columns,
-            rows: cgrid.rows,
-            cols: cgrid.cols,
-            valid: cgrid.valid,
-            throttled: cgrid.throttled,
-        }
-    }
-
-    /// # Safety
-    ///
-    /// The returned `CScreenGrid` becomes the unique owner of the `chars`,
-    /// `attrs`, `vcols`, `line_offset`, and `dirty_col` allocations. The
-    /// caller must not duplicate or independently free those pointers, must
-    /// access them only within the lengths described by `rows` and `cols`, and
-    /// must reconstruct at most one `ScreenGrid` from them.
-    pub unsafe fn to_cgrid(self) -> CScreenGrid {
-        CScreenGrid {
-            handle: self.handle,
-            chars: leak_nonempty_buffer(self.chars),
-            attrs: leak_nonempty_buffer(self.attrs),
-            vcols: leak_nonempty_buffer(self.vcols),
-            line_offset: leak_nonempty_buffer(self.line_offset),
-            dirty_col: self
-                .dirty_columns
-                .map(DirtyColumns::into_raw)
-                .unwrap_or(std::ptr::null_mut()),
-            rows: self.rows,
-            cols: self.cols,
-            valid: self.valid,
-            throttled: self.throttled,
-        }
-    }
-
     pub fn clear_line(&mut self, offset: usize, width: usize, valid: bool) {
         let range = offset..(offset + width);
         self.chars[range.clone()].fill(schar_from_ascii(' '));
@@ -1720,96 +1632,6 @@ fn release_permanent_grid(grid_id: GridId) {
     lock_grid_store()
         .remove(grid_id)
         .expect("permanent grid identity must resolve to its Rust grid");
-}
-
-/// Storage selected for one grid operation at the C boundary.
-enum ScreenGridStorage {
-    /// Allocations temporarily taken from the legacy C representation.
-    Legacy(Option<ScreenGrid>),
-    /// A direct borrow from permanent Rust storage.
-    Permanent(StoredGridGuard),
-}
-
-/// Exclusive Rust access to a screen grid received through the C boundary.
-///
-/// Legacy grids temporarily transfer their allocations and receive them back
-/// when this guard is dropped. Permanently stored grids use the C address only
-/// as an opaque identity and remain owned by `GridStore`.
-#[must_use = "the guard keeps exclusive ownership of the selected screen grid"]
-pub(crate) struct ScreenGridGuard {
-    cgrid: std::ptr::NonNull<CScreenGrid>,
-    storage: ScreenGridStorage,
-}
-
-impl ScreenGridGuard {
-    /// Resolves a C grid identity to exclusive Rust grid access.
-    ///
-    /// # Safety
-    ///
-    /// `cgrid` must identify either a permanently registered grid or a valid,
-    /// exclusively owned legacy `CScreenGrid`. A legacy grid must remain valid
-    /// until this guard is dropped, and its buffers must satisfy the ownership
-    /// and layout requirements of `ScreenGrid::take_from_cgrid`.
-    pub(crate) unsafe fn take(cgrid: *mut CScreenGrid) -> Self {
-        let cgrid = std::ptr::NonNull::new(cgrid).expect("screen grid is nullptr");
-        let permanent_grid_id = permanent_grid_id(cgrid);
-        if let Some(grid_id) = permanent_grid_id {
-            let grid = StoredGridGuard::acquire(grid_id)
-                .expect("permanent C grid identity must resolve to its Rust grid");
-            return Self {
-                cgrid,
-                storage: ScreenGridStorage::Permanent(grid),
-            };
-        }
-
-        // SAFETY: The caller guarantees exclusive ownership of the C grid and
-        // its allocations for the lifetime of this guard.
-        let grid = unsafe { ScreenGrid::take_from_cgrid(&mut *cgrid.as_ptr()) };
-        Self {
-            cgrid,
-            storage: ScreenGridStorage::Legacy(Some(grid)),
-        }
-    }
-}
-
-impl std::ops::Deref for ScreenGridGuard {
-    type Target = ScreenGrid;
-
-    fn deref(&self) -> &Self::Target {
-        match &self.storage {
-            ScreenGridStorage::Legacy(grid) => grid
-                .as_ref()
-                .expect("legacy screen-grid guard does not own a grid"),
-            ScreenGridStorage::Permanent(grid) => grid,
-        }
-    }
-}
-
-impl std::ops::DerefMut for ScreenGridGuard {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        match &mut self.storage {
-            ScreenGridStorage::Legacy(grid) => grid
-                .as_mut()
-                .expect("legacy screen-grid guard does not own a grid"),
-            ScreenGridStorage::Permanent(grid) => grid,
-        }
-    }
-}
-
-impl Drop for ScreenGridGuard {
-    fn drop(&mut self) {
-        let ScreenGridStorage::Legacy(grid) = &mut self.storage else {
-            return;
-        };
-        let Some(grid) = grid.take() else {
-            return;
-        };
-        // SAFETY: This guard uniquely owns the Rust grid and the C destination
-        // remains valid until the guard is dropped.
-        unsafe {
-            *self.cgrid.as_ptr() = grid.to_cgrid();
-        }
-    }
 }
 
 /// The screen edge at which a line is truncated.
@@ -4148,37 +3970,6 @@ impl BorderCanvas<'_> {
     }
 }
 
-/// Takes temporary ownership of a C-facing boxed slice.
-///
-/// The raw pointer remains available as a non-owning C view until the vector
-/// is transferred back with `leak_nonempty_buffer`.
-///
-/// # Safety
-///
-/// A non-null `buffer` must point to exactly `len` initialized elements from a
-/// boxed slice created by `leak_nonempty_buffer`. It must not be reclaimed,
-/// reallocated, or used to create another owner while the vector exists.
-unsafe fn take_c_buffer<T>(buffer: *mut T, len: usize) -> Vec<T> {
-    if buffer.is_null() {
-        Vec::new()
-    } else {
-        let slice = std::ptr::slice_from_raw_parts_mut(buffer, len);
-        // SAFETY: The caller guarantees that this is the unique pointer to a
-        // boxed slice with exactly `len` initialized elements.
-        unsafe { Box::from_raw(slice).into_vec() }
-    }
-}
-
-/// Transfers a populated Rust buffer to C while preserving null as the
-/// representation of an unallocated buffer.
-fn leak_nonempty_buffer<T>(buffer: Vec<T>) -> *mut T {
-    if buffer.is_empty() {
-        std::ptr::null_mut()
-    } else {
-        Box::into_raw(buffer.into_boxed_slice()).cast::<T>()
-    }
-}
-
 /// The codepoints that participate in shaping a single screen cell.
 ///
 /// An absent composing codepoint is represented as `None` instead of the C
@@ -5216,34 +5007,6 @@ pub extern "C" fn grid_free(grid_handle: VimHandleT) {
     release_permanent_grid(GridId::new(grid_handle));
 }
 
-/// Releases a process-global grid through its remaining C representation.
-///
-/// # Safety
-///
-/// `grid` must point to a valid, exclusively accessible `CScreenGrid`. Its
-/// non-null buffer pointers must own compatible, unreclaimed Rust allocations.
-/// It may instead be an opaque identity registered with the permanent store.
-unsafe fn release_c_grid(grid: *mut CScreenGrid) {
-    let cgrid = std::ptr::NonNull::new(grid).expect("screen grid is nullptr");
-    if let Some(grid_id) = permanent_grid_id(cgrid) {
-        release_permanent_grid(grid_id);
-        return;
-    }
-
-    // SAFETY: The caller transfers ownership of every grid allocation.
-    let _owned_grid = unsafe { ScreenGrid::take_from_cgrid(&mut *cgrid.as_ptr()) };
-
-    // SAFETY: The allocations are now owned by `_owned_grid`; clear the
-    // non-owning C views before `_owned_grid` releases them.
-    unsafe {
-        (*cgrid.as_ptr()).chars = std::ptr::null_mut();
-        (*cgrid.as_ptr()).attrs = std::ptr::null_mut();
-        (*cgrid.as_ptr()).vcols = std::ptr::null_mut();
-        (*cgrid.as_ptr()).line_offset = std::ptr::null_mut();
-        (*cgrid.as_ptr()).dirty_col = std::ptr::null_mut();
-    }
-}
-
 /// Releases all process-global grid resources during editor shutdown.
 ///
 /// # Safety
@@ -5252,12 +5015,14 @@ unsafe fn release_c_grid(grid: *mut CScreenGrid) {
 /// all other users of the grids, line buffer, and glyph mapping have stopped.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn grid_free_all_mem() {
-    // SAFETY: The caller guarantees exclusive shutdown-time access to the
-    // global grids and their Rust-owned allocations.
-    unsafe {
-        release_c_grid(&raw mut default_grid);
-        release_c_grid(&raw mut msg_grid);
-        release_c_grid(&raw mut pum_grid);
+    // SAFETY: The caller guarantees exclusive shutdown-time access to these
+    // process-global C identities.
+    let global_grids = [&raw mut default_grid, &raw mut msg_grid, &raw mut pum_grid];
+    for cgrid in global_grids {
+        let cgrid = std::ptr::NonNull::new(cgrid).expect("global grid is nullptr");
+        if let Some(grid_id) = permanent_grid_id(cgrid) {
+            release_permanent_grid(grid_id);
+        }
     }
 
     *lock_message_scroll_state() = MessageScrollState::new();
@@ -7153,29 +6918,6 @@ mod tests {
     }
 
     #[test]
-    fn screen_grid_guard_restores_grid_on_drop() {
-        let mut line_buffer = LineBuffer::new(2);
-        let grid = ScreenGrid::new(1, 2, true, &mut line_buffer);
-        // SAFETY: Ownership of every grid allocation is transferred to
-        // `cgrid`.
-        let mut cgrid = unsafe { grid.to_cgrid() };
-
-        {
-            // SAFETY: `cgrid` exclusively owns valid grid allocations and
-            // remains alive until the guard is dropped.
-            let mut grid = unsafe { ScreenGridGuard::take(&raw mut cgrid) };
-            grid.chars[0] = schar_from_ascii('x');
-        }
-
-        // SAFETY: The guard returned ownership to `cgrid`.
-        let restored_grid = unsafe { ScreenGrid::take_from_cgrid(&mut cgrid) };
-        assert_eq!(
-            restored_grid.chars.as_slice(),
-            &[schar_from_ascii('x'), schar_from_ascii(' ')]
-        );
-    }
-
-    #[test]
     fn assigned_message_grid_remains_permanent_through_preparation() {
         let mut line_buffer = LineBuffer::new(3);
         let mut cgrid = CScreenGrid::empty();
@@ -7221,42 +6963,6 @@ mod tests {
         assert!(!grid_is_allocated(assigned_handle));
 
         release_permanent_grid(grid_id);
-    }
-
-    #[test]
-    fn dirty_columns_round_trip_through_c_grid() {
-        let mut line_buffer = LineBuffer::new(4);
-        let mut grid = ScreenGrid::new(2, 4, true, &mut line_buffer);
-        assert!(grid.dirty_columns.is_none());
-
-        grid.reset_dirty_columns();
-        grid.mark_dirty_column(1, 3);
-
-        // SAFETY: This test transfers every allocation to `cgrid` exactly once.
-        let mut cgrid = unsafe { grid.to_cgrid() };
-        assert!(!cgrid.dirty_col.is_null());
-
-        let original_pointers = (
-            cgrid.chars,
-            cgrid.attrs,
-            cgrid.vcols,
-            cgrid.line_offset,
-            cgrid.dirty_col,
-        );
-
-        // SAFETY: `cgrid` uniquely owns allocations created by `to_cgrid`.
-        let grid = unsafe { ScreenGrid::take_from_cgrid(&mut cgrid) };
-        assert_eq!(cgrid.chars, original_pointers.0);
-        assert_eq!(cgrid.attrs, original_pointers.1);
-        assert_eq!(cgrid.vcols, original_pointers.2);
-        assert_eq!(cgrid.line_offset, original_pointers.3);
-        assert_eq!(cgrid.dirty_col, original_pointers.4);
-        assert_eq!(
-            grid.dirty_columns
-                .as_ref()
-                .map(|dirty_columns| &*dirty_columns.columns),
-            Some([0, 3].as_slice())
-        );
     }
 
     #[test]

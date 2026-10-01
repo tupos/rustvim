@@ -5,10 +5,7 @@ use std::{ffi::CString, sync::Mutex};
 use crate::{
     defines::{Integer, OptInt},
     generated::enums::RdbFlags,
-    grid::{
-        CScreenGrid, GridId, LocalGridSpace, ScreenGrid, ScreenGridGuard, VimHandleT, VimSAttrT,
-        VimSCharT,
-    },
+    grid::{GridId, LocalGridSpace, ScreenGrid, VimHandleT, VimSAttrT, VimSCharT},
 };
 
 use output::{
@@ -261,42 +258,7 @@ fn ui_may_set_default_colors() {
     }
 }
 
-/// # Safety
-///
-/// `grid` must point to a valid, exclusively accessible `CScreenGrid` whose
-/// buffers satisfy the ownership and layout requirements of `ScreenGrid`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn ui_line(
-    grid: *mut CScreenGrid,
-    row: libc::c_int,
-    invalid_row: bool,
-    start_col: libc::c_int,
-    end_col: libc::c_int,
-    clear_col: libc::c_int,
-    clear_attr: libc::c_int,
-    wrap: bool,
-) {
-    let (target, command) = {
-        // SAFETY: The caller transfers exclusive ownership of the grid
-        // buffers to the guard.
-        let grid = unsafe { ScreenGridGuard::take(grid) };
-        let target = GridOutputTarget::new(grid.id(), grid.cols);
-        let command = ui_line_r(
-            &grid,
-            row,
-            invalid_row,
-            start_col,
-            end_col,
-            clear_col,
-            clear_attr,
-            wrap,
-        );
-        (target, command)
-    };
-    target.emit_lines([command]);
-}
-
-// Keep the arguments aligned with ui_line() in ui.c.
+/// Builds one owned raw-line command from a stored grid row.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn ui_line_r(
     grid: &ScreenGrid,
