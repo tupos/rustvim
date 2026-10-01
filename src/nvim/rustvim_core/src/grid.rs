@@ -686,10 +686,8 @@ impl ScreenGrid {
     fn prepare_for_messages(
         &mut self,
         mode: MessageGridMode,
-        handle_allocator: &GridHandleAllocator,
         line_buffer: &mut LineBuffer,
     ) -> MessageGridTransition {
-        handle_allocator.assign(&mut self.handle);
         match mode {
             MessageGridMode::Visible(size)
                 if !self.is_allocated() || self.rows != size.height || self.cols != size.width =>
@@ -4758,29 +4756,23 @@ pub unsafe extern "C" fn grid_view_cursor_goto(
 
 /// Refreshes the external representation of an allocated message grid.
 ///
-/// The resize command and position callback run after grid ownership has been
-/// restored to the C representation.
+/// The resize command and position callback run after the grid-store borrow
+/// has been released.
 ///
 /// # Safety
 ///
-/// `grid` must point to a valid, exclusively accessible `CScreenGrid`. Its
-/// buffers must satisfy the ownership and layout requirements of `ScreenGrid`.
 /// `emit_position` must remain callable for the duration of this operation.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn grid_refresh_message_ui(
-    grid: *mut CScreenGrid,
+    grid_handle: VimHandleT,
     position: libc::c_int,
     scrolled: bool,
     emit_position: CMessageGridPositionEmitter,
 ) {
-    if grid.is_null() {
-        return;
-    }
-
     let resize = {
-        // SAFETY: The caller transfers exclusive ownership of the grid buffers
-        // to the guard for the duration of this operation.
-        let grid = unsafe { ScreenGridGuard::take(grid) };
+        let Ok(grid) = StoredGridGuard::acquire(GridId::new(grid_handle)) else {
+            return;
+        };
         grid.resize_command_if_allocated()
     };
     let Some((target, command)) = resize else {
@@ -4788,8 +4780,8 @@ pub unsafe extern "C" fn grid_refresh_message_ui(
     };
 
     target.emit(command);
-    // SAFETY: The caller guarantees that the callback is valid. Grid ownership
-    // was restored before this callback can reenter editor code.
+    // SAFETY: The caller guarantees that the callback is valid. The store
+    // borrow was released before this callback can reenter editor code.
     unsafe {
         emit_position(position, scrolled);
     }
@@ -4935,22 +4927,14 @@ pub extern "C" fn grid_release_popup_menu(grid_handle: VimHandleT) {
 ///
 /// A `ReleaseRequired` result leaves storage intact so C can remove the
 /// compositor layer before calling `grid_release_message`.
-///
-/// # Safety
-///
-/// `grid` must remain at its registered stable address and identify the
-/// permanently stored message grid.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn grid_prepare_for_messages(
-    grid: *mut CScreenGrid,
+pub extern "C" fn grid_prepare_for_messages(
+    grid_handle: VimHandleT,
     rows: libc::c_int,
     columns: libc::c_int,
     should_allocate: bool,
     scrolled_lines: libc::c_int,
 ) -> CMessageGridTransition {
-    if grid.is_null() {
-        return CMessageGridTransition::Unchanged;
-    }
     let mode = if should_allocate {
         let Some(size) = GridSize::try_new(rows, columns) else {
             return CMessageGridTransition::Unchanged;
@@ -4962,10 +4946,10 @@ pub unsafe extern "C" fn grid_prepare_for_messages(
 
     let transition = {
         let mut line_buffer = LineBufferGuard::acquire();
-        // SAFETY: The caller transfers exclusive ownership of the C grid and
-        // its allocations to the guard for the duration of this function.
-        let mut grid = unsafe { ScreenGridGuard::take(grid) };
-        grid.prepare_for_messages(mode, &GRID_HANDLE_ALLOCATOR, &mut line_buffer)
+        let Ok(mut grid) = StoredGridGuard::acquire(GridId::new(grid_handle)) else {
+            return CMessageGridTransition::Unchanged;
+        };
+        grid.prepare_for_messages(mode, &mut line_buffer)
     };
 
     if transition == MessageGridTransition::Resized {
@@ -4975,58 +4959,46 @@ pub unsafe extern "C" fn grid_prepare_for_messages(
 }
 
 /// Releases message-grid storage after compositor removal.
-///
-/// # Safety
-///
-/// `grid` must point to a valid, exclusively accessible `CScreenGrid`. Any
-/// existing buffers and dimensions must satisfy the ownership and layout
-/// requirements of `ScreenGrid`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn grid_release_message(grid: *mut CScreenGrid) {
-    if grid.is_null() {
-        return;
+pub extern "C" fn grid_release_message(grid_handle: VimHandleT) {
+    if let Ok(mut grid) = StoredGridGuard::acquire(GridId::new(grid_handle)) {
+        grid.release_message();
     }
-
-    // SAFETY: The caller transfers exclusive ownership of the C grid and its
-    // allocations to the guard for the duration of this function.
-    let mut grid = unsafe { ScreenGridGuard::take(grid) };
-    grid.release_message();
 }
 
 /// Updates the message-grid position and its legacy adjusted view.
 ///
-/// The position callback and view mutation occur only after the grid guard has
-/// restored ownership to the C representation.
+/// The position callback and view mutation occur only after the grid-store
+/// borrow has been released.
 ///
 /// Returns whether the position was published immediately.
 ///
 /// # Safety
 ///
-/// `grid` must point to a valid, exclusively accessible `CScreenGrid`. Its
-/// buffers must satisfy the ownership and layout requirements of `ScreenGrid`.
 /// `view` must point to a valid, exclusively accessible `CGridView`.
 /// `emit_position` must remain callable for the duration of this operation.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn grid_set_message_position(
-    grid: *mut CScreenGrid,
+    grid_handle: VimHandleT,
     view: *mut CGridView,
     row: libc::c_int,
     scrolled: bool,
     emit_position: CMessageGridPositionEmitter,
 ) {
-    if grid.is_null() || view.is_null() {
+    if view.is_null() {
         return;
     }
     let update = {
-        // SAFETY: The caller transfers exclusive ownership of the grid and
-        // its allocations to the guard for the duration of this operation.
-        let grid = unsafe { ScreenGridGuard::take(grid) };
+        let Ok(grid) = StoredGridGuard::acquire(GridId::new(grid_handle)) else {
+            return;
+        };
         grid.update_message_position(row)
     };
 
     if update.publish {
         // SAFETY: The caller guarantees that the callback is valid. The grid
-        // guard was dropped before this callback can reenter editor code.
+        // store borrow was released before this callback can reenter editor
+        // code.
         unsafe {
             emit_position(row, scrolled);
         }
@@ -5042,30 +5014,26 @@ pub unsafe extern "C" fn grid_set_message_position(
 
 /// Scrolls the message grid upward by one row.
 ///
-/// Position callbacks and scroll events are emitted only after the grid guard
-/// has restored ownership to the C representation.
+/// Position callbacks and scroll events are emitted only after the grid-store
+/// borrow has been released.
 ///
 /// # Safety
 ///
-/// `grid` must point to a valid, exclusively accessible `CScreenGrid`. Its
-/// buffers must satisfy the ownership and layout requirements of `ScreenGrid`.
 /// `set_position` must remain callable for the duration of this operation.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn grid_scroll_message_up(
-    grid: *mut CScreenGrid,
+    grid_handle: VimHandleT,
     current_position: libc::c_int,
     enable_throttling: bool,
     zero_cmdheight: bool,
     discount_first_scroll: bool,
     set_position: CMessageGridPositionEmitter,
 ) {
-    if grid.is_null() {
-        return;
-    }
+    let grid_id = GridId::new(grid_handle);
     let scroll_up = {
-        // SAFETY: The caller transfers exclusive ownership of the grid and
-        // its allocations to the guard for the duration of this operation.
-        let mut grid = unsafe { ScreenGridGuard::take(grid) };
+        let Ok(mut grid) = StoredGridGuard::acquire(grid_id) else {
+            return;
+        };
         grid.scroll_message_up(current_position, enable_throttling, zero_cmdheight)
     };
     let MessageGridScrollUp {
@@ -5083,15 +5051,12 @@ pub unsafe extern "C" fn grid_scroll_message_up(
             clear_first_row,
         } => {
             // SAFETY: The caller guarantees that the callback is valid. The
-            // grid guard was dropped before this callback can reenter editor
-            // code.
+            // store borrow was released before this callback can reenter
+            // editor code.
             unsafe {
                 set_position(position, scrolled);
             }
-            if clear_first_row {
-                // SAFETY: The callback has returned, and the caller guarantees
-                // continued exclusive access to this grid.
-                let mut grid = unsafe { ScreenGridGuard::take(grid) };
+            if clear_first_row && let Ok(mut grid) = StoredGridGuard::acquire(grid_id) {
                 grid.clear_first_message_row();
             }
         }
@@ -5105,29 +5070,22 @@ pub unsafe extern "C" fn grid_scroll_message_up(
 
 /// Clears message-grid rows in preparation for a screen redraw.
 ///
-/// # Safety
-///
-/// `grid` must point to a valid, exclusively accessible `CScreenGrid`. Its
-/// buffers must satisfy the ownership and layout requirements of `ScreenGrid`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn grid_prepare_message_redraw(
-    grid: *mut CScreenGrid,
+pub extern "C" fn grid_prepare_message_redraw(
+    grid_handle: VimHandleT,
     rows_to_clear: libc::c_int,
     valid_rows: libc::c_int,
 ) {
-    if grid.is_null() {
-        return;
-    }
     let (Ok(rows_to_clear), Ok(valid_rows)) =
         (usize::try_from(rows_to_clear), usize::try_from(valid_rows))
     else {
         return;
     };
 
-    // SAFETY: The caller transfers exclusive ownership of the grid and its
-    // allocations to the guard within this scope.
     {
-        let mut grid = unsafe { ScreenGridGuard::take(grid) };
+        let Ok(mut grid) = StoredGridGuard::acquire(GridId::new(grid_handle)) else {
+            return;
+        };
         grid.prepare_message_redraw(rows_to_clear, valid_rows);
     }
     lock_message_scroll_state().reset_progress();
@@ -5136,41 +5094,38 @@ pub unsafe extern "C" fn grid_prepare_message_redraw(
 /// Ends message scrolling, publishes its resting position, and clears hidden
 /// message rows.
 ///
-/// The position callback runs after throttling is disabled and grid ownership
-/// is restored, but before hidden rows are cleared. This preserves the
+/// The position callback runs after throttling is disabled and the store
+/// borrow is released, but before hidden rows are cleared. This preserves the
 /// original event order.
 ///
 /// # Safety
 ///
-/// `grid` must point to a valid, exclusively accessible `CScreenGrid`. Its
-/// buffers must satisfy the ownership and layout requirements of `ScreenGrid`.
 /// `set_position` must remain callable for the duration of this operation.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn grid_reset_message_scroll(
-    grid: *mut CScreenGrid,
+    grid_handle: VimHandleT,
     position: libc::c_int,
     rows_to_clear: libc::c_int,
     set_position: CMessageGridPositionEmitter,
 ) {
-    if grid.is_null() {
-        return;
-    }
     let Ok(rows_to_clear) = usize::try_from(rows_to_clear) else {
         return;
     };
+    let grid_id = GridId::new(grid_handle);
 
-    // SAFETY: The caller transfers exclusive ownership of the grid and its
-    // allocations within each guard scope.
     {
-        let mut grid = unsafe { ScreenGridGuard::take(grid) };
+        let Ok(mut grid) = StoredGridGuard::acquire(grid_id) else {
+            return;
+        };
         grid.disable_message_throttling();
     }
     unsafe {
         set_position(position, false);
     }
     {
-        let mut grid = unsafe { ScreenGridGuard::take(grid) };
-        grid.clear_message_rows(rows_to_clear, 0);
+        if let Ok(mut grid) = StoredGridGuard::acquire(grid_id) {
+            grid.clear_message_rows(rows_to_clear, 0);
+        }
     }
     lock_message_scroll_state().reset_progress();
 }
@@ -5178,22 +5133,17 @@ pub unsafe extern "C" fn grid_reset_message_scroll(
 /// Flushes pending throttled message-grid scrolling and row updates.
 ///
 /// The message-position callback and UI commands are emitted only after the
-/// grid guard has restored ownership to the C representation.
+/// grid-store borrow has been released.
 ///
 /// # Safety
 ///
-/// `grid` must point to a valid, exclusively accessible `CScreenGrid`. Its
-/// buffers must satisfy the ownership and layout requirements of `ScreenGrid`.
 /// `emit_position` must remain callable for the duration of this operation.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn grid_flush_message_scroll(
-    grid: *mut CScreenGrid,
+    grid_handle: VimHandleT,
     request: CMessageGridScrollFlushRequest,
     emit_position: CMessageGridPositionEmitter,
 ) {
-    if grid.is_null() {
-        return;
-    }
     let Some(screen_size) = GridSize::try_new(request.screen_rows, request.screen_columns) else {
         return;
     };
@@ -5205,9 +5155,9 @@ pub unsafe extern "C" fn grid_flush_message_scroll(
     };
     let state = *lock_message_scroll_state();
     let plan = {
-        // SAFETY: The caller transfers exclusive ownership of the grid and
-        // its allocations to the guard for the duration of this operation.
-        let mut grid = unsafe { ScreenGridGuard::take(grid) };
+        let Ok(mut grid) = StoredGridGuard::acquire(GridId::new(grid_handle)) else {
+            return;
+        };
         grid.flush_message_scroll(request, state)
     };
 
@@ -6234,11 +6184,10 @@ mod tests {
         grid.chars[0] = schar_from_ascii('x');
         grid.attrs[0] = 12;
         grid.throttled = true;
-        let allocator = GridHandleAllocator::new(DEFAULT_GRID_HANDLE);
+        grid.handle = DEFAULT_GRID_HANDLE + 1;
 
         let transition = grid.prepare_for_messages(
             MessageGridMode::Visible(GridSize::try_new(2, 3).unwrap()),
-            &allocator,
             &mut line_buffer,
         );
 
@@ -6259,10 +6208,8 @@ mod tests {
         let mut line_buffer = LineBuffer::new(2);
         let mut grid = ScreenGrid::new(1, 2, true, &mut line_buffer);
         grid.throttled = true;
-        let allocator = GridHandleAllocator::new(DEFAULT_GRID_HANDLE);
 
-        let transition =
-            grid.prepare_for_messages(MessageGridMode::Hidden, &allocator, &mut line_buffer);
+        let transition = grid.prepare_for_messages(MessageGridMode::Hidden, &mut line_buffer);
 
         assert_eq!(transition, MessageGridTransition::ReleaseRequired);
         assert!(grid.is_allocated());
@@ -6273,7 +6220,7 @@ mod tests {
         assert!(!grid.is_allocated());
         assert!(!grid.throttled);
         assert_eq!(
-            grid.prepare_for_messages(MessageGridMode::Hidden, &allocator, &mut line_buffer,),
+            grid.prepare_for_messages(MessageGridMode::Hidden, &mut line_buffer),
             MessageGridTransition::Unchanged
         );
     }
@@ -7289,9 +7236,7 @@ mod tests {
         let cgrid_pointer = std::ptr::NonNull::new(&raw mut cgrid).unwrap();
         let grid_id = permanent_grid_id(cgrid_pointer).unwrap();
 
-        // SAFETY: `cgrid` is a registered opaque identity and remains at its
-        // stable address.
-        let transition = unsafe { grid_prepare_for_messages(&raw mut cgrid, 2, 3, true, 0) };
+        let transition = grid_prepare_for_messages(assigned_handle, 2, 3, true, 0);
 
         assert_eq!(grid_id, GridId::new(assigned_handle));
         assert_eq!(transition, CMessageGridTransition::Resized);
@@ -7304,17 +7249,13 @@ mod tests {
         assert!(grid_is_allocated(assigned_handle));
 
         {
-            // SAFETY: The stable C address identifies the registered Rust
-            // grid, and this scope has exclusive access to it.
-            let mut grid = unsafe { ScreenGridGuard::take(&raw mut cgrid) };
+            let mut grid = StoredGridGuard::acquire(grid_id).unwrap();
             grid.chars[0] = schar_from_ascii('x');
             assert_eq!((grid.rows, grid.cols), (2, 3));
         }
 
         {
-            // SAFETY: The previous guard was dropped before reacquiring the
-            // permanently stored grid.
-            let grid = unsafe { ScreenGridGuard::take(&raw mut cgrid) };
+            let grid = StoredGridGuard::acquire(grid_id).unwrap();
             assert_eq!(grid.chars[0], schar_from_ascii('x'));
         }
 
@@ -7330,9 +7271,7 @@ mod tests {
 
         // Releasing the message contents must not surrender permanent Rust
         // ownership or invalidate its stable identity.
-        unsafe {
-            grid_release_message(&raw mut cgrid);
-        }
+        grid_release_message(assigned_handle);
         assert_eq!(permanent_grid_id(cgrid_pointer), Some(grid_id));
         assert!(!grid_is_allocated(assigned_handle));
 

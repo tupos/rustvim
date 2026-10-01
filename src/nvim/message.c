@@ -176,7 +176,7 @@ static void ui_ext_msg_set_pos(int row, bool scrolled)
 
 void msg_grid_set_pos(int row, bool scrolled)
 {
-  grid_set_message_position(&msg_grid, &msg_grid_adj, row, scrolled,
+  grid_set_message_position(msg_grid_handle, &msg_grid_adj, row, scrolled,
                             ui_ext_msg_set_pos);
   msg_grid_pos = row;
 }
@@ -192,7 +192,7 @@ void msg_grid_validate(void)
   bool should_alloc = msg_use_grid();
   int max_rows = Rows - (int)p_ch;
   MessageGridTransition transition = grid_prepare_for_messages(
-    &msg_grid, Rows, Columns, should_alloc, msg_scrolled);
+    msg_grid_handle, Rows, Columns, should_alloc, msg_scrolled);
   if (transition == kMessageGridResized) {
     // TODO(bfredl): eventually should be set to "invalid". I e all callers
     // will use the grid including clear to EOS if necessary.
@@ -208,7 +208,7 @@ void msg_grid_validate(void)
     msg_grid_adj.target = &msg_grid;
   } else if (transition == kMessageGridReleaseRequired) {
     ui_comp_remove_grid(msg_grid_handle);
-    grid_release_message(&msg_grid);
+    grid_release_message(msg_grid_handle);
     ui_call_grid_destroy(msg_grid_handle);
     msg_grid_adj.row_offset = 0;
     msg_grid_adj.target = &default_grid;
@@ -2608,7 +2608,7 @@ bool msg_do_throttle(void)
 /// Scroll the screen up one line for displaying the next message line.
 void msg_scroll_up(bool may_throttle, bool zerocmd, bool discount_first_scroll)
 {
-  grid_scroll_message_up(&msg_grid, msg_grid_pos,
+  grid_scroll_message_up(msg_grid_handle, msg_grid_pos,
                          may_throttle && msg_do_throttle(), zerocmd,
                          discount_first_scroll, msg_grid_set_pos);
   grid_clear(&msg_grid_adj, Rows - 1, Rows, 0, Columns, HL_ATTR(HLF_MSG));
@@ -2634,7 +2634,7 @@ void msg_scroll_up(bool may_throttle, bool zerocmd, bool discount_first_scroll)
 void msg_scroll_flush(void)
 {
   grid_flush_message_scroll(
-    &msg_grid,
+    msg_grid_handle,
     (MessageGridScrollFlushRequest){
       .position = msg_grid_pos,
       .scrolled_lines = msg_scrolled,
@@ -2654,7 +2654,7 @@ void msg_reset_scroll(void)
   // we should properly disentangle message clear with full screen redraw.
   // TODO(bfredl): risk for extra flicker i e with
   // "nvim -o has_swap also_has_swap"
-  grid_reset_message_scroll(&msg_grid, Rows - (int)p_ch, msg_scrollsize(),
+  grid_reset_message_scroll(msg_grid_handle, Rows - (int)p_ch, msg_scrollsize(),
                             msg_grid_set_pos);
   clear_cmdline = true;
   msg_scrolled = 0;
@@ -2663,7 +2663,7 @@ void msg_reset_scroll(void)
 void msg_ui_refresh(void)
 {
   if (ui_has(kUIMultigrid)) {
-    grid_refresh_message_ui(&msg_grid, msg_grid_pos, msg_scrolled,
+    grid_refresh_message_ui(msg_grid_handle, msg_grid_pos, msg_scrolled,
                             ui_ext_msg_set_pos);
   }
 }

@@ -473,7 +473,7 @@ int update_screen(void)
   if (msg_scrolled || msg_grid_invalid) {
     clear_cmdline = true;
     int valid = MAX(Rows - msg_scrollsize(), 0);
-    grid_prepare_message_redraw(&msg_grid, msg_scrollsize(), (int)p_ch);
+    grid_prepare_message_redraw(msg_grid_handle, msg_scrollsize(), (int)p_ch);
     bool was_invalidated = false;
 
     // UPD_CLEAR is already handled

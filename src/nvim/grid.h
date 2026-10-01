@@ -107,25 +107,26 @@ extern WindowGridUpdate grid_configure_for_window(
 extern bool grid_configure_for_popup_menu(handle_T grid_handle, int rows, int columns,
                                           bool contents_invalid);
 extern void grid_release_popup_menu(handle_T grid_handle);
-extern MessageGridTransition grid_prepare_for_messages(ScreenGrid *grid, int rows, int columns,
+extern MessageGridTransition grid_prepare_for_messages(handle_T grid_handle, int rows, int columns,
                                                        bool should_allocate,
                                                        int scrolled_lines);
-extern void grid_release_message(ScreenGrid *grid);
-extern void grid_set_message_position(ScreenGrid *grid, GridView *view, int row,
+extern void grid_release_message(handle_T grid_handle);
+extern void grid_set_message_position(handle_T grid_handle, GridView *view, int row,
                                       bool scrolled,
                                       MessageGridPositionEmitter emit_position);
-extern void grid_scroll_message_up(ScreenGrid *grid, int current_position,
+extern void grid_scroll_message_up(handle_T grid_handle, int current_position,
                                    bool enable_throttling, bool zero_cmdheight,
                                    bool discount_first_scroll,
                                    MessageGridPositionEmitter set_position);
-extern void grid_prepare_message_redraw(ScreenGrid *grid, int rows_to_clear,
+extern void grid_prepare_message_redraw(handle_T grid_handle, int rows_to_clear,
                                         int valid_rows);
-extern void grid_reset_message_scroll(ScreenGrid *grid, int position,
+extern void grid_reset_message_scroll(handle_T grid_handle, int position,
                                       int rows_to_clear,
                                       MessageGridPositionEmitter set_position);
-extern void grid_flush_message_scroll(ScreenGrid *grid, MessageGridScrollFlushRequest request,
+extern void grid_flush_message_scroll(handle_T grid_handle,
+                                      MessageGridScrollFlushRequest request,
                                       MessageGridPositionEmitter emit_position);
-extern void grid_refresh_message_ui(ScreenGrid *grid, int position, bool scrolled,
+extern void grid_refresh_message_ui(handle_T grid_handle, int position, bool scrolled,
                                     MessageGridPositionEmitter emit_position);
 extern void grid_free(handle_T grid_handle);
 extern void grid_free_all_mem(void);
