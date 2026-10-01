@@ -1530,6 +1530,15 @@ impl<'grid> GridView<'grid> {
         ))
     }
 
+    /// Translates a target-grid position into coordinates relative to this
+    /// view.
+    fn local_position(&self, position: GridPosition) -> Option<GridPosition> {
+        Some(GridPosition::new(
+            position.row.checked_sub(self.offset.row)?,
+            position.column.checked_sub(self.offset.column)?,
+        ))
+    }
+
     /// Reads a view-relative cell when the caller's grid identity matches the
     /// view target.
     fn cell_for_grid(&self, expected_grid: GridId, position: GridPosition) -> Option<GridCell> {
@@ -5182,6 +5191,51 @@ pub unsafe extern "C" fn grid_view_translate(
     }
 }
 
+/// Translates a target-grid position into coordinates relative to a grid view.
+///
+/// Returns `false` when the view does not resolve to a stored grid, either
+/// output pointer is null, or coordinate subtraction overflows.
+///
+/// # Safety
+///
+/// `view` must be null or point to an initialized `CGridView`. `row` and
+/// `column` must be null or point to valid, properly aligned writable
+/// integers.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn grid_view_translate_to_local(
+    view: *const CGridView,
+    row: *mut libc::c_int,
+    column: *mut libc::c_int,
+) -> bool {
+    if row.is_null() || column.is_null() {
+        return false;
+    }
+
+    // SAFETY: The caller guarantees that `view` is null or initialized.
+    let Some((grid_id, offset)) = (unsafe { CGridView::resolve(view) }) else {
+        return false;
+    };
+    let Ok(target) = StoredGridGuard::acquire(grid_id) else {
+        return false;
+    };
+    let view = GridView::new(&target, offset);
+
+    // SAFETY: Both output pointers were checked for null, and the caller
+    // guarantees that they reference valid integers.
+    let position = unsafe { GridPosition::new(*row, *column) };
+    let Some(position) = view.local_position(position) else {
+        return false;
+    };
+
+    // SAFETY: Both pointers were checked for null, and the caller guarantees
+    // exclusive writable access.
+    unsafe {
+        *row = position.row;
+        *column = position.column;
+    }
+    true
+}
+
 /// Invalidates every cell in a permanently stored grid.
 ///
 /// Missing grid identities are ignored.
@@ -6762,6 +6816,11 @@ mod tests {
         grid.vcols = vec![10, 11, 12, 20, 21, 22];
         let view = GridView::new(&grid, GridPosition::new(1, 1));
 
+        assert_eq!(
+            view.local_position(GridPosition::new(2, 3)),
+            Some(GridPosition::new(1, 2))
+        );
+        assert_eq!(view.local_position(GridPosition::new(i32::MIN, 0)), None);
         assert!(view.width_matches_target(3));
         assert!(!view.width_matches_target(2));
         let (target, command) = view.plan_cursor_move(GridPosition::new(0, 1)).unwrap();

@@ -1492,11 +1492,10 @@ retnomove:
         row -= curwin->w_winrow;
         col -= curwin->w_wincol;
       }
-      row -= curwin->w_grid.row_offset;
-      col -= curwin->w_grid.col_offset;
-    } else if (grid != DEFAULT_GRID_HANDLE) {
-      row -= curwin->w_grid.row_offset;
-      col -= curwin->w_grid.col_offset;
+    }
+    if (grid != DEFAULT_GRID_HANDLE) {
+      bool translated = grid_view_translate_to_local(&curwin->w_grid, &row, &col);
+      assert(translated);
     }
 
     // When clicking beyond the end of the window, scroll the screen.
@@ -1855,8 +1854,10 @@ static win_T *mouse_find_grid_win(int *gridp, int *rowp, int *colp)
     win_T *wp = win_find_by_grid_handle(*gridp);
     if (wp && grid_is_allocated(wp->w_grid_handle)
         && !(wp->w_floating && !wp->w_config.mouse)) {
-      *rowp = MIN(*rowp - wp->w_grid.row_offset, wp->w_view_height - 1);
-      *colp = MIN(*colp - wp->w_grid.col_offset, wp->w_view_width - 1);
+      bool translated = grid_view_translate_to_local(&wp->w_grid, rowp, colp);
+      assert(translated);
+      *rowp = MIN(*rowp, wp->w_view_height - 1);
+      *colp = MIN(*colp, wp->w_view_width - 1);
       return wp;
     }
   } else if (*gridp == 0) {
@@ -1886,8 +1887,10 @@ static win_T *mouse_find_grid_win(int *gridp, int *rowp, int *colp)
       win_T *wp = win_find_by_grid_handle(hit.grid_handle);
       if (wp != NULL) {
         *gridp = hit.grid_handle;
-        *rowp = hit.row - wp->w_grid.row_offset;
-        *colp = hit.column - wp->w_grid.col_offset;
+        *rowp = hit.row;
+        *colp = hit.column;
+        bool translated = grid_view_translate_to_local(&wp->w_grid, rowp, colp);
+        assert(translated);
         return wp;
       }
     }

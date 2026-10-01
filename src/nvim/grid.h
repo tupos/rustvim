@@ -134,6 +134,8 @@ extern void grid_clear_default_rows(int start_row, int end_row, bool valid);
 extern void grid_scroll_window_lines(const GridView *view, int row, int line_count,
                                      int view_height, int view_width);
 extern handle_T grid_view_translate(const GridView *grid, int *row_off, int *col_off);
+extern bool grid_view_translate_to_local(const GridView *view, int *row,
+                                         int *col);
 extern void grid_invalidate(handle_T grid_handle);
 extern void grid_view_invalidate_row(const GridView *view, int row);
 extern schar_T schar_from_str(const char *str);
