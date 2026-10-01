@@ -47,6 +47,11 @@ impl GridStore {
         Self::default()
     }
 
+    /// Creates and registers an empty grid under `grid_id`.
+    pub(crate) fn register_empty(&mut self, grid_id: GridId) -> GridStoreResult<GridId> {
+        self.register(ScreenGrid::new_empty(grid_id))
+    }
+
     /// Registers one grid under its existing stable identity.
     pub(crate) fn register(&mut self, grid: ScreenGrid) -> GridStoreResult<GridId> {
         let grid_id = grid.id();
@@ -167,6 +172,19 @@ mod tests {
         store.grid_mut(grid_id).unwrap().chars[0] = 42;
 
         assert_eq!(store.grid(grid_id).unwrap().chars, [42, 0x20]);
+    }
+
+    #[test]
+    fn creates_empty_grids_with_stable_identities() {
+        let mut store = GridStore::new();
+        let grid_id = GridId::new(7);
+
+        assert_eq!(store.register_empty(grid_id), Ok(grid_id));
+
+        let grid = store.grid(grid_id).unwrap();
+        assert_eq!(grid.id(), grid_id);
+        assert!(!grid.is_allocated());
+        assert_eq!((grid.rows, grid.cols), (0, 0));
     }
 
     #[test]
