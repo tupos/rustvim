@@ -4834,27 +4834,6 @@ pub unsafe extern "C" fn grid_scroll_window_lines(
     }
 }
 
-/// # Safety
-///
-/// `grid` must point to a valid, exclusively accessible `CScreenGrid`. Any
-/// existing buffers and dimensions must satisfy the ownership and layout
-/// requirements of `ScreenGrid`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn grid_alloc(
-    grid: *mut CScreenGrid,
-    rows: libc::c_int,
-    cols: libc::c_int,
-    copy: bool,
-    valid: bool,
-) {
-    let mut line_buffer = LineBufferGuard::acquire();
-    // SAFETY: The caller guarantees exclusive ownership of the C grid and its
-    // existing allocations.
-    let mut grid = unsafe { ScreenGridGuard::take(grid) };
-    let resized_grid = ScreenGrid::from_grid(&grid, rows, cols, valid, copy, &mut line_buffer);
-    *grid = resized_grid;
-}
-
 /// Assigns and permanently stores the default screen grid.
 #[unsafe(no_mangle)]
 pub extern "C" fn grid_initialize_default() {
@@ -5702,13 +5681,11 @@ pub unsafe extern "C" fn grid_assign_handle(grid: *mut CScreenGrid) -> VimHandle
         .as_native_handle()
 }
 
-/// # Safety
-///
-/// `grid` must point to a valid, exclusively accessible `CScreenGrid` whose
-/// buffers satisfy the ownership and layout requirements of `ScreenGrid`.
+/// Inserts lines in a permanently stored grid and emits the resulting scroll
+/// command after releasing the grid-store borrow.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn grid_ins_lines(
-    grid: *mut CScreenGrid,
+pub extern "C" fn grid_ins_lines(
+    grid_handle: VimHandleT,
     row: libc::c_int,
     line_count: libc::c_int,
     end: libc::c_int,
@@ -5716,9 +5693,9 @@ pub unsafe extern "C" fn grid_ins_lines(
     width: libc::c_int,
 ) {
     let (target, command) = {
-        // SAFETY: The caller transfers exclusive ownership of the grid buffers
-        // to the guard.
-        let mut grid = unsafe { ScreenGridGuard::take(grid) };
+        let Ok(mut grid) = StoredGridGuard::acquire(GridId::new(grid_handle)) else {
+            return;
+        };
         let target = GridOutputTarget::new(grid.id(), grid.cols);
         let command = grid.ins_lines(row, line_count, end, col, width);
         (target, command)

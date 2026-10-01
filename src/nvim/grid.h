@@ -90,7 +90,6 @@ typedef struct {
 
 typedef void (*MessageGridPositionEmitter)(int row, bool scrolled);
 
-extern void grid_alloc(ScreenGrid *grid, int rows, int columns, bool copy, bool valid);
 extern bool grid_is_allocated(handle_T grid_handle);
 extern bool grid_requires_compositor_invalidation(handle_T grid_handle,
                                                   bool clear_requested);
@@ -205,7 +204,8 @@ extern void grid_draw_border(handle_T grid_handle, const GridBorderConfig *confi
 
 extern handle_T grid_assign_handle(ScreenGrid *grid);
 
-extern void grid_ins_lines(ScreenGrid *grid, int row, int line_count, int end, int col, int width);
+extern void grid_ins_lines(handle_T grid_handle, int row, int line_count, int end, int col,
+                           int width);
 
 extern void alloc_initial_line_buffer(void);
 

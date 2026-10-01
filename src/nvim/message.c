@@ -3120,7 +3120,7 @@ static bool do_more_prompt(int typed_char)
           }
 
           if (toscroll == -1 && !to_redraw) {
-            grid_ins_lines(&msg_grid, 0, 1, Rows, 0, Columns);
+            grid_ins_lines(msg_grid_handle, 0, 1, Rows, 0, Columns);
             grid_clear(&msg_grid_adj, 0, 1, 0, Columns, HL_ATTR(HLF_MSG));
             // display line at top
             disp_sb_line(0, mp);
