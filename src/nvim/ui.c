@@ -124,8 +124,7 @@ sattr_T ui_get_message_separator_attr(void)
 
 void ui_init(void)
 {
-  grid_initialize_default();
-  msg_grid_adj.grid_handle = DEFAULT_GRID_HANDLE;
+  grid_initialize_default(&default_gridview, &msg_grid_adj);
   ui_comp_init();
 }
 

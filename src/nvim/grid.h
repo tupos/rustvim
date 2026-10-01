@@ -19,7 +19,7 @@
 /// Note: before the screen is initialized and when out of memory these can be
 /// NULL.
 EXTERN ScreenGrid default_grid INIT( = SCREEN_GRID_INIT);
-EXTERN GridView default_gridview INIT( = { .grid_handle = DEFAULT_GRID_HANDLE });
+EXTERN GridView default_gridview INIT( = { 0 });
 
 /// While resizing the screen this flag is set.
 EXTERN bool resizing_screen INIT( = 0);
@@ -101,7 +101,8 @@ extern bool grid_view_targets_default(const GridView *view);
 extern bool grid_view_requires_redraw(const GridView *view);
 extern bool grid_view_width_matches_target(const GridView *view, int width);
 extern void grid_view_cursor_goto(const GridView *view, int row, int col);
-extern void grid_initialize_default(void);
+extern void grid_initialize_default(GridView *default_view,
+                                    GridView *message_view);
 extern bool grid_configure_default(int rows, int columns);
 extern WindowGridUpdate grid_configure_for_window(
   handle_T grid_handle, GridView *view, int rows, int columns, bool use_dedicated_grid,
@@ -113,6 +114,8 @@ extern MessageGridTransition grid_prepare_for_messages(handle_T grid_handle, int
                                                        bool should_allocate,
                                                        int scrolled_lines);
 extern void grid_release_message(handle_T grid_handle);
+extern void grid_activate_message_view(GridView *view, handle_T grid_handle);
+extern void grid_reset_message_view(GridView *view);
 extern void grid_set_message_position(handle_T grid_handle, GridView *view, int row,
                                       bool scrolled,
                                       MessageGridPositionEmitter emit_position);

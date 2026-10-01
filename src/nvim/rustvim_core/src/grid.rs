@@ -366,7 +366,6 @@ unsafe extern "C" {
 
     pub(crate) static mut default_grid: CScreenGrid;
     pub(crate) static mut msg_grid: CScreenGrid;
-    static mut msg_grid_adj: CScreenGrid;
     static mut pum_grid: CScreenGrid;
 
     fn decor_check_invalid_glyphs();
@@ -3359,6 +3358,27 @@ impl CGridView {
         let offset = GridPosition::new(view.row_offset, view.col_offset);
         Some((grid_id, offset))
     }
+
+    /// Initializes a process-global view of the shared default grid.
+    fn initialize_default(&mut self) {
+        self.grid_handle = DEFAULT_GRID_HANDLE;
+        self.row_offset = 0;
+        self.col_offset = 0;
+    }
+
+    /// Selects the allocated message grid without changing its current offset.
+    fn activate_message(&mut self, grid_id: GridId) {
+        self.grid_handle = grid_id.as_native_handle();
+    }
+
+    /// Restores the legacy message view after message-grid release.
+    ///
+    /// The column offset is intentionally retained to preserve the previous C
+    /// transition exactly.
+    fn reset_message(&mut self) {
+        self.grid_handle = DEFAULT_GRID_HANDLE;
+        self.row_offset = 0;
+    }
 }
 
 /// C representation of the options for submitting a completed window line.
@@ -4579,14 +4599,31 @@ pub unsafe extern "C" fn grid_scroll_window_lines(
     }
 }
 
-/// Assigns and permanently stores the default screen grid.
+/// Assigns and permanently stores the default screen grid and initializes the
+/// process-global default and message views.
+///
+/// # Safety
+///
+/// `default_view` and `message_view` must point to distinct, exclusively
+/// accessible `CGridView` values.
 #[unsafe(no_mangle)]
-pub extern "C" fn grid_initialize_default() {
+pub unsafe extern "C" fn grid_initialize_default(
+    default_view: *mut CGridView,
+    message_view: *mut CGridView,
+) {
     // SAFETY: Initialization has exclusive main-thread access to the empty
     // process-global default-grid representation.
     let cgrid =
         unsafe { (&raw mut default_grid).as_mut() }.expect("default grid is statically allocated");
     register_empty_grid(cgrid, DEFAULT_GRID_ID);
+
+    // SAFETY: The caller guarantees exclusive access to two valid views.
+    let default_view = unsafe { default_view.as_mut() }.expect("default grid view is nullptr");
+    // SAFETY: The caller guarantees that the message view is valid and does
+    // not alias the default view.
+    let message_view = unsafe { message_view.as_mut() }.expect("message grid view is nullptr");
+    default_view.initialize_default();
+    message_view.initialize_default();
 }
 
 /// Resizes the default screen grid when its configured dimensions changed.
@@ -4685,6 +4722,30 @@ pub extern "C" fn grid_release_message(grid_handle: VimHandleT) {
     if let Ok(mut grid) = StoredGridGuard::acquire(GridId::new(grid_handle)) {
         grid.release_message();
     }
+}
+
+/// Selects the allocated message grid for an adjusted message view.
+///
+/// # Safety
+///
+/// `view` must point to an exclusively accessible, initialized `CGridView`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn grid_activate_message_view(view: *mut CGridView, grid_handle: VimHandleT) {
+    // SAFETY: The caller guarantees exclusive access to a valid view.
+    let view = unsafe { view.as_mut() }.expect("message grid view is nullptr");
+    view.activate_message(GridId::new(grid_handle));
+}
+
+/// Restores an adjusted message view to the shared default grid.
+///
+/// # Safety
+///
+/// `view` must point to an exclusively accessible, initialized `CGridView`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn grid_reset_message_view(view: *mut CGridView) {
+    // SAFETY: The caller guarantees exclusive access to a valid view.
+    let view = unsafe { view.as_mut() }.expect("message grid view is nullptr");
+    view.reset_message();
 }
 
 /// Updates the message-grid position and its legacy adjusted view.
@@ -6964,6 +7025,33 @@ mod tests {
         assert!(!grid_is_allocated(assigned_handle));
 
         release_permanent_grid(grid_id);
+    }
+
+    #[test]
+    fn message_view_activation_and_reset_preserve_legacy_offsets() {
+        let mut view = CGridView {
+            grid_handle: DEFAULT_GRID_HANDLE,
+            row_offset: -3,
+            col_offset: 2,
+        };
+
+        // SAFETY: `view` is initialized and exclusively accessible.
+        unsafe {
+            grid_activate_message_view(&raw mut view, 7);
+        }
+        assert_eq!(
+            (view.grid_handle, view.row_offset, view.col_offset),
+            (7, -3, 2)
+        );
+
+        // SAFETY: `view` remains initialized and exclusively accessible.
+        unsafe {
+            grid_reset_message_view(&raw mut view);
+        }
+        assert_eq!(
+            (view.grid_handle, view.row_offset, view.col_offset),
+            (DEFAULT_GRID_HANDLE, 0, 2)
+        );
     }
 
     #[test]
