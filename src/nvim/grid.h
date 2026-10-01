@@ -127,7 +127,7 @@ extern void grid_flush_message_scroll(ScreenGrid *grid, MessageGridScrollFlushRe
                                       MessageGridPositionEmitter emit_position);
 extern void grid_refresh_message_ui(ScreenGrid *grid, int position, bool scrolled,
                                     MessageGridPositionEmitter emit_position);
-extern void grid_free(ScreenGrid *grid);
+extern void grid_free(handle_T grid_handle);
 extern void grid_free_all_mem(void);
 extern bool grid_clear_all(ScreenGrid *grid, bool valid);
 extern void grid_clear_rows(ScreenGrid *grid, int start_row, int end_row, bool valid);

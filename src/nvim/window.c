@@ -5704,7 +5704,7 @@ void win_free_grid(win_T *wp, bool reinit)
   if (wp->w_grid_handle != 0 && ui_has(kUIMultigrid)) {
     ui_call_grid_destroy(wp->w_grid_handle);
   }
-  grid_free(&wp->w_grid_alloc);
+  grid_free(wp->w_grid_handle);
   if (reinit) {
     // if a float is turned into a split, the grid data structure will be reused
     CLEAR_FIELD(wp->w_grid_alloc);
