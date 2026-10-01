@@ -250,7 +250,8 @@ static void win_redr_stl_expr(win_T *wp, bool draw_winbar, bool draw_ruler, bool
   StlClickDefinition *click_defs;
   bool is_stl_global = global_stl_height() > 0;
 
-  ScreenGrid *grid = wp && wp->w_floating && !is_stl_global ? &wp->w_grid_alloc : &default_grid;
+  handle_T grid_handle =
+    wp && wp->w_floating && !is_stl_global ? wp->w_grid_handle : DEFAULT_GRID_HANDLE;
 
   if (!is_stl_global && wp != NULL && wp->w_config.hide) {
     return;  // unnecessary
@@ -289,7 +290,7 @@ static void win_redr_stl_expr(win_T *wp, bool draw_winbar, bool draw_ruler, bool
     opt_scope = ((*wp->w_p_wbr != NUL) ? OPT_LOCAL : 0);
     row = -1;  // row zero is first row of text
     col = 0;
-    grid = grid_adjust(&wp->w_grid, &row, &col);
+    grid_handle = grid_view_translate(&wp->w_grid, &row, &col);
 
     if (row < 0) {
       goto theend;
@@ -330,7 +331,7 @@ static void win_redr_stl_expr(win_T *wp, bool draw_winbar, bool draw_ruler, bool
     }
     row = Rows - 1;
     col = MAX(ru_col, Columns / 2);
-    grid = grid_adjust(&msg_grid_adj, &row, &col);
+    grid_handle = grid_view_translate(&msg_grid_adj, &row, &col);
     maxwidth = Columns - col;
     fillchar = schar_from_ascii(' ');
     group = HLF_MSG;
@@ -391,7 +392,7 @@ static void win_redr_stl_expr(win_T *wp, bool draw_winbar, bool draw_ruler, bool
 
   if (!ui_event) {
     // Draw each snippet with the specified highlighting.
-    screengrid_line_start(grid, row, 0);
+    grid_line_start_grid(grid_handle, row, 0);
   }
 
   char *p = buf;

@@ -885,7 +885,6 @@ void ui_ext_win_position(win_T *wp, bool validate)
   WinConfig c = wp->w_config;
   if (!c.external) {
     handle_T anchor_grid_handle = DEFAULT_GRID_HANDLE;
-    ScreenGrid *grid = &default_grid;
     Float row = c.row;
     Float col = c.col;
     int anchor_grid_row = 0;
@@ -904,13 +903,10 @@ void ui_ext_win_position(win_T *wp, bool validate)
         int row_off = 0;
         int col_off = 0;
         win_grid_alloc(win);
-        grid = grid_adjust(&win->w_grid, &row_off, &col_off);
+        anchor_grid_handle = grid_view_translate(&win->w_grid, &row_off, &col_off);
         row += row_off;
         col += col_off;
-        anchor_grid_handle = grid == &default_grid
-                             ? DEFAULT_GRID_HANDLE
-                             : win->w_grid_handle;
-        if (grid != &default_grid) {
+        if (anchor_grid_handle != DEFAULT_GRID_HANDLE) {
           if (!ui_comp_grid_origin(anchor_grid_handle, &anchor_grid_row, &anchor_grid_col)) {
             anchor_grid_row = win->w_winrow;
             anchor_grid_col = win->w_wincol;
@@ -5737,8 +5733,8 @@ void win_grid_alloc(win_T *wp)
   }
 
   WindowGridUpdate update = grid_configure_for_window(
-    wp->w_grid_handle, &wp->w_grid_alloc, &wp->w_grid, total_rows, total_cols,
-    use_dedicated_grid, row_offset, col_offset);
+    wp->w_grid_handle, &wp->w_grid, total_rows, total_cols, use_dedicated_grid,
+    row_offset, col_offset);
   wp->w_grid_handle = update.grid_handle;
   if (wp->w_grid_handle == 0) {
     return;

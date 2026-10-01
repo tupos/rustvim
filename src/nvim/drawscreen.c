@@ -1349,7 +1349,7 @@ static void win_update(win_T *wp)
 {
   // Return early when the windows would overflow the shrunk terminal window
   // avoiding invalid drawing an assert failure
-  if (wp->w_grid.target == &default_grid && wp->w_wincol >= Columns) {
+  if (wp->w_grid.grid_handle == DEFAULT_GRID_HANDLE && wp->w_wincol >= Columns) {
     return;
   }
 

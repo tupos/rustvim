@@ -9,6 +9,8 @@
 #include "nvim/pos_defs.h"
 #include "nvim/types_defs.h"
 
+#define DEFAULT_GRID_HANDLE 1  // handle for the default_grid
+
 /// By default, all windows are drawn on a single rectangular grid, represented by
 /// this ScreenGrid instance. In multigrid mode each window will have its own
 /// grid, then this is only used for global screen elements that hasn't been
@@ -17,9 +19,7 @@
 /// Note: before the screen is initialized and when out of memory these can be
 /// NULL.
 EXTERN ScreenGrid default_grid INIT( = SCREEN_GRID_INIT);
-EXTERN GridView default_gridview INIT( = { .target = &default_grid });
-
-#define DEFAULT_GRID_HANDLE 1  // handle for the default_grid
+EXTERN GridView default_gridview INIT( = { .grid_handle = DEFAULT_GRID_HANDLE });
 
 /// While resizing the screen this flag is set.
 EXTERN bool resizing_screen INIT( = 0);
@@ -101,8 +101,8 @@ extern void grid_view_cursor_goto(const GridView *view, int row, int col);
 extern void grid_initialize_default(void);
 extern bool grid_configure_default(int rows, int columns);
 extern WindowGridUpdate grid_configure_for_window(
-  handle_T grid_handle, ScreenGrid *dedicated_grid, GridView *view, int rows, int columns,
-  bool use_dedicated_grid, int row_offset, int col_offset);
+  handle_T grid_handle, GridView *view, int rows, int columns, bool use_dedicated_grid,
+  int row_offset, int col_offset);
 extern bool grid_configure_for_popup_menu(handle_T grid_handle, int rows, int columns,
                                           bool contents_invalid);
 extern void grid_release_popup_menu(handle_T grid_handle);
@@ -133,7 +133,7 @@ extern bool grid_clear_default(bool valid);
 extern void grid_clear_default_rows(int start_row, int end_row, bool valid);
 extern void grid_scroll_window_lines(const GridView *view, int row, int line_count,
                                      int view_height, int view_width);
-extern ScreenGrid *grid_adjust(GridView *grid, int *row_off, int *col_off);
+extern handle_T grid_view_translate(const GridView *grid, int *row_off, int *col_off);
 extern void grid_invalidate(handle_T grid_handle);
 extern void grid_view_invalidate_row(const GridView *view, int row);
 extern schar_T schar_from_str(const char *str);
@@ -159,7 +159,7 @@ extern GridCellInspectionResult grid_inspect_cell(
 extern schar_T schar_from_char(int c);
 
 extern void grid_line_start(GridView *view, int row);
-extern void screengrid_line_start(ScreenGrid *grid, int row, int col);
+extern void grid_line_start_grid(handle_T grid_handle, int row, int col);
 extern schar_T grid_line_getchar(int col, int *attr);
 extern void grid_line_put_schar(int col, schar_T schar, int attr);
 extern void grid_line_put_truncation(int start_col, int width, schar_T marker, int attr,

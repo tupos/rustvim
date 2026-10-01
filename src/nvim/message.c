@@ -205,13 +205,13 @@ void msg_grid_validate(void)
                      curwin ? curwin->w_grid_handle : 0);
     ui_call_grid_resize(msg_grid_handle, Columns, Rows);
 
-    msg_grid_adj.target = &msg_grid;
+    msg_grid_adj.grid_handle = msg_grid_handle;
   } else if (transition == kMessageGridReleaseRequired) {
     ui_comp_remove_grid(msg_grid_handle);
     grid_release_message(msg_grid_handle);
     ui_call_grid_destroy(msg_grid_handle);
     msg_grid_adj.row_offset = 0;
-    msg_grid_adj.target = &default_grid;
+    msg_grid_adj.grid_handle = DEFAULT_GRID_HANDLE;
     redraw_cmdline = true;
   } else if (should_alloc && !msg_scrolled && msg_grid_pos != max_rows) {
     int diff = msg_grid_pos - max_rows;

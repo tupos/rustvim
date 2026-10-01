@@ -351,12 +351,10 @@ void pum_display(pumitem_T *array, int size, int selected, bool array_changed, i
 
     if (target_win != NULL) {
       // ext_popupmenu should always anchor to the default grid when multigrid is disabled
-      pum_anchor_grid = target_win->w_grid.target == &default_grid
-                        ? DEFAULT_GRID_HANDLE
-                        : target_win->w_grid_handle;
+      pum_anchor_grid = target_win->w_grid.grid_handle;
       pum_win_row += target_win->w_grid.row_offset;
       cursor_col += target_win->w_grid.col_offset;
-      if (target_win->w_grid.target != &default_grid) {
+      if (target_win->w_grid.grid_handle != DEFAULT_GRID_HANDLE) {
         pum_win_row += target_win->w_winrow;
         cursor_col += target_win->w_wincol;
         if (!ui_has(kUIMultigrid)) {
@@ -710,7 +708,7 @@ void pum_redraw(void)
     int attr = win_hl_attr(curwin, (int)hlf);
     attr = hl_combine_attr(win_hl_attr(curwin, HLF_PNI), attr);
 
-    screengrid_line_start(&pum_grid, row, 0);
+    grid_line_start_grid(pum_grid_handle, row, 0);
 
     // prepend a space if there is room
     if (extra_space) {
@@ -1657,10 +1655,8 @@ void pum_make_popup(const char *path_name, int use_mouse_pos)
                 + (curwin->w_p_rl ? curwin->w_view_width - curwin->w_wcol - 1
                                   : curwin->w_wcol);
     if (ui_has(kUIMultigrid)) {
-      mouse_grid = curwin->w_grid.target == &default_grid
-                   ? DEFAULT_GRID_HANDLE
-                   : curwin->w_grid_handle;
-    } else if (curwin->w_grid.target != &default_grid) {
+      mouse_grid = curwin->w_grid.grid_handle;
+    } else if (curwin->w_grid.grid_handle != DEFAULT_GRID_HANDLE) {
       mouse_grid = 0;
       mouse_row += curwin->w_winrow;
       mouse_col += curwin->w_wincol;
