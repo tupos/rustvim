@@ -2278,10 +2278,10 @@ impl<'grid> LineGrid<'grid> {
 /// Adapter for the legacy C API, whose line operation spans several calls.
 ///
 /// C cannot retain a Rust borrow between those calls, so this adapter stores
-/// the target as a non-null raw pointer. All implementation state remains in
-/// `LineState`; raw-grid access is confined to this adapter.
+/// the target's stable identity and borrows the permanent grid only for each
+/// complete operation. All implementation state remains in `LineState`.
 struct CLineGrid {
-    target: Option<std::ptr::NonNull<CScreenGrid>>,
+    target: Option<GridId>,
     state: LineState,
 }
 
@@ -2307,61 +2307,28 @@ impl CLineGrid {
         }
     }
 
-    /// Returns the active C grid.
-    fn target(&self) -> std::ptr::NonNull<CScreenGrid> {
+    /// Returns the active grid identity.
+    fn target(&self) -> GridId {
         self.target.expect("line operation has no target grid")
     }
 
-    /// Begins a line operation after resolving a C grid view.
+    /// Begins a line operation on a permanently stored grid.
     ///
     /// Must be matched with a grid_line_flush call before moving to another
-    /// line.
-    ///
-    /// # Safety
-    ///
-    /// `view` must point to a valid `CGridView` and its target grid must remain
-    /// valid until the matching flush.
-    /// The matching flush must occur on the same thread.
-    unsafe fn begin_view(&mut self, view: *mut CGridView, mut row: i32, line_buf: &mut LineBuffer) {
-        let mut col = 0;
-        // SAFETY: The caller guarantees that `view` and its target are valid.
-        let grid = unsafe { grid_adjust(view, &mut row, &mut col) };
-        // SAFETY: `grid_adjust` returned the valid target owned by `view`.
-        unsafe {
-            self.begin_raw_grid(grid, row, col, line_buf);
-        }
-    }
-
-    /// Begins a line operation directly on a C-owned screen grid.
-    ///
-    /// # Safety
-    ///
-    /// `grid` must point to a valid, exclusively accessible `CScreenGrid` and
-    /// remain valid until the matching flush.
-    /// The matching flush must occur on the same thread.
-    unsafe fn begin_raw_grid(
-        &mut self,
-        grid: *mut CScreenGrid,
-        row: i32,
-        col: i32,
-        line_buf: &mut LineBuffer,
-    ) {
-        let target = std::ptr::NonNull::new(grid).expect("screen grid is nullptr");
+    /// line. The matching flush must occur on the same thread.
+    fn begin(&mut self, grid_id: GridId, row: i32, col: i32, line_buf: &mut LineBuffer) {
         assert!(self.target.is_none());
-        let cols = {
-            // SAFETY: The caller guarantees exclusive access to the target
-            // grid for this operation.
-            unsafe { ScreenGridGuard::take(target.as_ptr()) }.cols
-        };
+        let cols = StoredGridGuard::acquire(grid_id)
+            .expect("line grid identity must resolve to permanent storage")
+            .cols;
         self.state.begin(cols, row, col, line_buf);
-        self.target = Some(target);
+        self.target = Some(grid_id);
     }
 
-    /// Reads a cell from the active C-owned screen grid.
+    /// Reads a cell from the active permanently stored grid.
     fn read_cell(&mut self, col: i32) -> (VimSCharT, VimSAttrT) {
-        let target = self.target();
-        // SAFETY: An active operation uniquely owns the target grid buffers.
-        let grid = unsafe { ScreenGridGuard::take(target.as_ptr()) };
+        let grid = StoredGridGuard::acquire(self.target())
+            .expect("line grid identity must resolve to permanent storage");
         self.state.read_cell(&grid, col)
     }
 
@@ -2408,9 +2375,8 @@ impl CLineGrid {
 
     /// Plans a cursor move within the currently rendered line.
     fn cursor_update(&self, col: i32) -> (GridOutputTarget, UiCommand<LocalGridSpace>) {
-        let target = self.target();
-        // SAFETY: An active operation uniquely owns the target grid buffers.
-        let grid = unsafe { ScreenGridGuard::take(target.as_ptr()) };
+        let grid = StoredGridGuard::acquire(self.target())
+            .expect("line grid identity must resolve to permanent storage");
         let output_target = GridOutputTarget::new(grid.id(), grid.cols);
         let command = UiCommand::GridCursorGoto(GridPosition::new(self.state.row, col));
         (output_target, command)
@@ -2426,7 +2392,7 @@ impl CLineGrid {
         &mut self,
         line_buf: &mut LineBuffer,
     ) -> Option<(GridOutputTarget, Vec<OwnedRawLineCommand>)> {
-        let target = self
+        let grid_id = self
             .target
             .take()
             .expect("line operation has no target grid");
@@ -2435,9 +2401,8 @@ impl CLineGrid {
         }
 
         let (output_target, commands) = {
-            // SAFETY: The active operation uniquely owns the target grid
-            // buffers.
-            let mut grid = unsafe { ScreenGridGuard::take(target.as_ptr()) };
+            let mut grid = StoredGridGuard::acquire(grid_id)
+                .expect("line grid identity must resolve to permanent storage");
             let output_target = GridOutputTarget::new(grid.id(), grid.cols);
             let commands = self.state.write_line(&mut grid, line_buf);
             (output_target, commands)
@@ -2464,12 +2429,9 @@ impl CLineGrid {
         &mut self,
         line_buf: &mut LineBuffer,
     ) -> Option<(GridOutputTarget, Vec<OwnedRawLineCommand>)> {
-        let target = self.target();
-        let rows = {
-            // SAFETY: The active target remains exclusively accessible until
-            // the matching flush.
-            unsafe { ScreenGridGuard::take(target.as_ptr()) }.rows
-        };
+        let rows = StoredGridGuard::acquire(self.target())
+            .expect("line grid identity must resolve to permanent storage")
+            .rows;
         if self.state.row < 0 || self.state.row >= rows {
             if (unsafe { rdb_flags } & RdbFlags::Invalid as u32) != 0 {
                 panic!("rdb_flags & RdbFlags::Invalid != 0");
@@ -2488,12 +2450,9 @@ impl CLineGrid {
 
     /// Reports whether the active row reaches or exceeds the target grid.
     fn row_reaches_grid_end(&self) -> bool {
-        let target = self.target();
-        let rows = {
-            // SAFETY: The active target remains exclusively accessible until
-            // the matching flush.
-            unsafe { ScreenGridGuard::take(target.as_ptr()) }.rows
-        };
+        let rows = StoredGridGuard::acquire(self.target())
+            .expect("line grid identity must resolve to permanent storage")
+            .rows;
         self.state.row >= rows
     }
 
@@ -2511,14 +2470,22 @@ impl CLineGrid {
 ///
 /// # Safety
 ///
-/// `view` must point to a valid `CGridView`. Its target grid must remain valid
-/// until the matching `grid_line_flush` call.
-/// The matching flush must occur on the same thread.
+/// `view` must point to an initialized `CGridView`. Its non-null target must
+/// remain at the address registered for its grid for this call. The matching
+/// flush must occur on the same thread.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn grid_line_start(view: *mut CGridView, row: libc::c_int) {
+    // SAFETY: The caller guarantees that `view` references an initialized view
+    // whose target remains registered for this call.
+    let (grid_id, offset) =
+        unsafe { CGridView::resolve(view) }.expect("line grid view must resolve to a stored grid");
+    let row = row
+        .checked_add(offset.row)
+        .expect("line grid row translation overflowed");
+
     let mut line_buffer = LineBufferGuard::acquire();
-    with_line_grid(|line_grid| unsafe {
-        line_grid.begin_view(view, row, &mut line_buffer);
+    with_line_grid(|line_grid| {
+        line_grid.begin(grid_id, row, offset.column, &mut line_buffer);
     });
 }
 
@@ -2528,18 +2495,22 @@ pub unsafe extern "C" fn grid_line_start(view: *mut CGridView, row: libc::c_int)
 ///
 /// # Safety
 ///
-/// `grid` must point to a valid, exclusively accessible `CScreenGrid` and
-/// remain valid until the matching `grid_line_flush` call.
-/// The matching flush must occur on the same thread.
+/// `grid` must point to the C identity registered for a permanently stored
+/// grid and remain valid for this call. The matching flush must occur on the
+/// same thread.
 #[unsafe(export_name = "screengrid_line_start")]
 pub unsafe extern "C" fn begin_raw_grid(
     grid: *mut CScreenGrid,
     row: libc::c_int,
     col: libc::c_int,
 ) {
+    let target = std::ptr::NonNull::new(grid).expect("screen grid is nullptr");
+    let grid_id =
+        permanent_grid_id(target).expect("line grid must identify a permanently stored grid");
+
     let mut line_buffer = LineBufferGuard::acquire();
-    with_line_grid(|line_grid| unsafe {
-        line_grid.begin_raw_grid(grid, row, col, &mut line_buffer);
+    with_line_grid(|line_grid| {
+        line_grid.begin(grid_id, row, col, &mut line_buffer);
     });
 }
 
@@ -3269,8 +3240,8 @@ pub unsafe extern "C" fn grid_put_window_line(
 ///
 /// # Safety
 ///
-/// `view` must point to a valid `CGridView` whose target grid remains valid
-/// and exclusively accessible for the duration of this call.
+/// `view` must point to an initialized `CGridView`. Its non-null target must
+/// remain at the address registered for its grid for this call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn grid_clear(
     view: *mut CGridView,
@@ -3280,16 +3251,23 @@ pub unsafe extern "C" fn grid_clear(
     mut end_col: libc::c_int,
     attr: libc::c_int,
 ) {
+    // SAFETY: The caller guarantees that `view` references an initialized view
+    // whose target remains registered for this call.
+    let (grid_id, offset) =
+        unsafe { CGridView::resolve(view) }.expect("grid view must resolve to a stored grid");
+    let start_row = start_row
+        .checked_add(offset.row)
+        .expect("grid clear start-row translation overflowed");
+    let end_row = end_row
+        .checked_add(offset.row)
+        .expect("grid clear end-row translation overflowed");
+
     let output = {
         let mut line_buffer = LineBufferGuard::acquire();
         with_line_grid(|line_grid| {
             let mut output = Vec::new();
             for row in start_row..end_row {
-                // SAFETY: The caller guarantees that `view` and its target remain
-                // valid and exclusively accessible for this operation.
-                unsafe {
-                    line_grid.begin_view(view, row, &mut line_buffer);
-                }
+                line_grid.begin(grid_id, row, offset.column, &mut line_buffer);
                 end_col = std::cmp::min(end_col, line_grid.max_col());
                 if line_grid.row_reaches_grid_end() || start_col >= end_col {
                     line_grid.cancel();
@@ -7227,11 +7205,7 @@ mod tests {
         }
 
         let mut line_grid = CLineGrid::new();
-        // SAFETY: The stable C address identifies the registered Rust grid and
-        // remains valid for the complete line operation.
-        unsafe {
-            line_grid.begin_raw_grid(&raw mut cgrid, 0, 0, &mut line_buffer);
-        }
+        line_grid.begin(grid_id, 0, 0, &mut line_buffer);
         assert_eq!(line_grid.max_col(), 3);
         assert!(!line_grid.row_reaches_grid_end());
         line_grid.cancel();
