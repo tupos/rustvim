@@ -5494,25 +5494,29 @@ pub extern "C" fn grid_invalidate(grid_handle: VimHandleT) {
     }
 }
 
-/// Marks a logical grid row as invalid.
+/// Marks one row addressed through a grid view as invalid.
 ///
 /// # Safety
 ///
-/// `grid` must point to a valid, exclusively accessible `CScreenGrid` whose
-/// buffers satisfy the ownership and layout requirements of `ScreenGrid`.
+/// `view` must be null or point to an initialized `CGridView`. Its non-null
+/// target must remain at the address registered for its grid.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn grid_invalidate_row(grid: *mut CScreenGrid, row: libc::c_int) {
-    if grid.is_null() {
+pub unsafe extern "C" fn grid_view_invalidate_row(view: *const CGridView, row: libc::c_int) {
+    // SAFETY: The caller guarantees that `view` is null or references an
+    // initialized view whose target remains registered.
+    let Some((grid_id, offset)) = (unsafe { CGridView::resolve(view) }) else {
         return;
-    }
-    let Ok(row) = usize::try_from(row) else {
+    };
+    let Some(row) = row
+        .checked_add(offset.row)
+        .and_then(|row| usize::try_from(row).ok())
+    else {
         return;
     };
 
-    // SAFETY: The caller transfers exclusive ownership of the grid buffers to
-    // the guard.
-    let mut grid = unsafe { ScreenGridGuard::take(grid) };
-    grid.invalidate_row(row);
+    if let Ok(mut grid) = StoredGridGuard::acquire(grid_id) {
+        grid.invalidate_row(row);
+    }
 }
 
 /// Reads one cell through a grid view after validating its target identity.

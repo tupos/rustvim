@@ -3087,12 +3087,8 @@ end_check:
 
       wlv_put_linebuf(wp, &wlv, draw_col, true, bg_attr, wrap ? SLF_WRAP : 0);
       if (wrap) {
-        int current_row = wlv.row;
-        int dummy_col = 0;  // unused
-        ScreenGrid *current_grid = grid_adjust(grid, &current_row, &dummy_col);
-
         // Force a redraw of the first column of the next line.
-        grid_invalidate_row(current_grid, current_row + 1);
+        grid_view_invalidate_row(grid, wlv.row + 1);
       }
 
       wlv.boguscols = 0;

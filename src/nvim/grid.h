@@ -135,7 +135,7 @@ extern void grid_scroll_window_lines(const GridView *view, int row, int line_cou
                                      int view_height, int view_width);
 extern ScreenGrid *grid_adjust(GridView *grid, int *row_off, int *col_off);
 extern void grid_invalidate(handle_T grid_handle);
-extern void grid_invalidate_row(ScreenGrid *grid, int row);
+extern void grid_view_invalidate_row(const GridView *view, int row);
 extern schar_T schar_from_str(const char *str);
 extern schar_T schar_from_buf(const char *buf, size_t len);
 extern bool schar_cache_clear_if_full(void);
