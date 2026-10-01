@@ -5712,7 +5712,9 @@ void win_free_grid(win_T *wp, bool reinit)
 ///
 /// Window-owned line metadata is resized here. Rust owns the corresponding
 /// grid-storage lifecycle and grid-view selection.
-void win_grid_alloc(win_T *wp)
+///
+/// @return whether the window view's row origin changed
+bool win_grid_alloc(win_T *wp)
 {
   int total_rows = wp->w_height_outer;
   int total_cols = wp->w_width_outer;
@@ -5737,7 +5739,7 @@ void win_grid_alloc(win_T *wp)
     row_offset, col_offset);
   wp->w_grid_handle = update.grid_handle;
   if (wp->w_grid_handle == 0) {
-    return;
+    return update.row_offset_changed;
   }
 
   if (update.resized && wp->w_floating && wp->w_config.border) {
@@ -5751,6 +5753,8 @@ void win_grid_alloc(win_T *wp)
     ui_call_grid_resize(wp->w_grid_handle, total_cols, total_rows);
     ui_check_cursor_grid(wp->w_grid_handle);
   }
+
+  return update.row_offset_changed;
 }
 
 /// Append window "wp" in the window list after window "after".

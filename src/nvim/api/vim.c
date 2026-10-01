@@ -2449,12 +2449,11 @@ static void redraw_status(win_T *wp, Dict(redraw) *opts, bool *flush)
     changed_window_setting(wp);
   }
 
-  int old_row_offset = wp->w_grid.row_offset;
-  win_grid_alloc(wp);
+  bool row_offset_changed = win_grid_alloc(wp);
 
   // Flush later in case winbar was just hidden or shown for the first time, or
   // statuscolumn is being drawn.
-  if (wp->w_lines_valid == 0 || wp->w_grid.row_offset != old_row_offset) {
+  if (wp->w_lines_valid == 0 || row_offset_changed) {
     *flush = true;
   }
 

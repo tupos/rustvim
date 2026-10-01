@@ -3303,6 +3303,7 @@ pub enum CMessageGridTransition {
 pub struct CWindowGridUpdate {
     grid_handle: VimHandleT,
     resized: bool,
+    row_offset_changed: bool,
 }
 
 /// C representation of the inputs needed to flush message-grid output.
@@ -3326,11 +3327,13 @@ impl From<MessageGridTransition> for CMessageGridTransition {
     }
 }
 
-impl From<WindowGridUpdate> for CWindowGridUpdate {
-    fn from(update: WindowGridUpdate) -> Self {
+impl CWindowGridUpdate {
+    /// Converts a completed update for the C window owner.
+    fn from_update(update: WindowGridUpdate, previous_row_offset: i32) -> Self {
         Self {
             grid_handle: update.grid_id.as_native_handle(),
             resized: update.lifecycle == GridLifecycleChange::Resized,
+            row_offset_changed: previous_row_offset != update.view.offset.row,
         }
     }
 }
@@ -4407,6 +4410,31 @@ pub extern "C" fn grid_require_full_redraw(grid_handle: VimHandleT) {
     }
 }
 
+/// Reports whether a grid view contains an assigned target identity.
+///
+/// # Safety
+///
+/// `view` must be null or point to an initialized `CGridView`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn grid_view_has_target(view: *const CGridView) -> bool {
+    // SAFETY: The caller guarantees that `view` is null or initialized.
+    unsafe { CGridView::resolve(view) }.is_some()
+}
+
+/// Reports whether a grid view targets the shared default grid.
+///
+/// # Safety
+///
+/// `view` must be null or point to an initialized `CGridView`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn grid_view_targets_default(view: *const CGridView) -> bool {
+    // SAFETY: The caller guarantees that `view` is null or initialized.
+    let Some((grid_id, _)) = (unsafe { CGridView::resolve(view) }) else {
+        return false;
+    };
+    grid_id == DEFAULT_GRID_ID
+}
+
 /// Reports whether a grid view requires a complete redraw.
 ///
 /// A view without a target requires redraw because it cannot currently render
@@ -4898,13 +4926,18 @@ pub unsafe extern "C" fn grid_configure_for_window(
         return CWindowGridUpdate {
             grid_handle: 0,
             resized: false,
+            row_offset_changed: false,
         };
     }
+    // SAFETY: The caller guarantees that `view` references an initialized,
+    // exclusively accessible C representation.
+    let previous_row_offset = unsafe { (*view).row_offset };
     let mode = if use_dedicated_grid {
         let Some(size) = GridSize::try_new(rows, columns) else {
             return CWindowGridUpdate {
                 grid_handle: 0,
                 resized: false,
+                row_offset_changed: false,
             };
         };
         WindowGridMode::Dedicated(size)
@@ -4918,6 +4951,7 @@ pub unsafe extern "C" fn grid_configure_for_window(
             return CWindowGridUpdate {
                 grid_handle: 0,
                 resized: false,
+                row_offset_changed: false,
             };
         };
         rust_grid.configure_window_view(
@@ -4937,7 +4971,7 @@ pub unsafe extern "C" fn grid_configure_for_window(
         (*view).col_offset = update.view.offset.column;
     }
 
-    update.into()
+    CWindowGridUpdate::from_update(update, previous_row_offset)
 }
 
 /// Releases one permanently stored grid by its stable identity.
@@ -5682,6 +5716,10 @@ mod tests {
         assert_eq!(grid_id, GridId::new(assigned_handle));
         assert_eq!(shared_update.grid_handle, assigned_handle);
         assert!(!shared_update.resized);
+        assert!(shared_update.row_offset_changed);
+        // SAFETY: `view` remains initialized for both queries.
+        assert!(unsafe { grid_view_has_target(&raw const view) });
+        assert!(unsafe { grid_view_targets_default(&raw const view) });
         assert_eq!(view.grid_handle, DEFAULT_GRID_HANDLE);
         assert_eq!((view.row_offset, view.col_offset), (3, 4));
         assert_eq!(cgrid.handle, assigned_handle);
@@ -5702,6 +5740,9 @@ mod tests {
 
         assert_eq!(dedicated_update.grid_handle, assigned_handle);
         assert!(dedicated_update.resized);
+        assert!(dedicated_update.row_offset_changed);
+        // SAFETY: `view` remains initialized.
+        assert!(!unsafe { grid_view_targets_default(&raw const view) });
         assert_eq!(view.grid_handle, assigned_handle);
         assert_eq!((view.row_offset, view.col_offset), (1, 2));
 
