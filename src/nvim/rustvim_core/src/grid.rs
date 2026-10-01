@@ -3184,30 +3184,30 @@ pub extern "C" fn grid_flush_message_line(right_left: bool) {
 
 /// # Safety
 ///
-/// `view` must point to a valid `CGridView`, and `config` must point to a valid
-/// `CGridLineSubmissionConfig`. The view's target grid must remain valid and
-/// exclusively accessible for the duration of the call. Its buffer pointers
-/// must satisfy the ownership and layout requirements of `ScreenGrid`. The
-/// global line buffer must be initialized.
+/// `view` must be null or point to an initialized `CGridView`. Its non-null
+/// target must remain at the address registered for its grid. `config` must be
+/// null or point to an initialized `CGridLineSubmissionConfig`. The global
+/// line buffer must be initialized.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn grid_put_window_line(
     view: *const CGridView,
     config: *const CGridLineSubmissionConfig,
 ) {
-    if view.is_null() || config.is_null() {
+    if config.is_null() {
         return;
     }
 
-    // SAFETY: The caller guarantees that both pointers reference initialized
-    // values for the duration of this call.
-    let (view, config) = unsafe { (&*view, &*config) };
-    let Some(row) = config.row.checked_add(view.row_offset) else {
+    // SAFETY: The caller guarantees that `view` is null or references an
+    // initialized view whose target remains registered.
+    let Some((grid_id, offset)) = (unsafe { CGridView::resolve(view) }) else {
         return;
     };
-    let target = view.target;
-    if target.is_null() {
+    // SAFETY: The caller guarantees that `config` references an initialized
+    // value for the duration of this call.
+    let config = unsafe { &*config };
+    let Some(row) = config.row.checked_add(offset.row) else {
         return;
-    }
+    };
 
     let (Ok(end_col), Ok(width)) = (
         usize::try_from(config.end_col),
@@ -3244,13 +3244,13 @@ pub unsafe extern "C" fn grid_put_window_line(
             config.flags
         };
 
-        // SAFETY: The caller guarantees exclusive access to the target and
-        // valid Rust-owned buffer pointers.
-        let mut grid = unsafe { ScreenGridGuard::take(target) };
+        let Ok(mut grid) = StoredGridGuard::acquire(grid_id) else {
+            return;
+        };
         let output_target = GridOutputTarget::new(grid.id(), grid.cols);
         let commands = grid.put_line_buffer(
             row,
-            view.col_offset,
+            offset.column,
             start_col,
             end_col,
             clear_width,
@@ -3587,6 +3587,23 @@ pub struct CGridView {
     target: *mut CScreenGrid,
     row_offset: libc::c_int,
     col_offset: libc::c_int,
+}
+
+impl CGridView {
+    /// Resolves a temporary C view into its Rust grid identity and offset.
+    ///
+    /// # Safety
+    ///
+    /// `view` must be null or point to an initialized `CGridView`. Its
+    /// non-null target must remain at the address registered for its grid.
+    unsafe fn resolve(view: *const Self) -> Option<(GridId, GridPosition)> {
+        // SAFETY: The caller guarantees that a non-null pointer is valid.
+        let view = unsafe { view.as_ref() }?;
+        let target = std::ptr::NonNull::new(view.target)?;
+        let grid_id = permanent_grid_id(target)?;
+        let offset = GridPosition::new(view.row_offset, view.col_offset);
+        Some((grid_id, offset))
+    }
 }
 
 /// C representation of the options for submitting a completed window line.
@@ -4676,25 +4693,19 @@ pub extern "C" fn grid_require_full_redraw(grid_handle: VimHandleT) {
 ///
 /// # Safety
 ///
-/// `view` must be null or point to a valid `CGridView`. Its target, when
-/// non-null, must be a valid, exclusively accessible `CScreenGrid` whose
-/// buffers satisfy the ownership and layout requirements of `ScreenGrid`.
+/// `view` must be null or point to an initialized `CGridView`. Its non-null
+/// target must remain at the address registered for its grid.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn grid_view_requires_redraw(view: *const CGridView) -> bool {
-    if view.is_null() {
+    // SAFETY: The caller guarantees that `view` is null or references an
+    // initialized view whose target remains registered.
+    let Some((grid_id, offset)) = (unsafe { CGridView::resolve(view) }) else {
         return true;
-    }
-
-    // SAFETY: The caller guarantees that `view` points to a valid `CGridView`.
-    let view = unsafe { &*view };
-    if view.target.is_null() {
+    };
+    let Ok(target) = StoredGridGuard::acquire(grid_id) else {
         return true;
-    }
-    let offset = GridPosition::new(view.row_offset, view.col_offset);
+    };
 
-    // SAFETY: The caller transfers exclusive ownership of the target grid's
-    // buffers to the guard for the duration of this operation.
-    let target = unsafe { ScreenGridGuard::take(view.target) };
     GridView::new(&target, offset).requires_redraw()
 }
 
@@ -4702,28 +4713,22 @@ pub unsafe extern "C" fn grid_view_requires_redraw(view: *const CGridView) -> bo
 ///
 /// # Safety
 ///
-/// `view` must be null or point to a valid `CGridView`. Its target, when
-/// non-null, must be a valid, exclusively accessible `CScreenGrid` whose
-/// buffers satisfy the ownership and layout requirements of `ScreenGrid`.
+/// `view` must be null or point to an initialized `CGridView`. Its non-null
+/// target must remain at the address registered for its grid.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn grid_view_width_matches_target(
     view: *const CGridView,
     width: libc::c_int,
 ) -> bool {
-    if view.is_null() {
+    // SAFETY: The caller guarantees that `view` is null or references an
+    // initialized view whose target remains registered.
+    let Some((grid_id, offset)) = (unsafe { CGridView::resolve(view) }) else {
         return false;
-    }
-
-    // SAFETY: The caller guarantees that `view` points to a valid `CGridView`.
-    let view = unsafe { &*view };
-    if view.target.is_null() {
+    };
+    let Ok(target) = StoredGridGuard::acquire(grid_id) else {
         return false;
-    }
-    let offset = GridPosition::new(view.row_offset, view.col_offset);
+    };
 
-    // SAFETY: The caller transfers exclusive ownership of the target grid's
-    // buffers to the guard for the duration of this operation.
-    let target = unsafe { ScreenGridGuard::take(view.target) };
     GridView::new(&target, offset).width_matches_target(width)
 }
 
@@ -4733,29 +4738,23 @@ pub unsafe extern "C" fn grid_view_width_matches_target(
 ///
 /// # Safety
 ///
-/// `view` must be null or point to a valid `CGridView`. Its target, when
-/// non-null, must be a valid, exclusively accessible `CScreenGrid` whose
-/// buffers satisfy the ownership and layout requirements of `ScreenGrid`.
+/// `view` must be null or point to an initialized `CGridView`. Its non-null
+/// target must remain at the address registered for its grid.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn grid_view_cursor_goto(
     view: *const CGridView,
     row: libc::c_int,
     column: libc::c_int,
 ) {
-    if view.is_null() {
+    // SAFETY: The caller guarantees that `view` is null or references an
+    // initialized view whose target remains registered.
+    let Some((grid_id, offset)) = (unsafe { CGridView::resolve(view) }) else {
         return;
-    }
-
-    // SAFETY: The caller guarantees that `view` points to a valid `CGridView`.
-    let view = unsafe { &*view };
-    if view.target.is_null() {
-        return;
-    }
-    let offset = GridPosition::new(view.row_offset, view.col_offset);
+    };
     let output = {
-        // SAFETY: The caller transfers exclusive ownership of the target
-        // grid's buffers to the guard for the duration of this operation.
-        let target = unsafe { ScreenGridGuard::take(view.target) };
+        let Ok(target) = StoredGridGuard::acquire(grid_id) else {
+            return;
+        };
         GridView::new(&target, offset).plan_cursor_move(GridPosition::new(row, column))
     };
     if let Some((target, command)) = output {
@@ -4800,9 +4799,8 @@ pub unsafe extern "C" fn grid_refresh_message_ui(
 ///
 /// # Safety
 ///
-/// `view` must point to a valid `CGridView`. Its target must point to a valid,
-/// exclusively accessible `CScreenGrid` whose buffers satisfy the ownership
-/// and layout requirements of `ScreenGrid`.
+/// `view` must be null or point to an initialized `CGridView`. Its non-null
+/// target must remain at the address registered for its grid.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn grid_scroll_window_lines(
     view: *const CGridView,
@@ -4811,29 +4809,26 @@ pub unsafe extern "C" fn grid_scroll_window_lines(
     view_height: libc::c_int,
     view_width: libc::c_int,
 ) {
-    if view.is_null() {
-        return;
-    }
     let Some(view_size) = GridSize::try_new(view_height, view_width) else {
         return;
     };
 
-    // SAFETY: The caller guarantees that `view` points to a valid `CGridView`.
-    let view = unsafe { &*view };
-    if view.target.is_null() {
+    // SAFETY: The caller guarantees that `view` is null or references an
+    // initialized view whose target remains registered.
+    let Some((grid_id, offset)) = (unsafe { CGridView::resolve(view) }) else {
         return;
-    }
+    };
     let request = WindowLineScrollRequest {
         row,
         line_count,
-        view_origin: GridPosition::new(view.row_offset, view.col_offset),
+        view_origin: offset,
         view_size,
     };
 
     let (target, command) = {
-        // SAFETY: The caller transfers exclusive ownership of the target grid
-        // buffers to the guard for the duration of this operation.
-        let mut grid = unsafe { ScreenGridGuard::take(view.target) };
+        let Ok(mut grid) = StoredGridGuard::acquire(grid_id) else {
+            return;
+        };
         let target = GridOutputTarget::new(grid.id(), grid.cols);
         let command = grid.scroll_window_lines(request);
         (target, command)
@@ -5550,11 +5545,10 @@ pub unsafe extern "C" fn grid_invalidate_row(grid: *mut CScreenGrid, row: libc::
 ///
 /// # Safety
 ///
-/// `view` must point to a valid `CGridView` whose target, when non-null, is a
-/// valid, exclusively accessible `CScreenGrid`. The target's buffers must
-/// satisfy the ownership and layout requirements of `ScreenGrid`. `output`
-/// must point to valid, properly aligned writable `CGridCell` storage that
-/// does not alias the target grid.
+/// `view` must be null or point to an initialized `CGridView`. Its non-null
+/// target must remain at the address registered for its grid. `output` must
+/// point to valid, properly aligned writable `CGridCell` storage that does not
+/// alias the target grid.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn grid_view_get_cell(
     view: *const CGridView,
@@ -5563,20 +5557,19 @@ pub unsafe extern "C" fn grid_view_get_cell(
     column: libc::c_int,
     output: *mut CGridCell,
 ) -> bool {
-    if view.is_null() || output.is_null() {
+    if output.is_null() {
         return false;
     }
 
-    // SAFETY: The caller guarantees that `view` points to a valid `CGridView`.
-    let view = unsafe { &*view };
-    if view.target.is_null() {
+    // SAFETY: The caller guarantees that `view` is null or references an
+    // initialized view whose target remains registered.
+    let Some((grid_id, offset)) = (unsafe { CGridView::resolve(view) }) else {
         return false;
-    }
-    let offset = GridPosition::new(view.row_offset, view.col_offset);
+    };
 
-    // SAFETY: The caller transfers exclusive ownership of the target grid's
-    // buffers into the guard for the duration of this operation.
-    let target = unsafe { ScreenGridGuard::take(view.target) };
+    let Ok(target) = StoredGridGuard::acquire(grid_id) else {
+        return false;
+    };
     let view = GridView::new(&target, offset);
     let Some(cell) = view.cell_for_grid(GridId::new(expected_grid), GridPosition::new(row, column))
     else {
