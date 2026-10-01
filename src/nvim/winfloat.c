@@ -189,7 +189,7 @@ int win_border_width(win_T *wp)
 }
 
 /// Draws a grid border using floating-window configuration.
-void win_grid_draw_border(ScreenGrid *grid, const WinConfig *config,
+void win_grid_draw_border(handle_T grid_handle, const WinConfig *config,
                           const int *adjustments, int winblend,
                           const int *highlight_attributes, int normal_highlight)
 {
@@ -209,13 +209,13 @@ void win_grid_draw_border(ScreenGrid *grid, const WinConfig *config,
     .footer_width = config->footer_width,
     .footer_attr = active_hl_attr[HLF_BFOOTER],
   };
-  grid_draw_border(grid, &border, adjustments, winblend, normal_highlight);
+  grid_draw_border(grid_handle, &border, adjustments, winblend, normal_highlight);
 }
 
 /// Draws the border configured for a floating window.
 void win_float_draw_border(win_T *wp)
 {
-  win_grid_draw_border(&wp->w_grid_alloc, &wp->w_config, wp->w_border_adj,
+  win_grid_draw_border(wp->w_grid_handle, &wp->w_config, wp->w_border_adj,
                        (int)wp->w_p_winbl, wp->w_ns_hl_attr,
                        wp->w_hl_attr_normal);
 }

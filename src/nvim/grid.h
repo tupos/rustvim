@@ -104,9 +104,9 @@ extern bool grid_configure_default(ScreenGrid *grid, int rows, int columns);
 extern WindowGridUpdate grid_configure_for_window(
   ScreenGrid *grid, GridView *view, int rows, int columns,
   bool use_dedicated_grid, int row_offset, int col_offset);
-extern bool grid_configure_for_popup_menu(ScreenGrid *grid, int rows, int columns,
+extern bool grid_configure_for_popup_menu(handle_T grid_handle, int rows, int columns,
                                           bool contents_invalid);
-extern void grid_release_popup_menu(ScreenGrid *grid);
+extern void grid_release_popup_menu(handle_T grid_handle);
 extern MessageGridTransition grid_prepare_for_messages(ScreenGrid *grid, int rows, int columns,
                                                        bool should_allocate,
                                                        int scrolled_lines);
@@ -199,7 +199,7 @@ extern void grid_flush_message_line(bool right_left);
 extern void grid_clear(GridView *grid, int start_row, int end_row, int start_col, int end_col, int attr);
 extern void grid_put_window_line(const GridView *view,
                                  const GridLineSubmissionConfig *config);
-extern void grid_draw_border(ScreenGrid *grid, const GridBorderConfig *config, const int *adj,
+extern void grid_draw_border(handle_T grid_handle, const GridBorderConfig *config, const int *adj,
                              int winbl, int win_hl_attr_normal);
 
 extern handle_T grid_assign_handle(ScreenGrid *grid);

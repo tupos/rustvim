@@ -674,7 +674,7 @@ void pum_redraw(void)
   int grid_height = pum_height + border_width;
   int grid_columns = grid_width + border_width;
   if (grid_configure_for_popup_menu(
-        &pum_grid, grid_height, grid_columns, invalid_grid)) {
+        pum_grid_handle, grid_height, grid_columns, invalid_grid)) {
     ui_call_grid_resize(pum_grid_handle, grid_columns, grid_height);
   }
   if (ui_has(kUIMultigrid)) {
@@ -683,7 +683,7 @@ void pum_redraw(void)
 
   int scroll_range = pum_size - pum_height;
   if (fconfig.border) {
-    win_grid_draw_border(&pum_grid, &fconfig, NULL, 0, NULL, 0);
+    win_grid_draw_border(pum_grid_handle, &fconfig, NULL, 0, NULL, 0);
     if (!fconfig.shadow) {
       row++;
       col_off++;
@@ -1311,7 +1311,7 @@ void pum_check_clear(void)
         ui_call_win_close(pum_grid_handle);
         ui_call_grid_destroy(pum_grid_handle);
       }
-      grid_release_popup_menu(&pum_grid);
+      grid_release_popup_menu(pum_grid_handle);
     }
     pum_is_drawn = false;
     pum_external = false;

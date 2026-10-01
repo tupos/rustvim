@@ -3322,9 +3322,10 @@ pub unsafe extern "C" fn grid_clear(
 
 /// Draws a floating-window border from a stable subset of `WinConfig`.
 ///
+/// Missing grid identities are ignored.
+///
 /// # Safety
 ///
-/// `grid` must point to a valid, exclusively accessible `CScreenGrid`.
 /// `config` must point to a valid `CGridBorderConfig` whose arrays and enabled
 /// virtual-text vectors satisfy the requirements of `Border::from_c`. A
 /// non-null `adjustments` must point to four initialized integers. The global
@@ -3332,13 +3333,13 @@ pub unsafe extern "C" fn grid_clear(
 /// main thread.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn grid_draw_border(
-    grid: *mut CScreenGrid,
+    grid_handle: VimHandleT,
     config: *const CGridBorderConfig,
     adjustments: *const libc::c_int,
     winbl: libc::c_int,
     win_hl_attr_normal: libc::c_int,
 ) {
-    if grid.is_null() || config.is_null() {
+    if config.is_null() {
         return;
     }
 
@@ -3361,9 +3362,9 @@ pub unsafe extern "C" fn grid_draw_border(
     };
 
     let (target, commands) = {
-        // SAFETY: The caller transfers exclusive ownership of the grid
-        // buffers into the guard for the duration of this function.
-        let mut rust_grid = unsafe { ScreenGridGuard::take(grid) };
+        let Ok(mut rust_grid) = StoredGridGuard::acquire(GridId::new(grid_handle)) else {
+            return;
+        };
         let target = GridOutputTarget::new(rust_grid.id(), rust_grid.cols);
         let mut line_buffer = LineBufferGuard::acquire();
         let mut canvas = BorderCanvas {
@@ -4919,28 +4920,22 @@ pub unsafe extern "C" fn grid_configure_default(
 ///
 /// Returns whether storage was allocated or resized.
 ///
-/// # Safety
-///
-/// `grid` must remain at its registered stable address and identify the
-/// permanently stored popup-menu grid.
+/// Missing grid identities are rejected.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn grid_configure_for_popup_menu(
-    grid: *mut CScreenGrid,
+pub extern "C" fn grid_configure_for_popup_menu(
+    grid_handle: VimHandleT,
     rows: libc::c_int,
     columns: libc::c_int,
     contents_invalid: bool,
 ) -> bool {
-    if grid.is_null() {
-        return false;
-    }
     let Some(size) = GridSize::try_new(rows, columns) else {
         return false;
     };
 
     let mut line_buffer = LineBufferGuard::acquire();
-    // SAFETY: The caller transfers exclusive ownership of the C grid and its
-    // allocations to the guard for the duration of this operation.
-    let mut grid = unsafe { ScreenGridGuard::take(grid) };
+    let Ok(mut grid) = StoredGridGuard::acquire(GridId::new(grid_handle)) else {
+        return false;
+    };
     let change = grid.configure_for_popup_menu(size, contents_invalid, &mut line_buffer);
     change == GridLifecycleChange::Resized
 }
@@ -4950,20 +4945,12 @@ pub unsafe extern "C" fn grid_configure_for_popup_menu(
 /// The popup menu reuses its grid handle when it is displayed again. Final
 /// removal from `GridStore` therefore occurs only during editor shutdown.
 ///
-/// # Safety
-///
-/// `grid` must remain at its registered stable address and identify the
-/// permanently stored popup-menu grid.
+/// Missing grid identities are ignored.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn grid_release_popup_menu(grid: *mut CScreenGrid) {
-    if grid.is_null() {
-        return;
+pub extern "C" fn grid_release_popup_menu(grid_handle: VimHandleT) {
+    if let Ok(mut grid) = StoredGridGuard::acquire(GridId::new(grid_handle)) {
+        grid.release_storage();
     }
-
-    // SAFETY: The caller guarantees exclusive access to the registered grid
-    // for the duration of this operation.
-    let mut grid = unsafe { ScreenGridGuard::take(grid) };
-    grid.release_storage();
 }
 
 /// Prepares the message grid for its requested visibility and size.
@@ -6191,6 +6178,32 @@ mod tests {
             ),
             GridLifecycleChange::Unchanged
         );
+    }
+
+    #[test]
+    fn popup_grid_ffi_operations_resolve_permanent_identity() {
+        let mut line_buffer = LineBuffer::new(2);
+        let grid = ScreenGrid::new(1, 2, true, &mut line_buffer);
+        // SAFETY: Ownership of every grid allocation is transferred to
+        // `cgrid`.
+        let mut cgrid = unsafe { grid.to_cgrid() };
+        // SAFETY: `cgrid` owns valid grid allocations and remains at a stable
+        // address until its permanent binding is released.
+        let grid_handle = unsafe { grid_assign_handle(&raw mut cgrid) };
+
+        assert!(grid_configure_for_popup_menu(grid_handle, 2, 3, false));
+        {
+            let grid = StoredGridGuard::acquire(GridId::new(grid_handle)).unwrap();
+            assert_eq!((grid.rows, grid.cols), (2, 3));
+            assert!(grid.is_allocated());
+        }
+
+        grid_release_popup_menu(grid_handle);
+        assert!(!grid_is_allocated(grid_handle));
+
+        // SAFETY: No stored-grid guard remains, and `cgrid` is exclusively
+        // accessible.
+        assert!(unsafe { ScreenGridGuard::release_permanent(&raw mut cgrid) });
     }
 
     #[test]
