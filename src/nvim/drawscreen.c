@@ -242,7 +242,7 @@ void screenclear(void)
   msg_didany = false;
   msg_didout = false;
   if (HL_ATTR(HLF_MSG) > 0 && msg_use_grid() && grid_is_allocated(msg_grid_handle)) {
-    grid_invalidate(&msg_grid);
+    grid_invalidate(msg_grid_handle);
     msg_grid_validate();
     msg_grid_invalid = false;
     clear_cmdline = true;
@@ -632,7 +632,7 @@ int update_screen(void)
 
     if (wp->w_redr_type == UPD_CLEAR && wp->w_floating
         && grid_is_allocated(wp->w_grid_handle)) {
-      grid_invalidate(&wp->w_grid_alloc);
+      grid_invalidate(wp->w_grid_handle);
       wp->w_redr_type = UPD_NOT_VALID;
     }
 

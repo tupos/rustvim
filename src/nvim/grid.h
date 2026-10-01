@@ -102,7 +102,7 @@ extern void grid_view_cursor_goto(const GridView *view, int row, int col);
 extern void grid_initialize_default(ScreenGrid *grid);
 extern bool grid_configure_default(ScreenGrid *grid, int rows, int columns);
 extern WindowGridUpdate grid_configure_for_window(
-  ScreenGrid *grid, GridView *view, int rows, int columns,
+  handle_T grid_handle, ScreenGrid *dedicated_grid, GridView *view, int rows, int columns,
   bool use_dedicated_grid, int row_offset, int col_offset);
 extern bool grid_configure_for_popup_menu(handle_T grid_handle, int rows, int columns,
                                           bool contents_invalid);
@@ -134,7 +134,7 @@ extern void grid_clear_rows(ScreenGrid *grid, int start_row, int end_row, bool v
 extern void grid_scroll_window_lines(const GridView *view, int row, int line_count,
                                      int view_height, int view_width);
 extern ScreenGrid *grid_adjust(GridView *grid, int *row_off, int *col_off);
-extern void grid_invalidate(ScreenGrid *grid);
+extern void grid_invalidate(handle_T grid_handle);
 extern void grid_invalidate_row(ScreenGrid *grid, int row);
 extern schar_T schar_from_str(const char *str);
 extern schar_T schar_from_buf(const char *buf, size_t len);

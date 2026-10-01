@@ -5737,7 +5737,7 @@ void win_grid_alloc(win_T *wp)
   }
 
   WindowGridUpdate update = grid_configure_for_window(
-    &wp->w_grid_alloc, &wp->w_grid, total_rows, total_cols,
+    wp->w_grid_handle, &wp->w_grid_alloc, &wp->w_grid, total_rows, total_cols,
     use_dedicated_grid, row_offset, col_offset);
   wp->w_grid_handle = update.grid_handle;
   if (wp->w_grid_handle == 0) {
