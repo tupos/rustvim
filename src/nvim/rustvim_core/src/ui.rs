@@ -270,7 +270,7 @@ pub(crate) fn ui_line_r(
     clear_attr: i32,
     wrap: bool,
 ) -> OwnedRawLineCommand {
-    assert!(0 <= row && row < grid.rows);
+    assert!(0 <= row && row < grid.size().height);
     let mut flags = if wrap {
         LineFlags::WRAP
     } else {

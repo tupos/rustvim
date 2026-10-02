@@ -63,24 +63,25 @@ struct PositionedGrid<'grid> {
 }
 
 impl<'grid> PositionedGrid<'grid> {
-    /// Constructs a positioned view of a grid with valid dimensions.
-    fn try_new(grid: &'grid ScreenGrid, origin: ComposedPosition) -> Option<Self> {
-        (grid.rows >= 0 && grid.cols >= 0).then_some(Self { grid, origin })
+    /// Constructs a positioned view of a grid.
+    fn new(grid: &'grid ScreenGrid, origin: ComposedPosition) -> Self {
+        Self { grid, origin }
     }
 
     /// Reports whether the allocated grid contains one screen cell.
     fn contains(self, point: ComposedPosition) -> bool {
+        let size = self.grid.size();
         point.row >= self.origin.row
             && self
                 .origin
                 .row
-                .checked_add(self.grid.rows)
+                .checked_add(size.height)
                 .is_some_and(|bottom| point.row < bottom)
             && point.column >= self.origin.column
             && self
                 .origin
                 .column
-                .checked_add(self.grid.cols)
+                .checked_add(size.width)
                 .is_some_and(|right| point.column < right)
     }
 
@@ -170,13 +171,11 @@ struct CompositorRecomposeArea {
 impl CompositorRecomposeArea {
     /// Returns the composed-screen area occupied by an allocated grid.
     fn try_from_grid(grid: &ScreenGrid, origin: ComposedPosition) -> Option<Self> {
-        if grid.rows < 0 || grid.cols < 0 {
-            return None;
-        }
+        let size = grid.size();
 
         Some(Self {
-            rows: origin.row..origin.row.checked_add(grid.rows)?,
-            columns: origin.column..origin.column.checked_add(grid.cols)?,
+            rows: origin.row..origin.row.checked_add(size.height)?,
+            columns: origin.column..origin.column.checked_add(size.width)?,
         })
     }
 
@@ -185,13 +184,11 @@ impl CompositorRecomposeArea {
     /// Start coordinates remain unchanged to preserve the compositor's
     /// established clipping behavior.
     fn with_ends_clamped_to_grid(self, grid: &ScreenGrid) -> CompositorResult<Self> {
-        if grid.rows < 0 || grid.cols < 0 {
-            return Err(CompositorError::InvalidGeometry);
-        }
+        let size = grid.size();
 
         Ok(Self {
-            rows: self.rows.start..self.rows.end.min(grid.rows),
-            columns: self.columns.start..self.columns.end.min(grid.cols),
+            rows: self.rows.start..self.rows.end.min(size.height),
+            columns: self.columns.start..self.columns.end.min(size.width),
         })
     }
 }
@@ -336,22 +333,20 @@ impl CompositorGridPlacement {
 
     /// Returns the allocated grid area at this placement.
     fn allocated_area(self, grid: &ScreenGrid) -> CompositorResult<CompositorRecomposeArea> {
-        if grid.rows < 0 || grid.cols < 0 {
-            return Err(CompositorError::InvalidGeometry);
-        }
+        let size = grid.size();
 
         Ok(CompositorRecomposeArea {
             rows: self.origin.row
                 ..self
                     .origin
                     .row
-                    .checked_add(grid.rows)
+                    .checked_add(size.height)
                     .ok_or(CompositorError::InvalidGeometry)?,
             columns: self.origin.column
                 ..self
                     .origin
                     .column
-                    .checked_add(grid.cols)
+                    .checked_add(size.width)
                     .ok_or(CompositorError::InvalidGeometry)?,
         })
     }
@@ -553,10 +548,7 @@ impl MessageCompositorState {
         default_grid: &ScreenGrid,
         should_draw: bool,
     ) -> CompositorResult<CompositorMessagePositionPlan> {
-        if default_grid.cols < 0 {
-            return Err(CompositorError::InvalidGeometry);
-        }
-
+        let screen_width = default_grid.size().width;
         if !should_draw {
             return Ok(CompositorMessagePositionPlan::default());
         }
@@ -566,7 +558,7 @@ impl MessageCompositorState {
                 scroll: None,
                 recompose: Some(CompositorRecomposeArea {
                     rows: self.current_row.saturating_sub(1).max(0)..request.row,
-                    columns: 0..default_grid.cols,
+                    columns: 0..screen_width,
                 }),
             });
         }
@@ -1236,22 +1228,20 @@ impl Compositor {
                 let layer = layers
                     .layer_index_with_id(message_grid.id())
                     .and_then(|index| layers.layer(index))
-                    .or_else(|| {
-                        let size = GridSize::try_new(message_grid.rows, message_grid.cols)?;
-                        CompositorLayer::try_from_grid(
+                    .unwrap_or_else(|| {
+                        CompositorLayer::from_grid(
                             message_grid,
                             0,
                             CompositorGridPlacement {
                                 origin: ComposedPosition::new(self.message.current_row, 0),
-                                size,
+                                size: message_grid.size(),
                             },
                             self.message.z_index,
                             self.message.blending,
                             false,
                             false,
                         )
-                    })
-                    .ok_or(CompositorError::InvalidLayerState)?;
+                    });
                 Some(MessageSeparator {
                     layer,
                     character,
@@ -1653,8 +1643,8 @@ struct CompositorLayer<'grid> {
 }
 
 impl<'grid> CompositorLayer<'grid> {
-    /// Constructs a validated layer view from grid and compositor-owned state.
-    fn try_from_grid(
+    /// Constructs a layer view from grid and compositor-owned state.
+    fn from_grid(
         grid: &'grid ScreenGrid,
         layer_index: usize,
         placement: CompositorGridPlacement,
@@ -1662,14 +1652,14 @@ impl<'grid> CompositorLayer<'grid> {
         blending: bool,
         accepts_mouse_input: bool,
         disabled: bool,
-    ) -> Option<Self> {
-        let allocated_size = GridSize::try_new(grid.rows, grid.cols)?;
+    ) -> Self {
+        let allocated_size = grid.size();
         let visible_size = GridSize {
             height: allocated_size.height.min(placement.size.height),
             width: allocated_size.width.min(placement.size.width),
         };
 
-        Some(Self {
+        Self {
             grid,
             origin: placement.origin,
             requested_size: placement.size,
@@ -1679,15 +1669,12 @@ impl<'grid> CompositorLayer<'grid> {
             blending,
             accepts_mouse_input,
             disabled,
-        })
+        }
     }
 
     /// Returns the allocated dimensions of this layer's grid.
     fn allocated_size(self) -> GridSize {
-        GridSize {
-            height: self.grid.rows,
-            width: self.grid.cols,
-        }
+        self.grid.size()
     }
 
     /// Returns the exclusive right edge of this layer.
@@ -1731,28 +1718,30 @@ impl<'grid> CompositorLayer<'grid> {
     /// Empty or inverted bounds are retained because the C area renderer also
     /// receives them and applies its own clipping and debug behavior.
     fn recomposition_area_with(self, other: Self) -> CompositorResult<CompositorRecomposeArea> {
+        let size = self.grid.size();
+        let other_size = other.grid.size();
         let bottom = self
             .origin
             .row
-            .checked_add(self.grid.rows)
+            .checked_add(size.height)
             .ok_or(CompositorError::InvalidGeometry)?
             .min(
                 other
                     .origin
                     .row
-                    .checked_add(other.grid.rows)
+                    .checked_add(other_size.height)
                     .ok_or(CompositorError::InvalidGeometry)?,
             );
         let right = self
             .origin
             .column
-            .checked_add(self.grid.cols)
+            .checked_add(size.width)
             .ok_or(CompositorError::InvalidGeometry)?
             .min(
                 other
                     .origin
                     .column
-                    .checked_add(other.grid.cols)
+                    .checked_add(other_size.width)
                     .ok_or(CompositorError::InvalidGeometry)?,
             );
 
@@ -1888,7 +1877,7 @@ impl<'grid> CompositorLayer<'grid> {
     fn allows_wrap(self, is_default: bool, screen_columns: usize) -> bool {
         is_default
             || (self.origin.column == 0
-                && usize::try_from(self.grid.cols).ok() == Some(screen_columns))
+                && usize::try_from(self.grid.size().width).ok() == Some(screen_columns))
     }
 }
 
@@ -2217,19 +2206,17 @@ impl Layers<LayerState> {
             .enumerate()
             .map(|(layer_index, layer)| {
                 let grid = grids.grid(layer.grid_id)?;
-                (grid.id() == layer.grid_id)
-                    .then(|| {
-                        CompositorLayer::try_from_grid(
-                            grid,
-                            layer_index,
-                            layer.placement,
-                            layer.z_index,
-                            layer.blending,
-                            layer.accepts_mouse_input,
-                            layer.disabled,
-                        )
-                    })
-                    .flatten()
+                (grid.id() == layer.grid_id).then(|| {
+                    CompositorLayer::from_grid(
+                        grid,
+                        layer_index,
+                        layer.placement,
+                        layer.z_index,
+                        layer.blending,
+                        layer.accepts_mouse_input,
+                        layer.disabled,
+                    )
+                })
             })
             .collect::<Option<Vec<_>>>()
             .ok_or(CompositorError::InvalidLayerState)?
@@ -2607,12 +2594,13 @@ impl<'grid> Layers<CompositorLayer<'grid>> {
             action: CompositorRawLineAction::Forward,
         };
 
-        if row >= default_layer.grid.rows {
+        let screen_size = default_layer.grid.size();
+        if row >= screen_size.height {
             plan.action = CompositorRawLineAction::DiscardRow;
             return Ok(plan);
         }
 
-        let screen_columns = default_layer.grid.cols;
+        let screen_columns = screen_size.width;
         if plan.clear_column > screen_columns {
             plan.clear_column = screen_columns;
             if plan.columns.start >= screen_columns {
@@ -3227,8 +3215,7 @@ mod tests {
             let grid = grid_store
                 .grid(layer.grid_id)
                 .expect("test layer grid must be registered");
-            layer.placement.size = GridSize::try_new(grid.rows, grid.cols)
-                .expect("test layer dimensions must be valid");
+            layer.placement.size = grid.size();
         }
 
         let mut compositor = lock_compositor();
@@ -3349,7 +3336,7 @@ mod tests {
             grid.id(),
             CompositorGridPlacement {
                 origin: ComposedPosition::new(0, 0),
-                size: GridSize::try_new(grid.rows, grid.cols).unwrap(),
+                size: grid.size(),
             },
             0,
             false,
@@ -3426,15 +3413,16 @@ mod tests {
         layer_index: usize,
         disabled: bool,
     ) -> CompositorLayer<'_> {
+        let grid_height = grid.size().height;
         CompositorLayer {
             grid,
             origin: ComposedPosition::new(0, origin_column),
             requested_size: GridSize {
-                height: grid.rows,
+                height: grid_height,
                 width: visible_width,
             },
             visible_size: GridSize {
-                height: grid.rows,
+                height: grid_height,
                 width: visible_width,
             },
             z_index: 0,
@@ -4491,7 +4479,7 @@ mod tests {
     #[test]
     fn positioned_grid_translates_screen_positions_to_local_coordinates() {
         let grid = grid_with_size(2, 3);
-        let positioned = PositionedGrid::try_new(&grid, ComposedPosition::new(4, 5)).unwrap();
+        let positioned = PositionedGrid::new(&grid, ComposedPosition::new(4, 5));
 
         assert!(positioned.contains(ComposedPosition::new(4, 5)));
         assert!(positioned.contains(ComposedPosition::new(5, 7)));

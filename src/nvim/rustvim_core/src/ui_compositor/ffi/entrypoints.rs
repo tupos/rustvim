@@ -570,9 +570,8 @@ pub unsafe extern "C" fn ui_comp_grid_get_cell_at(
     let Some(grid) = grid_store.grid(GridId::new(grid_handle)) else {
         return false;
     };
-    let Some(cell) =
-        PositionedGrid::try_new(grid, ComposedPosition::new(origin_row, origin_column))
-            .and_then(|grid| grid.cell(ComposedPosition::new(row, column)))
+    let Some(cell) = PositionedGrid::new(grid, ComposedPosition::new(origin_row, origin_column))
+        .cell(ComposedPosition::new(row, column))
     else {
         return false;
     };
@@ -611,8 +610,8 @@ pub unsafe extern "C" fn ui_comp_grid_hit_at_coord(
     let Some(grid) = grid_store.grid(GridId::new(grid_handle)) else {
         return false;
     };
-    let Some(hit) = PositionedGrid::try_new(grid, ComposedPosition::new(origin_row, origin_column))
-        .and_then(|grid| grid.hit(ComposedPosition::new(row, column)))
+    let Some(hit) = PositionedGrid::new(grid, ComposedPosition::new(origin_row, origin_column))
+        .hit(ComposedPosition::new(row, column))
     else {
         return false;
     };

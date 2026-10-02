@@ -466,9 +466,8 @@ pub struct ScreenGrid {
     /// `None` means that tracking is disabled for this grid.
     dirty_columns: Option<DirtyColumns>,
 
-    /// the size of the allocated grid.
-    pub rows: i32,
-    pub cols: i32,
+    /// The nonnegative dimensions of the grid.
+    size: GridSize,
 
     /// The state of the grid is valid. Otherwise it needs to be redrawn.
     valid: bool,
@@ -488,30 +487,39 @@ impl ScreenGrid {
             vcols: Vec::new(),
             line_offset: Vec::new(),
             dirty_columns: None,
-            rows: 0,
-            cols: 0,
+            size: GridSize {
+                height: 0,
+                width: 0,
+            },
             valid: false,
             throttled: false,
         }
     }
 
     pub fn new(rows: i32, cols: i32, valid: bool, line_buffer: &mut LineBuffer) -> Self {
-        let num_cells = rows as usize * cols as usize;
+        let size =
+            GridSize::try_new(rows, cols).expect("screen-grid dimensions must be nonnegative");
+        let row_count =
+            usize::try_from(size.height).expect("screen-grid height must fit native indices");
+        let column_count =
+            usize::try_from(size.width).expect("screen-grid width must fit native indices");
+        let num_cells = row_count
+            .checked_mul(column_count)
+            .expect("screen-grid cell count must fit native indices");
 
         let mut grid = ScreenGrid {
             handle: 0,
             chars: vec![schar_from_ascii(' '); num_cells],
             attrs: vec![Self::attrs_fill(valid); num_cells],
             vcols: vec![-1; num_cells],
-            line_offset: Vec::with_capacity(rows as usize),
+            line_offset: Vec::with_capacity(row_count),
             dirty_columns: None,
-            rows,
-            cols,
+            size,
             valid: false,
             throttled: false,
         };
-        for i in 0..rows {
-            let offset = i as usize * cols as usize;
+        for i in 0..row_count {
+            let offset = i * column_count;
             grid.line_offset.push(offset);
         }
 
@@ -523,6 +531,11 @@ impl ScreenGrid {
     /// Returns this grid's stable Rust identity.
     pub(crate) fn id(&self) -> GridId {
         GridId::new(self.handle)
+    }
+
+    /// Returns the nonnegative dimensions of this grid.
+    pub(crate) const fn size(&self) -> GridSize {
+        self.size
     }
 
     /// Reports whether this grid requires a complete redraw.
@@ -552,30 +565,34 @@ impl ScreenGrid {
         self.valid = false;
     }
 
-    pub fn from_grid(
+    fn from_grid(
         grid: &ScreenGrid,
-        rows: i32,
-        cols: i32,
+        size: GridSize,
         valid: bool,
         copy: bool,
         line_buffer: &mut LineBuffer,
     ) -> Self {
         let mut new_grid = grid.clone();
 
-        let num_cells = rows as usize * cols as usize;
+        let row_count =
+            usize::try_from(size.height).expect("screen-grid height must fit native indices");
+        let column_count =
+            usize::try_from(size.width).expect("screen-grid width must fit native indices");
+        let num_cells = row_count
+            .checked_mul(column_count)
+            .expect("screen-grid cell count must fit native indices");
 
         new_grid.chars = vec![schar_from_ascii(' '); num_cells];
         new_grid.attrs = vec![Self::attrs_fill(valid); num_cells];
         new_grid.vcols = vec![-1; num_cells];
-        new_grid.line_offset = Vec::with_capacity(rows as usize);
-        new_grid.rows = rows;
-        new_grid.cols = cols;
+        new_grid.line_offset = Vec::with_capacity(row_count);
+        new_grid.size = size;
         if let Some(dirty_columns) = &mut new_grid.dirty_columns {
-            dirty_columns.resize(rows as usize);
+            dirty_columns.resize(row_count);
         }
 
-        for i in 0..new_grid.rows as usize {
-            let offset = i * new_grid.cols as usize;
+        for i in 0..row_count {
+            let offset = i * column_count;
             new_grid.line_offset.push(offset);
 
             // If the screen is not going to be cleared, copy as much as
@@ -603,18 +620,9 @@ impl ScreenGrid {
         line_buffer: &mut LineBuffer,
     ) -> GridLifecycleChange {
         match mode {
-            WindowGridMode::Dedicated(size)
-                if !self.is_allocated() || self.rows != size.height || self.cols != size.width =>
-            {
+            WindowGridMode::Dedicated(size) if !self.is_allocated() || self.size != size => {
                 let copy_contents = self.valid;
-                *self = Self::from_grid(
-                    self,
-                    size.height,
-                    size.width,
-                    false,
-                    copy_contents,
-                    line_buffer,
-                );
+                *self = Self::from_grid(self, size, false, copy_contents, line_buffer);
                 self.valid = true;
                 GridLifecycleChange::Resized
             }
@@ -659,14 +667,11 @@ impl ScreenGrid {
         size: GridSize,
         line_buffer: &mut LineBuffer,
     ) -> GridLifecycleChange {
-        if size.height == 0
-            || size.width == 0
-            || (self.is_allocated() && self.rows == size.height && self.cols == size.width)
-        {
+        if size.height == 0 || size.width == 0 || (self.is_allocated() && self.size == size) {
             return GridLifecycleChange::Unchanged;
         }
 
-        *self = Self::from_grid(self, size.height, size.width, true, true, line_buffer);
+        *self = Self::from_grid(self, size, true, true, line_buffer);
         GridLifecycleChange::Resized
     }
 
@@ -680,15 +685,8 @@ impl ScreenGrid {
         contents_invalid: bool,
         line_buffer: &mut LineBuffer,
     ) -> GridLifecycleChange {
-        if !self.is_allocated() || self.rows != size.height || self.cols != size.width {
-            *self = Self::from_grid(
-                self,
-                size.height,
-                size.width,
-                false,
-                !contents_invalid,
-                line_buffer,
-            );
+        if !self.is_allocated() || self.size != size {
+            *self = Self::from_grid(self, size, false, !contents_invalid, line_buffer);
             GridLifecycleChange::Resized
         } else if contents_invalid {
             self.invalidate();
@@ -708,10 +706,8 @@ impl ScreenGrid {
         line_buffer: &mut LineBuffer,
     ) -> MessageGridTransition {
         match mode {
-            MessageGridMode::Visible(size)
-                if !self.is_allocated() || self.rows != size.height || self.cols != size.width =>
-            {
-                *self = Self::from_grid(self, size.height, size.width, true, false, line_buffer);
+            MessageGridMode::Visible(size) if !self.is_allocated() || self.size != size => {
+                *self = Self::from_grid(self, size, true, false, line_buffer);
                 self.reset_dirty_columns();
                 self.throttled = false;
                 MessageGridTransition::Resized
@@ -767,8 +763,8 @@ impl ScreenGrid {
             };
         }
 
-        let target = GridOutputTarget::new(self.id(), self.cols);
-        let scroll = self.del_lines(0, 1, self.rows, 0, self.cols);
+        let target = GridOutputTarget::new(self.id(), self.size.width);
+        let scroll = self.del_lines(0, 1, self.size.height, 0, self.size.width);
         self.scroll_dirty_columns();
         MessageGridScrollUp {
             started_throttling,
@@ -782,7 +778,7 @@ impl ScreenGrid {
             return;
         }
         let width =
-            usize::try_from(self.cols).expect("allocated message-grid width must be nonnegative");
+            usize::try_from(self.size.width).expect("allocated grid width must fit native indices");
         self.clear_row(0, width, false);
     }
 
@@ -798,10 +794,11 @@ impl ScreenGrid {
         }
         let row_count = std::cmp::min(
             rows_to_clear,
-            usize::try_from(self.rows).expect("allocated message-grid height must be nonnegative"),
+            usize::try_from(self.size.height)
+                .expect("allocated grid height must fit native indices"),
         );
         let width =
-            usize::try_from(self.cols).expect("allocated message-grid width must be nonnegative");
+            usize::try_from(self.size.width).expect("allocated grid width must fit native indices");
         for row in 0..row_count {
             self.clear_row(row, width, row < valid_rows);
         }
@@ -822,7 +819,7 @@ impl ScreenGrid {
         request: MessageGridScrollFlushRequest,
         state: MessageScrollState,
     ) -> MessageGridScrollFlushPlan {
-        let target = GridOutputTarget::new(self.id(), self.cols);
+        let target = GridOutputTarget::new(self.id(), self.size.width);
         let mut plan = MessageGridScrollFlushPlan::empty(target);
         if !self.throttled {
             return plan;
@@ -842,7 +839,7 @@ impl ScreenGrid {
             scrolled_delta >= 0,
             "message scroll count must not move backwards"
         );
-        let line_delta = std::cmp::min(scrolled_delta, self.rows);
+        let line_delta = std::cmp::min(scrolled_delta, self.size.height);
 
         if position_delta > 0 {
             plan.position_update = Some(request.position);
@@ -877,7 +874,7 @@ impl ScreenGrid {
         for screen_row in first_screen_row..request.screen_size.height {
             let row = screen_row - request.position;
             assert!(
-                0 <= row && row < self.rows,
+                0 <= row && row < self.size.height,
                 "dirty message row must belong to the message grid"
             );
             let dirty_column = self.take_dirty_column(row as usize).unwrap_or_default();
@@ -887,7 +884,7 @@ impl ScreenGrid {
                 false,
                 0,
                 dirty_column,
-                self.cols,
+                self.size.width,
                 request.clear_attribute,
                 false,
             ));
@@ -905,9 +902,8 @@ impl ScreenGrid {
         if !self.is_allocated() {
             return None;
         }
-        let size = GridSize::try_new(self.rows, self.cols)?;
-        let target = GridOutputTarget::new(self.id(), self.cols);
-        Some((target, UiCommand::GridResize(size)))
+        let target = GridOutputTarget::new(self.id(), self.size.width);
+        Some((target, UiCommand::GridResize(self.size)))
     }
 
     /// Releases cell storage while preserving this grid's stable identity.
@@ -920,7 +916,7 @@ impl ScreenGrid {
     }
 
     fn realloc_line_buffer(&self, line_buffer: &mut LineBuffer) {
-        let ucols = self.cols as usize;
+        let ucols = usize::try_from(self.size.width).expect("grid width must fit native indices");
         if ucols <= line_buffer.len() {
             return;
         }
@@ -928,10 +924,11 @@ impl ScreenGrid {
     }
 
     fn copy_grid_content_from_old_grid(&mut self, src: &ScreenGrid, new_row: usize) {
-        if new_row >= src.rows as usize || src.chars.is_empty() {
+        if new_row >= src.size.height as usize || src.chars.is_empty() {
             return;
         }
-        let len = std::cmp::min(self.cols, src.cols) as usize;
+        let len = usize::try_from(std::cmp::min(self.size.width, src.size.width))
+            .expect("grid width must fit native indices");
         let range = self.line_offset[new_row]..self.line_offset[new_row] + len;
         let src_range = src.line_offset[new_row]..src.line_offset[new_row] + len;
         self.chars[range.clone()].copy_from_slice(&src.chars[src_range.clone()]);
@@ -941,7 +938,9 @@ impl ScreenGrid {
 
     /// Enables dirty-column tracking and resets every row to clean.
     fn reset_dirty_columns(&mut self) {
-        self.dirty_columns = Some(DirtyColumns::new(self.rows as usize));
+        self.dirty_columns = Some(DirtyColumns::new(
+            usize::try_from(self.size.height).expect("grid height must fit native indices"),
+        ));
     }
 
     /// Records the furthest changed column in `row` when tracking is enabled.
@@ -991,8 +990,10 @@ impl ScreenGrid {
         if !self.is_allocated() {
             return false;
         }
-        let (Ok(row_count), Ok(width)) = (usize::try_from(self.rows), usize::try_from(self.cols))
-        else {
+        let (Ok(row_count), Ok(width)) = (
+            usize::try_from(self.size.height),
+            usize::try_from(self.size.width),
+        ) else {
             return false;
         };
         let start = rows.start.min(row_count);
@@ -1005,7 +1006,7 @@ impl ScreenGrid {
 
     /// Clears every allocated logical row.
     fn clear_all(&mut self, valid: bool) -> bool {
-        let Ok(row_count) = usize::try_from(self.rows) else {
+        let Ok(row_count) = usize::try_from(self.size.height) else {
             return false;
         };
         self.clear_rows(0..row_count, valid)
@@ -1031,7 +1032,7 @@ impl ScreenGrid {
 
     /// Returns the complete contents of one logical grid cell.
     pub(crate) fn cell(&self, row: usize, col: usize) -> Option<GridCell> {
-        let width = usize::try_from(self.cols).ok()?;
+        let width = usize::try_from(self.size.width).ok()?;
         if col >= width {
             return None;
         }
@@ -1097,23 +1098,23 @@ impl ScreenGrid {
         lb: &mut LineBuffer,
     ) -> Vec<OwnedRawLineCommand> {
         let mut output = Vec::new();
-        assert!(0 <= row && row < self.rows);
+        assert!(0 <= row && row < self.size.height);
         let is_right_left_set = flags & Slf::Rightleft as i32 != 0;
         let is_inc_vcol_set = flags & Slf::IncVcol as i32 != 0;
         let is_wrap_set = flags & Slf::Wrap as i32 != 0;
 
         let mut clear_next = false;
-        if endcol > self.cols {
-            endcol = self.cols;
+        if endcol > self.size.width {
+            endcol = self.size.width;
         }
-        if row >= self.rows || col_offset >= self.cols {
+        if row >= self.size.height || col_offset >= self.size.width {
             return output;
         }
         let row = row as usize;
         let invalid_row =
             self.id() != GridId::new(DEFAULT_GRID_HANDLE) && self.is_invalid_row(row) && col == 0;
         let offset_to = self.line_offset[row] + col_offset as usize;
-        let max_offset_to = self.line_offset[row] + self.cols as usize;
+        let max_offset_to = self.line_offset[row] + self.size.width as usize;
 
         // When at the start of the text and overwriting the right half of a
         // two-cell character in the same grid, truncate that into a '>'.
@@ -1364,11 +1365,13 @@ impl ScreenGrid {
         }
 
         let visible_width = self
-            .cols
+            .size
+            .width
             .checked_sub(request.view_origin.column)?
             .min(request.view_size.width);
         let visible_height = self
-            .rows
+            .size
+            .height
             .checked_sub(request.view_origin.row)?
             .min(request.view_size.height);
         if visible_width < 0
@@ -1417,7 +1420,7 @@ impl ScreenGrid {
             j = end - 1 - i;
             assert!(j >= 0, "j is less than 0: end={}, i={}", end, i);
 
-            if self.cols != width {
+            if self.size.width != width {
                 loop {
                     j -= line_count;
                     if j < row {
@@ -1446,7 +1449,7 @@ impl ScreenGrid {
                     self.line_offset[(j + line_count) as usize] = self.line_offset[j as usize];
                 }
                 self.line_offset[(j + line_count) as usize] = temp;
-                self.clear_line(temp, self.cols as usize, false);
+                self.clear_line(temp, self.size.width as usize, false);
             }
         }
         self.scroll_command(row, end, col, width, -line_count)
@@ -1474,7 +1477,7 @@ impl ScreenGrid {
             j = row + i;
             assert!(j >= 0, "j is less than 0: row={}, i={}", row, i);
 
-            if self.cols != width {
+            if self.size.width != width {
                 // need to copy part of a line
                 loop {
                     j += line_count;
@@ -1505,7 +1508,7 @@ impl ScreenGrid {
                     self.line_offset[(j - line_count) as usize] = self.line_offset[j as usize];
                 }
                 self.line_offset[(j - line_count) as usize] = temp;
-                self.clear_line(temp, self.cols as usize, false);
+                self.clear_line(temp, self.size.width as usize, false);
             }
         }
         self.scroll_command(row, end, col, width, line_count)
@@ -1597,13 +1600,13 @@ impl<'grid> GridView<'grid> {
         position: GridPosition,
     ) -> Option<(GridOutputTarget, UiCommand<LocalGridSpace>)> {
         let position = self.translated_position(position)?;
-        let target = GridOutputTarget::new(self.target.id(), self.target.cols);
+        let target = GridOutputTarget::new(self.target.id(), self.target.size().width);
         Some((target, UiCommand::GridCursorGoto(position)))
     }
 
     /// Reports whether the target grid has `width` columns.
     fn width_matches_target(&self, width: i32) -> bool {
-        self.target.cols == width
+        self.target.size().width == width
     }
 
     /// Reports whether this view has a target that requires a complete redraw.
@@ -2050,17 +2053,17 @@ impl<'grid> LineGrid<'grid> {
 
     /// Returns the number of rows in the borrowed grid.
     fn rows(&self) -> i32 {
-        self.grid.rows
+        self.grid.size.height
     }
 
     /// Returns the number of columns in the borrowed grid.
     fn cols(&self) -> i32 {
-        self.grid.cols
+        self.grid.size.width
     }
 
     /// Begins buffering a line belonging to the borrowed Rust grid.
     fn begin_grid(&mut self, row: i32, col: i32, line_buf: &mut LineBuffer) {
-        self.state.begin(self.grid.cols, row, col, line_buf);
+        self.state.begin(self.grid.size.width, row, col, line_buf);
     }
 
     /// Places one character and its attributes in the buffered line.
@@ -2134,7 +2137,8 @@ impl CLineGrid {
         assert!(self.target.is_none());
         let cols = StoredGridGuard::acquire(grid_id)
             .expect("line grid identity must resolve to permanent storage")
-            .cols;
+            .size()
+            .width;
         self.state.begin(cols, row, col, line_buf);
         self.target = Some(grid_id);
     }
@@ -2191,7 +2195,7 @@ impl CLineGrid {
     fn cursor_update(&self, col: i32) -> (GridOutputTarget, UiCommand<LocalGridSpace>) {
         let grid = StoredGridGuard::acquire(self.target())
             .expect("line grid identity must resolve to permanent storage");
-        let output_target = GridOutputTarget::new(grid.id(), grid.cols);
+        let output_target = GridOutputTarget::new(grid.id(), grid.size().width);
         let command = UiCommand::GridCursorGoto(GridPosition::new(self.state.row, col));
         (output_target, command)
     }
@@ -2217,7 +2221,7 @@ impl CLineGrid {
         let (output_target, commands) = {
             let mut grid = StoredGridGuard::acquire(grid_id)
                 .expect("line grid identity must resolve to permanent storage");
-            let output_target = GridOutputTarget::new(grid.id(), grid.cols);
+            let output_target = GridOutputTarget::new(grid.id(), grid.size().width);
             let commands = self.state.write_line(&mut grid, line_buf);
             (output_target, commands)
         };
@@ -2245,7 +2249,8 @@ impl CLineGrid {
     ) -> Option<(GridOutputTarget, Vec<OwnedRawLineCommand>)> {
         let rows = StoredGridGuard::acquire(self.target())
             .expect("line grid identity must resolve to permanent storage")
-            .rows;
+            .size()
+            .height;
         if self.state.row < 0 || self.state.row >= rows {
             if (unsafe { rdb_flags } & RdbFlags::Invalid as u32) != 0 {
                 panic!("rdb_flags & RdbFlags::Invalid != 0");
@@ -2266,7 +2271,8 @@ impl CLineGrid {
     fn row_reaches_grid_end(&self) -> bool {
         let rows = StoredGridGuard::acquire(self.target())
             .expect("line grid identity must resolve to permanent storage")
-            .rows;
+            .size()
+            .height;
         self.state.row >= rows
     }
 
@@ -3030,7 +3036,7 @@ pub unsafe extern "C" fn grid_put_window_line(
         let Ok(mut grid) = StoredGridGuard::acquire(descriptor.target) else {
             return;
         };
-        let output_target = GridOutputTarget::new(grid.id(), grid.cols);
+        let output_target = GridOutputTarget::new(grid.id(), grid.size().width);
         let commands = grid.put_line_buffer(
             row,
             descriptor.offset.column,
@@ -3165,7 +3171,7 @@ pub unsafe extern "C" fn grid_draw_border(
         let Ok(mut rust_grid) = StoredGridGuard::acquire(GridId::new(grid_handle)) else {
             return;
         };
-        let target = GridOutputTarget::new(rust_grid.id(), rust_grid.cols);
+        let target = GridOutputTarget::new(rust_grid.id(), rust_grid.size().width);
         let mut line_buffer = LineBufferGuard::acquire();
         let mut canvas = BorderCanvas {
             line_grid: LineGrid::new(&mut rust_grid),
@@ -4531,7 +4537,7 @@ pub extern "C" fn grid_scroll_window_lines(
         let Ok(grid) = store.grid_mut(descriptor.target) else {
             return;
         };
-        let target = GridOutputTarget::new(grid.id(), grid.cols);
+        let target = GridOutputTarget::new(grid.id(), grid.size().width);
         let command = grid.scroll_window_lines(request);
         (target, command)
     };
@@ -5436,7 +5442,7 @@ pub extern "C" fn grid_ins_lines(
         let Ok(mut grid) = StoredGridGuard::acquire(GridId::new(grid_handle)) else {
             return;
         };
-        let target = GridOutputTarget::new(grid.id(), grid.cols);
+        let target = GridOutputTarget::new(grid.id(), grid.size().width);
         let command = grid.ins_lines(row, line_count, end, col, width);
         (target, command)
     };
@@ -5584,7 +5590,7 @@ mod tests {
             GridViewDescriptor::new(GridId::new(7), GridPosition::new(1, 2))
         );
         assert_eq!(grid.handle, 7);
-        assert_eq!((grid.rows, grid.cols), (2, 3));
+        assert_eq!(grid.size(), GridSize::try_new(2, 3).unwrap());
         assert!(grid.valid);
         assert_eq!(grid.chars[0], schar_from_ascii('x'));
         assert_eq!(grid.attrs[0], 12);
@@ -5694,7 +5700,7 @@ mod tests {
 
         {
             let mut grid = StoredGridGuard::acquire(grid_id).unwrap();
-            assert_eq!((grid.rows, grid.cols), (2, 3));
+            assert_eq!(grid.size(), GridSize::try_new(2, 3).unwrap());
             assert!(grid.is_allocated());
             grid.attrs.fill(7);
         }
@@ -5743,7 +5749,7 @@ mod tests {
 
         assert_eq!(change, GridLifecycleChange::Resized);
         assert_eq!(grid.handle, DEFAULT_GRID_HANDLE);
-        assert_eq!((grid.rows, grid.cols), (2, 3));
+        assert_eq!(grid.size(), GridSize::try_new(2, 3).unwrap());
         assert_eq!(grid.chars[0], schar_from_ascii('x'));
         assert_eq!(grid.attrs[0], 12);
         assert_eq!(
@@ -5772,7 +5778,7 @@ mod tests {
 
         assert_eq!(change, GridLifecycleChange::Resized);
         assert_eq!(grid.handle, 9);
-        assert_eq!((grid.rows, grid.cols), (2, 3));
+        assert_eq!(grid.size(), GridSize::try_new(2, 3).unwrap());
         assert_eq!(grid.chars[0], schar_from_ascii('x'));
         assert_eq!(grid.attrs[0], 12);
         assert_eq!(grid.attrs[2], -1);
@@ -5823,7 +5829,7 @@ mod tests {
         assert!(grid_configure_for_popup_menu(grid_handle, 2, 3, false));
         {
             let grid = StoredGridGuard::acquire(GridId::new(grid_handle)).unwrap();
-            assert_eq!((grid.rows, grid.cols), (2, 3));
+            assert_eq!(grid.size(), GridSize::try_new(2, 3).unwrap());
             assert!(grid.is_allocated());
         }
 
@@ -5849,7 +5855,7 @@ mod tests {
 
         assert_eq!(transition, MessageGridTransition::Resized);
         assert_eq!(grid.handle, DEFAULT_GRID_HANDLE + 1);
-        assert_eq!((grid.rows, grid.cols), (2, 3));
+        assert_eq!(grid.size(), GridSize::try_new(2, 3).unwrap());
         assert_eq!(grid.chars[0], schar_from_ascii(' '));
         assert_eq!(grid.attrs, [0; 6]);
         assert_eq!(
@@ -6868,7 +6874,7 @@ mod tests {
         {
             let mut grid = StoredGridGuard::acquire(grid_id).unwrap();
             grid.chars[0] = schar_from_ascii('x');
-            assert_eq!((grid.rows, grid.cols), (2, 3));
+            assert_eq!(grid.size(), GridSize::try_new(2, 3).unwrap());
         }
 
         {

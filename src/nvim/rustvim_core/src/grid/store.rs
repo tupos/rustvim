@@ -304,7 +304,8 @@ mod tests {
         let grid = store.grid(grid_id).unwrap();
         assert_eq!(grid.id(), grid_id);
         assert!(!grid.is_allocated());
-        assert_eq!((grid.rows, grid.cols), (0, 0));
+        let size = grid.size();
+        assert_eq!((size.height, size.width), (0, 0));
     }
 
     #[test]

@@ -15,7 +15,7 @@ pub(crate) struct GridRow<'grid> {
 impl<'grid> GridRow<'grid> {
     /// Borrows one complete logical row from `grid`.
     pub(crate) fn try_from_grid(grid: &'grid ScreenGrid, row: usize) -> Option<Self> {
-        let width = usize::try_from(grid.cols).ok()?;
+        let width = usize::try_from(grid.size().width).ok()?;
         let start = *grid.line_offset.get(row)?;
         let end = start.checked_add(width)?;
 
