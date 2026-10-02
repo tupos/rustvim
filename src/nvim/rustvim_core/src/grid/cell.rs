@@ -10,7 +10,7 @@ pub(crate) struct GridCell {
 
 impl GridCell {
     /// Creates a cell containing its character and rendering metadata.
-    pub(super) const fn new(
+    pub(crate) const fn new(
         character: VimSCharT,
         attribute: VimSAttrT,
         virtual_column: VimColNrT,

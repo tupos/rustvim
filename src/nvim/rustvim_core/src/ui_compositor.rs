@@ -3179,7 +3179,9 @@ mod tests {
     static NEXT_TEST_GRID_ID: AtomicI32 = AtomicI32::new(10_000);
 
     fn assign_test_grid_id(mut grid: ScreenGrid) -> ScreenGrid {
-        grid.handle = NEXT_TEST_GRID_ID.fetch_add(1, Ordering::Relaxed);
+        grid.set_id_for_test(GridId::new(
+            NEXT_TEST_GRID_ID.fetch_add(1, Ordering::Relaxed),
+        ));
         grid
     }
 
@@ -3320,8 +3322,9 @@ mod tests {
             true,
             &mut line_buffer,
         );
-        grid.chars.copy_from_slice(characters);
-        grid.attrs.copy_from_slice(attributes);
+        for (column, (&character, &attribute)) in characters.iter().zip(attributes).enumerate() {
+            assert!(grid.set_cell_for_test(0, column, GridCell::new(character, attribute, -1),));
+        }
         assign_test_grid_id(grid)
     }
 
@@ -3933,7 +3936,7 @@ mod tests {
     fn cursor_planning_selects_translates_and_raises_a_grid() {
         let default_grid = grid_with_size(10, 12);
         let mut selected_grid = grid_with_size(2, 2);
-        selected_grid.handle = 7;
+        selected_grid.set_id_for_test(GridId::new(7));
         let upper_grid = grid_with_size(2, 2);
         let mut selected_layer = compositor_layer(&selected_grid, 3, 2, 1, false);
         selected_layer.origin.row = 2;
@@ -3983,7 +3986,7 @@ mod tests {
         let default_grid = grid_with_size(10, 12);
         let default_grid_id = default_grid.id();
         let mut selected_grid = grid_with_size(2, 2);
-        selected_grid.handle = 7;
+        selected_grid.set_id_for_test(GridId::new(7));
         let upper_grid = grid_with_size(2, 2);
         let selected_grid_id = selected_grid.id();
         let upper_grid_id = upper_grid.id();
@@ -4414,9 +4417,7 @@ mod tests {
     fn registered_hit_testing_returns_grid_identity_and_coordinates() {
         let default_grid = grid_with_size(4, 4);
         let mut overlay_grid = grid_with_size(2, 2);
-        overlay_grid.chars[0] = schar_from_ascii('x');
-        overlay_grid.attrs[0] = 7;
-        overlay_grid.vcols[0] = 9;
+        assert!(overlay_grid.set_cell_for_test(0, 0, GridCell::new(schar_from_ascii('x'), 7, 9),));
         let overlay_grid_id = overlay_grid.id();
         let expected_hit = CompositorGridHit {
             grid_id: overlay_grid_id,

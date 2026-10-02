@@ -5,7 +5,7 @@ use std::{ffi::CString, sync::Mutex};
 use crate::{
     defines::{Integer, OptInt},
     generated::enums::RdbFlags,
-    grid::{GridId, LocalGridSpace, ScreenGrid, VimHandleT, VimSAttrT, VimSCharT},
+    grid::{GridId, GridRow, LocalGridSpace, ScreenGrid, VimHandleT, VimSAttrT, VimSCharT},
 };
 
 use output::{
@@ -280,17 +280,21 @@ pub(crate) fn ui_line_r(
         flags.insert(LineFlags::INVALID);
     }
 
-    let offset = grid.line_offset[row as usize] + start_col as usize;
-    let payload_len = usize::try_from(end_col - start_col).expect("ordered line columns");
-    let payload_end = offset + payload_len;
+    let row_index = usize::try_from(row).expect("grid row must be nonnegative");
+    let start = usize::try_from(start_col).expect("line start column must be nonnegative");
+    let end = usize::try_from(end_col).expect("line end column must be nonnegative");
+    let segment = GridRow::try_from_grid(grid, row_index)
+        .and_then(|row| row.segment(start..end))
+        .expect("valid grid line output");
+
     OwnedRawLineCommand::try_owned(
         row,
         start_col..end_col,
         clear_col,
         clear_attr,
         flags,
-        &grid.chars[offset..payload_end],
-        &grid.attrs[offset..payload_end],
+        segment.characters(),
+        segment.attributes(),
         &GRID_OUTPUT_BUFFER_POOL,
     )
     .expect("valid grid line output")

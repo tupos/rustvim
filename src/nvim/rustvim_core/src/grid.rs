@@ -454,12 +454,12 @@ unsafe extern "C" {
 /// is implemented by rotating the offsets in the line_offset array.
 #[derive(Debug, Clone)]
 pub struct ScreenGrid {
-    pub handle: VimHandleT,
+    handle: VimHandleT,
 
-    pub chars: Vec<VimSCharT>,
-    pub attrs: Vec<VimSAttrT>,
-    pub vcols: Vec<VimColNrT>,
-    pub line_offset: Vec<usize>,
+    chars: Vec<VimSCharT>,
+    attrs: Vec<VimSAttrT>,
+    vcols: Vec<VimColNrT>,
+    line_offset: Vec<usize>,
 
     /// Dirty-column tracking while output is throttled.
     ///
@@ -531,6 +531,13 @@ impl ScreenGrid {
     /// Returns this grid's stable Rust identity.
     pub(crate) fn id(&self) -> GridId {
         GridId::new(self.handle)
+    }
+
+    /// Replaces this grid's identity in tests that construct standalone grids.
+    #[cfg(test)]
+    pub(crate) fn set_id_for_test(&mut self, grid_id: GridId) {
+        assert!(grid_id.as_native_handle() > 0);
+        self.handle = grid_id.as_native_handle();
     }
 
     /// Returns the nonnegative dimensions of this grid.
@@ -1030,18 +1037,37 @@ impl ScreenGrid {
         }
     }
 
-    /// Returns the complete contents of one logical grid cell.
-    pub(crate) fn cell(&self, row: usize, col: usize) -> Option<GridCell> {
+    /// Resolves logical cell coordinates into the shared storage index.
+    fn cell_index(&self, row: usize, column: usize) -> Option<usize> {
         let width = usize::try_from(self.size.width).ok()?;
-        if col >= width {
+        if column >= width {
             return None;
         }
-        let offset = self.line_offset.get(row)?.checked_add(col)?;
+        let offset = self.line_offset.get(row)?.checked_add(column)?;
+        (offset < self.chars.len() && offset < self.attrs.len() && offset < self.vcols.len())
+            .then_some(offset)
+    }
+
+    /// Returns the complete contents of one logical grid cell.
+    pub(crate) fn cell(&self, row: usize, column: usize) -> Option<GridCell> {
+        let offset = self.cell_index(row, column)?;
         Some(GridCell::new(
-            *self.chars.get(offset)?,
-            *self.attrs.get(offset)?,
-            *self.vcols.get(offset)?,
+            self.chars[offset],
+            self.attrs[offset],
+            self.vcols[offset],
         ))
+    }
+
+    /// Replaces one complete logical cell for tests outside the grid module.
+    #[cfg(test)]
+    pub(crate) fn set_cell_for_test(&mut self, row: usize, column: usize, cell: GridCell) -> bool {
+        let Some(offset) = self.cell_index(row, column) else {
+            return false;
+        };
+        self.chars[offset] = cell.character;
+        self.attrs[offset] = cell.attribute;
+        self.vcols[offset] = cell.virtual_column;
+        true
     }
 
     fn is_invalid_row(&self, row: usize) -> bool {
