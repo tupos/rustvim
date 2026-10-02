@@ -959,7 +959,6 @@ int win_line(win_T *wp, linenr_T lnum, int startrow, int endrow, int col_rows, b
              spellvars_T *spv, foldinfo_T foldinfo)
 {
   colnr_T vcol_prev = -1;             // "wlv.vcol" of previous character
-  GridView *grid = &wp->w_grid;       // grid specific to the window
   const int view_width = wp->w_view_width;
   const int view_height = wp->w_view_height;
 
@@ -3049,7 +3048,7 @@ end_check:
                         && wlv.filler_todo <= 0         // Not drawing diff filler lines.
                         && lcs_eol_todo                 // Haven't printed the lcs_eol character.
                         && wlv.row != endrow - 1        // Not the last line being displayed.
-                        && grid_view_width_matches_target(grid, view_width)
+                        && grid_view_width_matches_target(wp->w_grid_handle, view_width)
                                                         // Window spans the width of its grid.
                         && !wp->w_p_rl;                 // Not right-to-left.
 
@@ -3088,7 +3087,7 @@ end_check:
       wlv_put_linebuf(wp, &wlv, draw_col, true, bg_attr, wrap ? SLF_WRAP : 0);
       if (wrap) {
         // Force a redraw of the first column of the next line.
-        grid_view_invalidate_row(grid, wlv.row + 1);
+        grid_view_invalidate_row(wp->w_grid_handle, wlv.row + 1);
       }
 
       wlv.boguscols = 0;
@@ -3150,8 +3149,6 @@ end_check:
 static void wlv_put_linebuf(win_T *wp, const winlinevars_T *wlv, int endcol, bool clear_end,
                             int bg_attr, int flags)
 {
-  GridView *grid = &wp->w_grid;
-
   assert(!(flags & SLF_RIGHTLEFT));
 
   const bool put_smoothscroll_marker = wlv->row == 0 && wp->w_skipcol > 0
@@ -3172,7 +3169,7 @@ static void wlv_put_linebuf(win_T *wp, const winlinevars_T *wlv, int endcol, boo
     .put_smoothscroll_marker = put_smoothscroll_marker,
     .preserve_line_number = wp->w_p_nu && wp->w_p_rnu,
   };
-  grid_put_window_line(grid, &config);
+  grid_put_window_line(wp->w_grid_handle, &config);
 }
 
 static int decor_providers_setup(int rows_to_draw, bool draw_from_line_start, linenr_T lnum,

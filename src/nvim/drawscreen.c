@@ -754,7 +754,7 @@ void setcursor_mayforce(win_T *wp, bool force)
                                               && vim_isprintc(utf_ptr2char(cursor))) ? 2 : 1);
     }
 
-    grid_view_cursor_goto(&wp->w_grid, row, col);
+    grid_view_cursor_goto(wp->w_grid_handle, row, col);
   }
 }
 
@@ -1349,7 +1349,7 @@ static void win_update(win_T *wp)
 {
   // Return early when the windows would overflow the shrunk terminal window
   // avoiding invalid drawing an assert failure
-  if (grid_view_targets_default(&wp->w_grid) && wp->w_wincol >= Columns) {
+  if (grid_view_targets_default(wp->w_grid_handle) && wp->w_wincol >= Columns) {
     return;
   }
 
@@ -2321,7 +2321,7 @@ redr_statuscol:
       wp->w_filler_rows = wp->w_view_height - srow;
     } else if (dy_flags & kOptDyFlagTruncate) {      // 'display' has "truncate"
       // Last line isn't finished: Display "@@@" in the last screen line.
-      grid_line_start(&wp->w_grid, wp->w_view_height - 1);
+      grid_window_line_start(wp->w_grid_handle, wp->w_view_height - 1);
       grid_line_fill(0, MIN(wp->w_view_width, 3), wp->w_p_fcs_chars.lastline, at_attr);
       grid_line_fill(3, wp->w_view_width, schar_from_ascii(' '), at_attr);
       grid_line_flush();
@@ -2330,7 +2330,7 @@ redr_statuscol:
     } else if (dy_flags & kOptDyFlagLastline) {      // 'display' has "lastline"
       // Last line isn't finished: Display "@@@" at the end.
       // If this would split a doublewidth char in two, we need to display "@@@@" instead
-      grid_line_start(&wp->w_grid, wp->w_view_height - 1);
+      grid_window_line_start(wp->w_grid_handle, wp->w_view_height - 1);
       int width = grid_line_getchar(MAX(wp->w_view_width - 3, 0), NULL) == NUL ? 4 : 3;
       grid_line_fill(MAX(wp->w_view_width - width, 0), wp->w_view_width,
                      wp->w_p_fcs_chars.lastline, at_attr);
@@ -2451,7 +2451,7 @@ void win_scroll_lines(win_T *wp, int row, int line_count)
     return;
   }
 
-  grid_scroll_window_lines(&wp->w_grid, row, line_count,
+  grid_scroll_window_lines(wp->w_grid_handle, row, line_count,
                            wp->w_view_height, wp->w_view_width);
 }
 
@@ -2465,7 +2465,7 @@ void win_draw_end(win_T *wp, schar_T c1, bool draw_margin, int startrow, int end
   const int scwidth = wp->w_scwidth;
 
   for (int row = startrow; row < endrow; row++) {
-    grid_line_start(&wp->w_grid, row);
+    grid_window_line_start(wp->w_grid_handle, row);
 
     int n = 0;
     if (draw_margin) {

@@ -4140,7 +4140,7 @@ static void do_intro_line(int row, char *mesg, bool colon, bool is_logo)
   }
 
   if (!colon && ui_has(kUIMultigrid)) {
-    grid_line_start(&firstwin->w_grid, row);
+    grid_window_line_start(firstwin->w_grid_handle, row);
   } else {
     grid_line_start_grid(DEFAULT_GRID_HANDLE, row, 0);
   }

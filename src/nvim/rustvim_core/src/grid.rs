@@ -2306,21 +2306,14 @@ fn begin_grid_view_line(descriptor: GridViewDescriptor, row: i32) {
     });
 }
 
-/// Start a group of grid_line_puts calls that builds a single grid line.
+/// Starts a buffered line operation through a registered window view.
 ///
-/// Must be matched with a grid_line_flush call before moving to
-/// another line.
-///
-/// # Safety
-///
-/// `view` must point to an initialized `CGridView` whose handle identifies a
-/// permanently stored grid. The matching flush must occur on the same thread.
+/// The matching flush must occur on the same thread.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn grid_line_start(view: *mut CGridView, row: libc::c_int) {
-    // SAFETY: The caller guarantees that `view` references an initialized
-    // view.
-    let descriptor =
-        unsafe { CGridView::descriptor(view) }.expect("line grid view must describe a stored grid");
+pub extern "C" fn grid_window_line_start(window_grid_handle: VimHandleT, row: libc::c_int) {
+    let descriptor = lock_grid_store()
+        .window_view_descriptor(GridId::new(window_grid_handle))
+        .expect("window grid must own a registered view");
     begin_grid_view_line(descriptor, row);
 }
 
@@ -2989,20 +2982,19 @@ pub extern "C" fn grid_flush_message_line(right_left: bool) {
 
 /// # Safety
 ///
-/// `view` must be null or point to an initialized `CGridView`. `config` must
-/// be null or point to an initialized `CGridLineSubmissionConfig`. The global
-/// line buffer must be initialized.
+/// `config` must be null or point to an initialized
+/// `CGridLineSubmissionConfig`. The global line buffer must be initialized.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn grid_put_window_line(
-    view: *const CGridView,
+    window_grid_handle: VimHandleT,
     config: *const CGridLineSubmissionConfig,
 ) {
     if config.is_null() {
         return;
     }
 
-    // SAFETY: The caller guarantees that `view` is null or initialized.
-    let Some(descriptor) = (unsafe { CGridView::descriptor(view) }) else {
+    let Ok(descriptor) = lock_grid_store().window_view_descriptor(GridId::new(window_grid_handle))
+    else {
         return;
     };
     // SAFETY: The caller guarantees that `config` references an initialized
@@ -3111,26 +3103,6 @@ fn clear_grid_view(
     for (target, commands) in output {
         target.emit_lines(commands);
     }
-}
-
-/// Clears a rectangular region of a grid view.
-///
-/// # Safety
-///
-/// `view` must point to an initialized `CGridView`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn grid_clear(
-    view: *mut CGridView,
-    start_row: libc::c_int,
-    end_row: libc::c_int,
-    start_col: libc::c_int,
-    end_col: libc::c_int,
-    attr: libc::c_int,
-) {
-    // SAFETY: The caller guarantees that `view` is initialized.
-    let descriptor =
-        unsafe { CGridView::descriptor(view) }.expect("grid view must describe a stored grid");
-    clear_grid_view(descriptor, start_row, end_row, start_col, end_col, attr);
 }
 
 /// Clears a rectangular region of an identified grid.
@@ -3438,29 +3410,6 @@ impl CWindowGridUpdate {
             resized: update.lifecycle == GridLifecycleChange::Resized,
             row_offset_changed: previous_row_offset != update.view.offset.row,
         }
-    }
-}
-
-#[repr(C)]
-#[derive(Debug)]
-pub struct CGridView {
-    grid_handle: VimHandleT,
-    row_offset: libc::c_int,
-    col_offset: libc::c_int,
-}
-
-impl CGridView {
-    /// Converts a C view into its Rust descriptor.
-    ///
-    /// # Safety
-    ///
-    /// `view` must be null or point to an initialized `CGridView`.
-    unsafe fn descriptor(view: *const Self) -> Option<GridViewDescriptor> {
-        // SAFETY: The caller guarantees that a non-null pointer is valid.
-        let view = unsafe { view.as_ref() }?;
-        let grid_id = (view.grid_handle > 0).then_some(GridId::new(view.grid_handle))?;
-        let offset = GridPosition::new(view.row_offset, view.col_offset);
-        Some(GridViewDescriptor::new(grid_id, offset))
     }
 }
 
@@ -4513,26 +4462,19 @@ pub extern "C" fn grid_require_full_redraw(grid_handle: VimHandleT) {
     }
 }
 
-/// Reports whether a grid view contains an assigned target identity.
-///
-/// # Safety
-///
-/// `view` must be null or point to an initialized `CGridView`.
+/// Reports whether a window grid owns a registered view.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn grid_view_has_target(view: *const CGridView) -> bool {
-    // SAFETY: The caller guarantees that `view` is null or initialized.
-    unsafe { CGridView::descriptor(view) }.is_some()
+pub extern "C" fn grid_view_has_target(window_grid_handle: VimHandleT) -> bool {
+    lock_grid_store()
+        .window_view_descriptor(GridId::new(window_grid_handle))
+        .is_ok()
 }
 
-/// Reports whether a grid view targets the shared default grid.
-///
-/// # Safety
-///
-/// `view` must be null or point to an initialized `CGridView`.
+/// Reports whether a window view targets the shared default grid.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn grid_view_targets_default(view: *const CGridView) -> bool {
-    // SAFETY: The caller guarantees that `view` is null or initialized.
-    let Some(descriptor) = (unsafe { CGridView::descriptor(view) }) else {
+pub extern "C" fn grid_view_targets_default(window_grid_handle: VimHandleT) -> bool {
+    let Ok(descriptor) = lock_grid_store().window_view_descriptor(GridId::new(window_grid_handle))
+    else {
         return false;
     };
     descriptor.target == DEFAULT_GRID_ID
@@ -4540,42 +4482,26 @@ pub unsafe extern "C" fn grid_view_targets_default(view: *const CGridView) -> bo
 
 /// Reports whether a grid view requires a complete redraw.
 ///
-/// A view without a target requires redraw because it cannot currently render
-/// a cursor.
-///
-/// # Safety
-///
-/// `view` must be null or point to an initialized `CGridView`.
+/// A window without a registered view requires redraw because it cannot
+/// currently render a cursor.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn grid_view_requires_redraw(view: *const CGridView) -> bool {
-    // SAFETY: The caller guarantees that `view` is null or initialized.
-    let Some(descriptor) = (unsafe { CGridView::descriptor(view) }) else {
-        return true;
-    };
+pub extern "C" fn grid_view_requires_redraw(window_grid_handle: VimHandleT) -> bool {
     let store = lock_grid_store();
-    let Ok(view) = store.view(descriptor) else {
+    let Ok(view) = store.window_view(GridId::new(window_grid_handle)) else {
         return true;
     };
 
     view.requires_redraw()
 }
 
-/// Reports whether a grid view's target has `width` columns.
-///
-/// # Safety
-///
-/// `view` must be null or point to an initialized `CGridView`.
+/// Reports whether a window view's target has `width` columns.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn grid_view_width_matches_target(
-    view: *const CGridView,
+pub extern "C" fn grid_view_width_matches_target(
+    window_grid_handle: VimHandleT,
     width: libc::c_int,
 ) -> bool {
-    // SAFETY: The caller guarantees that `view` is null or initialized.
-    let Some(descriptor) = (unsafe { CGridView::descriptor(view) }) else {
-        return false;
-    };
     let store = lock_grid_store();
-    let Ok(view) = store.view(descriptor) else {
+    let Ok(view) = store.window_view(GridId::new(window_grid_handle)) else {
         return false;
     };
 
@@ -4596,21 +4522,17 @@ fn move_grid_view_cursor(descriptor: GridViewDescriptor, position: GridPosition)
     }
 }
 
-/// Moves the UI cursor through a translated grid view.
+/// Moves the UI cursor through a registered window view.
 ///
 /// Grid ownership is restored before the cursor command is emitted.
-///
-/// # Safety
-///
-/// `view` must be null or point to an initialized `CGridView`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn grid_view_cursor_goto(
-    view: *const CGridView,
+pub extern "C" fn grid_view_cursor_goto(
+    window_grid_handle: VimHandleT,
     row: libc::c_int,
     column: libc::c_int,
 ) {
-    // SAFETY: The caller guarantees that `view` is null or initialized.
-    let Some(descriptor) = (unsafe { CGridView::descriptor(view) }) else {
+    let Ok(descriptor) = lock_grid_store().window_view_descriptor(GridId::new(window_grid_handle))
+    else {
         return;
     };
     move_grid_view_cursor(descriptor, GridPosition::new(row, column));
@@ -4656,14 +4578,10 @@ pub unsafe extern "C" fn grid_refresh_message_ui(
     }
 }
 
-/// Scrolls lines within a window grid view.
-///
-/// # Safety
-///
-/// `view` must be null or point to an initialized `CGridView`.
+/// Scrolls lines within a registered window view.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn grid_scroll_window_lines(
-    view: *const CGridView,
+pub extern "C" fn grid_scroll_window_lines(
+    window_grid_handle: VimHandleT,
     row: libc::c_int,
     line_count: libc::c_int,
     view_height: libc::c_int,
@@ -4673,19 +4591,18 @@ pub unsafe extern "C" fn grid_scroll_window_lines(
         return;
     };
 
-    // SAFETY: The caller guarantees that `view` is null or initialized.
-    let Some(descriptor) = (unsafe { CGridView::descriptor(view) }) else {
-        return;
-    };
-    let request = WindowLineScrollRequest {
-        row,
-        line_count,
-        view_origin: descriptor.offset,
-        view_size,
-    };
-
     let (target, command) = {
-        let Ok(mut grid) = StoredGridGuard::acquire(descriptor.target) else {
+        let mut store = lock_grid_store();
+        let Ok(descriptor) = store.window_view_descriptor(GridId::new(window_grid_handle)) else {
+            return;
+        };
+        let request = WindowLineScrollRequest {
+            row,
+            line_count,
+            view_origin: descriptor.offset,
+            view_size,
+        };
+        let Ok(grid) = store.grid_mut(descriptor.target) else {
             return;
         };
         let target = GridOutputTarget::new(grid.id(), grid.cols);
@@ -5041,36 +4958,22 @@ pub unsafe extern "C" fn grid_flush_message_scroll(
         .finish_flush(request.position, request.scrolled_lines);
 }
 
-/// Applies the complete allocation and validity transition for one window
-/// grid and updates its C-facing view.
+/// Applies the complete allocation, validity, and view transition for one
+/// window grid.
 ///
 /// Returns the configured grid identity and whether dedicated storage was
 /// allocated or resized. The window subsystem uses that result for border
 /// redraw and UI resize notification.
 ///
-/// # Safety
-///
-/// `view` must point to a valid, exclusively writable `CGridView`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn grid_configure_for_window(
+pub extern "C" fn grid_configure_for_window(
     grid_handle: VimHandleT,
-    view: *mut CGridView,
     rows: libc::c_int,
     columns: libc::c_int,
     use_dedicated_grid: bool,
     row_offset: libc::c_int,
     col_offset: libc::c_int,
 ) -> CWindowGridUpdate {
-    if view.is_null() {
-        return CWindowGridUpdate {
-            grid_handle: 0,
-            resized: false,
-            row_offset_changed: false,
-        };
-    }
-    // SAFETY: The caller guarantees that `view` references an initialized,
-    // exclusively accessible C representation.
-    let previous_row_offset = unsafe { (*view).row_offset };
     let mode = if use_dedicated_grid {
         let Some(size) = GridSize::try_new(rows, columns) else {
             return CWindowGridUpdate {
@@ -5084,28 +4987,37 @@ pub unsafe extern "C" fn grid_configure_for_window(
         WindowGridMode::Shared
     };
 
-    let update = {
+    let (update, previous_row_offset) = {
         let mut line_buffer = LineBufferGuard::acquire();
-        let Ok(mut rust_grid) = StoredGridGuard::acquire(GridId::new(grid_handle)) else {
+        let mut store = lock_grid_store();
+        let grid_id = GridId::new(grid_handle);
+        let previous_row_offset = store
+            .window_view_descriptor(grid_id)
+            .map(|descriptor| descriptor.offset.row)
+            .unwrap_or(0);
+        let update = {
+            let Ok(rust_grid) = store.grid_mut(grid_id) else {
+                return CWindowGridUpdate {
+                    grid_handle: 0,
+                    resized: false,
+                    row_offset_changed: false,
+                };
+            };
+            rust_grid.configure_window_view(
+                mode,
+                GridPosition::new(row_offset, col_offset),
+                &mut line_buffer,
+            )
+        };
+        if store.set_window_view(grid_id, update.view).is_err() {
             return CWindowGridUpdate {
                 grid_handle: 0,
                 resized: false,
                 row_offset_changed: false,
             };
-        };
-        rust_grid.configure_window_view(
-            mode,
-            GridPosition::new(row_offset, col_offset),
-            &mut line_buffer,
-        )
+        }
+        (update, previous_row_offset)
     };
-
-    // SAFETY: The caller guarantees exclusive writable access to `view`.
-    unsafe {
-        (*view).grid_handle = update.view.target.as_native_handle();
-        (*view).row_offset = update.view.offset.row;
-        (*view).col_offset = update.view.offset.column;
-    }
 
     CWindowGridUpdate::from_update(update, previous_row_offset)
 }
@@ -5339,26 +5251,42 @@ pub extern "C" fn schar_get_ascii(sc: VimSCharT) -> libc::c_char {
     schar_to_ascii(sc).unwrap_or(NULL_TERMINATOR) as libc::c_char
 }
 
-/// Translates grid-local offsets and returns the selected grid handle.
+/// Translates window-local offsets and returns the selected grid handle.
 ///
 /// # Safety
 ///
-/// `grid` must point to a valid `CGridView`. `row_offset` and `col_offset`
-/// must point to valid, properly aligned writable integers.
+/// `row_offset` and `col_offset` must point to valid, properly aligned
+/// writable integers.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn grid_view_translate(
-    grid: *const CGridView,
+    window_grid_handle: VimHandleT,
     row_offset: *mut libc::c_int,
     col_offset: *mut libc::c_int,
 ) -> VimHandleT {
+    assert!(
+        !row_offset.is_null() && !col_offset.is_null(),
+        "window-view position is nullptr"
+    );
+    let store = lock_grid_store();
+    let Ok(view) = store.window_view(GridId::new(window_grid_handle)) else {
+        return 0;
+    };
+
+    // SAFETY: The caller guarantees that both pointers reference initialized
+    // integers.
+    let position = unsafe { GridPosition::new(*row_offset, *col_offset) };
+    let position = view
+        .translated_position(position)
+        .expect("window-view coordinate translation overflowed");
+    let target = view.target.id();
+
+    // SAFETY: The caller guarantees exclusive writable access to both
+    // position outputs.
     unsafe {
-        assert!(!grid.is_null(), "view grid is nullptr");
-
-        *row_offset += (*grid).row_offset;
-        *col_offset += (*grid).col_offset;
-
-        (*grid).grid_handle
+        *row_offset = position.row;
+        *col_offset = position.column;
     }
+    target.as_native_handle()
 }
 
 /// Translates grid-local offsets through the adjusted message view.
@@ -5404,17 +5332,16 @@ pub unsafe extern "C" fn grid_message_view_translate(
 
 /// Translates a target-grid position into coordinates relative to a grid view.
 ///
-/// Returns `false` when the view does not resolve to a stored grid, either
-/// output pointer is null, or coordinate subtraction overflows.
+/// Returns `false` when the window has no registered view, either output
+/// pointer is null, or coordinate subtraction overflows.
 ///
 /// # Safety
 ///
-/// `view` must be null or point to an initialized `CGridView`. `row` and
-/// `column` must be null or point to valid, properly aligned writable
-/// integers.
+/// `row` and `column` must be null or point to valid, properly aligned
+/// writable integers.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn grid_view_translate_to_local(
-    view: *const CGridView,
+    window_grid_handle: VimHandleT,
     row: *mut libc::c_int,
     column: *mut libc::c_int,
 ) -> bool {
@@ -5422,12 +5349,8 @@ pub unsafe extern "C" fn grid_view_translate_to_local(
         return false;
     }
 
-    // SAFETY: The caller guarantees that `view` is null or initialized.
-    let Some(descriptor) = (unsafe { CGridView::descriptor(view) }) else {
-        return false;
-    };
     let store = lock_grid_store();
-    let Ok(view) = store.view(descriptor) else {
+    let Ok(view) = store.window_view(GridId::new(window_grid_handle)) else {
         return false;
     };
 
@@ -5457,15 +5380,11 @@ pub extern "C" fn grid_invalidate(grid_handle: VimHandleT) {
     }
 }
 
-/// Marks one row addressed through a grid view as invalid.
-///
-/// # Safety
-///
-/// `view` must be null or point to an initialized `CGridView`.
+/// Marks one row addressed through a registered window view as invalid.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn grid_view_invalidate_row(view: *const CGridView, row: libc::c_int) {
-    // SAFETY: The caller guarantees that `view` is null or initialized.
-    let Some(descriptor) = (unsafe { CGridView::descriptor(view) }) else {
+pub extern "C" fn grid_view_invalidate_row(window_grid_handle: VimHandleT, row: libc::c_int) {
+    let mut store = lock_grid_store();
+    let Ok(descriptor) = store.window_view_descriptor(GridId::new(window_grid_handle)) else {
         return;
     };
     let Some(row) = row
@@ -5475,7 +5394,7 @@ pub unsafe extern "C" fn grid_view_invalidate_row(view: *const CGridView, row: l
         return;
     };
 
-    if let Ok(mut grid) = StoredGridGuard::acquire(descriptor.target) {
+    if let Ok(grid) = store.grid_mut(descriptor.target) {
         grid.invalidate_row(row);
     }
 }
@@ -5488,12 +5407,11 @@ pub unsafe extern "C" fn grid_view_invalidate_row(view: *const CGridView, row: l
 ///
 /// # Safety
 ///
-/// `view` must be null or point to an initialized `CGridView`. `output` must
-/// point to valid, properly aligned writable `CGridCell` storage that does not
-/// alias the target grid.
+/// `output` must point to valid, properly aligned writable `CGridCell` storage
+/// that does not alias the target grid.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn grid_view_get_cell(
-    view: *const CGridView,
+    window_grid_handle: VimHandleT,
     expected_grid: VimHandleT,
     row: libc::c_int,
     column: libc::c_int,
@@ -5503,13 +5421,8 @@ pub unsafe extern "C" fn grid_view_get_cell(
         return false;
     }
 
-    // SAFETY: The caller guarantees that `view` is null or initialized.
-    let Some(descriptor) = (unsafe { CGridView::descriptor(view) }) else {
-        return false;
-    };
-
     let store = lock_grid_store();
-    let Ok(view) = store.view(descriptor) else {
+    let Ok(view) = store.window_view(GridId::new(window_grid_handle)) else {
         return false;
     };
     let Some(cell) = view.cell_for_grid(GridId::new(expected_grid), GridPosition::new(row, column))
@@ -5865,6 +5778,12 @@ mod tests {
 
     #[test]
     fn window_grid_updates_resolve_permanent_rust_storage() {
+        {
+            let mut store = lock_grid_store();
+            if store.grid(DEFAULT_GRID_ID).is_err() {
+                store.register_empty(DEFAULT_GRID_ID).unwrap();
+            }
+        }
         let mut cgrid = CScreenGrid::empty();
         // SAFETY: `cgrid` is valid, exclusively accessible, and empty.
         let assigned_handle = unsafe { grid_assign_handle(&raw mut cgrid) };
@@ -5874,25 +5793,18 @@ mod tests {
             assigned_handle
         );
         let grid_id = GridId::new(assigned_handle);
-        let mut view = CGridView {
-            grid_handle: 0,
-            row_offset: 0,
-            col_offset: 0,
-        };
-
-        // SAFETY: `view` is valid writable storage.
-        let shared_update =
-            unsafe { grid_configure_for_window(assigned_handle, &raw mut view, 0, 0, false, 3, 4) };
+        let shared_update = grid_configure_for_window(assigned_handle, 0, 0, false, 3, 4);
 
         assert_eq!(grid_id, GridId::new(assigned_handle));
         assert_eq!(shared_update.grid_handle, assigned_handle);
         assert!(!shared_update.resized);
         assert!(shared_update.row_offset_changed);
-        // SAFETY: `view` remains initialized for both queries.
-        assert!(unsafe { grid_view_has_target(&raw const view) });
-        assert!(unsafe { grid_view_targets_default(&raw const view) });
-        assert_eq!(view.grid_handle, DEFAULT_GRID_HANDLE);
-        assert_eq!((view.row_offset, view.col_offset), (3, 4));
+        assert!(grid_view_has_target(assigned_handle));
+        assert!(grid_view_targets_default(assigned_handle));
+        assert_eq!(
+            lock_grid_store().window_view_descriptor(grid_id).unwrap(),
+            GridViewDescriptor::new(DEFAULT_GRID_ID, GridPosition::new(3, 4))
+        );
         assert_eq!(cgrid.handle, assigned_handle);
         assert!(cgrid.chars.is_null());
         assert!(cgrid.attrs.is_null());
@@ -5904,18 +5816,16 @@ mod tests {
             assert!(!grid.is_allocated());
         }
 
-        // SAFETY: The previous grid borrow was dropped and `view` is valid
-        // writable storage.
-        let dedicated_update =
-            unsafe { grid_configure_for_window(assigned_handle, &raw mut view, 2, 3, true, 1, 2) };
+        let dedicated_update = grid_configure_for_window(assigned_handle, 2, 3, true, 1, 2);
 
         assert_eq!(dedicated_update.grid_handle, assigned_handle);
         assert!(dedicated_update.resized);
         assert!(dedicated_update.row_offset_changed);
-        // SAFETY: `view` remains initialized.
-        assert!(!unsafe { grid_view_targets_default(&raw const view) });
-        assert_eq!(view.grid_handle, assigned_handle);
-        assert_eq!((view.row_offset, view.col_offset), (1, 2));
+        assert!(!grid_view_targets_default(assigned_handle));
+        assert_eq!(
+            lock_grid_store().window_view_descriptor(grid_id).unwrap(),
+            GridViewDescriptor::new(grid_id, GridPosition::new(1, 2))
+        );
 
         {
             let mut grid = StoredGridGuard::acquire(grid_id).unwrap();
@@ -5932,6 +5842,10 @@ mod tests {
 
         grid_free(assigned_handle);
         assert!(StoredGridGuard::acquire(grid_id).is_err());
+        assert_eq!(
+            lock_grid_store().window_view_descriptor(grid_id),
+            Err(store::GridStoreError::MissingWindowView(grid_id))
+        );
     }
 
     #[test]

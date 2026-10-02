@@ -1494,7 +1494,7 @@ retnomove:
       }
     }
     if (grid != DEFAULT_GRID_HANDLE) {
-      bool translated = grid_view_translate_to_local(&curwin->w_grid, &row, &col);
+      bool translated = grid_view_translate_to_local(curwin->w_grid_handle, &row, &col);
       assert(translated);
     }
 
@@ -1854,7 +1854,7 @@ static win_T *mouse_find_grid_win(int *gridp, int *rowp, int *colp)
     win_T *wp = win_find_by_grid_handle(*gridp);
     if (wp && grid_is_allocated(wp->w_grid_handle)
         && !(wp->w_floating && !wp->w_config.mouse)) {
-      bool translated = grid_view_translate_to_local(&wp->w_grid, rowp, colp);
+      bool translated = grid_view_translate_to_local(wp->w_grid_handle, rowp, colp);
       assert(translated);
       *rowp = MIN(*rowp, wp->w_view_height - 1);
       *colp = MIN(*colp, wp->w_view_width - 1);
@@ -1889,7 +1889,7 @@ static win_T *mouse_find_grid_win(int *gridp, int *rowp, int *colp)
         *gridp = hit.grid_handle;
         *rowp = hit.row;
         *colp = hit.column;
-        bool translated = grid_view_translate_to_local(&wp->w_grid, rowp, colp);
+        bool translated = grid_view_translate_to_local(wp->w_grid_handle, rowp, colp);
         assert(translated);
         return wp;
       }
@@ -2014,7 +2014,7 @@ static void mouse_check_grid(colnr_T *vcolp, int *flagsp)
     return;
   }
   GridCell cell;
-  if (!grid_view_get_cell(&curwin->w_grid, click_grid, click_row, click_col, &cell)) {
+  if (!grid_view_get_cell(curwin->w_grid_handle, click_grid, click_row, click_col, &cell)) {
     return;
   }
 

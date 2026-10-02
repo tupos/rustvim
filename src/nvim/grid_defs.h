@@ -83,13 +83,6 @@ typedef enum {
 #define SCREEN_GRID_INIT { 0, NULL, NULL, NULL, NULL, NULL, 0, 0, false, \
                            false }
 
-/// Represents the position of a viewport within an identified screen grid.
-typedef struct {
-  handle_T grid_handle;
-  int row_offset;
-  int col_offset;
-} GridView;
-
 typedef struct {
   int args[3];
   int icell;

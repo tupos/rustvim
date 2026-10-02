@@ -290,7 +290,7 @@ static void win_redr_stl_expr(win_T *wp, bool draw_winbar, bool draw_ruler, bool
     opt_scope = ((*wp->w_p_wbr != NUL) ? OPT_LOCAL : 0);
     row = -1;  // row zero is first row of text
     col = 0;
-    grid_handle = grid_view_translate(&wp->w_grid, &row, &col);
+    grid_handle = grid_view_translate(wp->w_grid_handle, &row, &col);
 
     if (row < 0) {
       goto theend;

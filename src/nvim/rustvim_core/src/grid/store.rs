@@ -23,6 +23,10 @@ pub(crate) enum GridStoreError {
     #[error("grid identity {0} is not registered")]
     UnknownGrid(GridId),
 
+    /// The requested window grid has no registered view.
+    #[error("window grid identity {0} has no registered view")]
+    MissingWindowView(GridId),
+
     /// A removed identity cannot be reused by another grid.
     #[error("grid identity {0} has been retired")]
     RetiredIdentity(GridId),
@@ -38,6 +42,7 @@ pub(crate) type GridStoreResult<T> = Result<T, GridStoreError>;
 #[derive(Default)]
 pub(crate) struct GridStore {
     grids: HashMap<GridId, ScreenGrid>,
+    views: HashMap<GridId, GridViewDescriptor>,
     retired: HashSet<GridId>,
 }
 
@@ -95,6 +100,34 @@ impl GridStore {
         ))
     }
 
+    /// Registers or replaces the view owned by one window grid.
+    pub(super) fn set_window_view(
+        &mut self,
+        owner: GridId,
+        descriptor: GridViewDescriptor,
+    ) -> GridStoreResult<()> {
+        self.grid(owner)?;
+        self.grid(descriptor.target)?;
+        self.views.insert(owner, descriptor);
+        Ok(())
+    }
+
+    /// Returns the persistent view descriptor owned by one window grid.
+    pub(super) fn window_view_descriptor(
+        &self,
+        owner: GridId,
+    ) -> GridStoreResult<GridViewDescriptor> {
+        self.views
+            .get(&owner)
+            .copied()
+            .ok_or(GridStoreError::MissingWindowView(owner))
+    }
+
+    /// Resolves one window-owned descriptor into a borrowed view.
+    pub(super) fn window_view(&self, owner: GridId) -> GridStoreResult<GridView<'_>> {
+        self.view(self.window_view_descriptor(owner)?)
+    }
+
     /// Mutably borrows one registered grid.
     pub(crate) fn grid_mut(&mut self, grid_id: GridId) -> GridStoreResult<&mut ScreenGrid> {
         self.grids
@@ -108,6 +141,9 @@ impl GridStore {
             .grids
             .remove(&grid_id)
             .ok_or(GridStoreError::UnknownGrid(grid_id))?;
+        self.views.remove(&grid_id);
+        self.views
+            .retain(|_, descriptor| descriptor.target != grid_id);
         let newly_retired = self.retired.insert(grid_id);
         debug_assert!(
             newly_retired,
@@ -194,6 +230,61 @@ mod tests {
 
         assert_eq!(view.target.id(), grid_id);
         assert_eq!(view.offset, GridPosition::new(2, 3));
+    }
+
+    #[test]
+    fn stores_window_views_by_owner_identity() {
+        let mut store = GridStore::new();
+        let default_grid_id = GridId::new(1);
+        let first_owner = GridId::new(7);
+        let second_owner = GridId::new(8);
+        store.register(grid_with_id(1)).unwrap();
+        store.register(grid_with_id(7)).unwrap();
+        store.register(grid_with_id(8)).unwrap();
+        let first = GridViewDescriptor::new(default_grid_id, GridPosition::new(2, 3));
+        let second = GridViewDescriptor::new(default_grid_id, GridPosition::new(4, 5));
+
+        store.set_window_view(first_owner, first).unwrap();
+        store.set_window_view(second_owner, second).unwrap();
+
+        assert_eq!(store.window_view_descriptor(first_owner), Ok(first));
+        assert_eq!(store.window_view_descriptor(second_owner), Ok(second));
+        assert_eq!(
+            store.window_view(first_owner).unwrap().offset,
+            GridPosition::new(2, 3)
+        );
+    }
+
+    #[test]
+    fn removing_a_grid_removes_owned_and_targeting_views() {
+        let mut store = GridStore::new();
+        let target = GridId::new(7);
+        let owner = GridId::new(8);
+        store.register(grid_with_id(7)).unwrap();
+        store.register(grid_with_id(8)).unwrap();
+        store
+            .set_window_view(
+                target,
+                GridViewDescriptor::new(target, GridPosition::new(0, 0)),
+            )
+            .unwrap();
+        store
+            .set_window_view(
+                owner,
+                GridViewDescriptor::new(target, GridPosition::new(1, 2)),
+            )
+            .unwrap();
+
+        store.remove(target).unwrap();
+
+        assert_eq!(
+            store.window_view_descriptor(target),
+            Err(GridStoreError::MissingWindowView(target))
+        );
+        assert_eq!(
+            store.window_view_descriptor(owner),
+            Err(GridStoreError::MissingWindowView(owner))
+        );
     }
 
     #[test]

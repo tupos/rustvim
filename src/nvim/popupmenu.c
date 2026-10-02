@@ -351,7 +351,7 @@ void pum_display(pumitem_T *array, int size, int selected, bool array_changed, i
 
     if (target_win != NULL) {
       // ext_popupmenu should always anchor to the default grid when multigrid is disabled
-      pum_anchor_grid = grid_view_translate(&target_win->w_grid, &pum_win_row, &cursor_col);
+      pum_anchor_grid = grid_view_translate(target_win->w_grid_handle, &pum_win_row, &cursor_col);
       if (pum_anchor_grid != DEFAULT_GRID_HANDLE) {
         pum_win_row += target_win->w_winrow;
         cursor_col += target_win->w_wincol;
@@ -1652,7 +1652,7 @@ void pum_make_popup(const char *path_name, int use_mouse_pos)
     mouse_col = curwin->w_p_rl ? curwin->w_view_width - curwin->w_wcol - 1
                                : curwin->w_wcol;
     handle_T view_grid =
-      grid_view_translate(&curwin->w_grid, &mouse_row, &mouse_col);
+      grid_view_translate(curwin->w_grid_handle, &mouse_row, &mouse_col);
     if (ui_has(kUIMultigrid)) {
       mouse_grid = view_grid;
     } else if (view_grid != DEFAULT_GRID_HANDLE) {

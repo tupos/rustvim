@@ -293,7 +293,7 @@ void win_config_float(win_T *wp, WinConfig fconfig)
     if (parent) {
       row += parent->w_winrow;
       col += parent->w_wincol;
-      grid_view_translate(&parent->w_grid, &row, &col);
+      grid_view_translate(parent->w_grid_handle, &row, &col);
       if (wp->w_config.bufpos.lnum >= 0) {
         pos_T pos = { MIN(wp->w_config.bufpos.lnum + 1, parent->w_buffer->b_ml.ml_line_count),
                       wp->w_config.bufpos.col, 0 };
