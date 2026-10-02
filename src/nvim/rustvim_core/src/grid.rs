@@ -4479,11 +4479,12 @@ pub unsafe extern "C" fn grid_view_requires_redraw(view: *const CGridView) -> bo
     let Some(descriptor) = (unsafe { CGridView::descriptor(view) }) else {
         return true;
     };
-    let Ok(target) = StoredGridGuard::acquire(descriptor.target) else {
+    let store = lock_grid_store();
+    let Ok(view) = store.view(descriptor) else {
         return true;
     };
 
-    GridView::new(&target, descriptor.offset).requires_redraw()
+    view.requires_redraw()
 }
 
 /// Reports whether a grid view's target has `width` columns.
@@ -4500,11 +4501,12 @@ pub unsafe extern "C" fn grid_view_width_matches_target(
     let Some(descriptor) = (unsafe { CGridView::descriptor(view) }) else {
         return false;
     };
-    let Ok(target) = StoredGridGuard::acquire(descriptor.target) else {
+    let store = lock_grid_store();
+    let Ok(view) = store.view(descriptor) else {
         return false;
     };
 
-    GridView::new(&target, descriptor.offset).width_matches_target(width)
+    view.width_matches_target(width)
 }
 
 /// Moves the UI cursor through a translated grid view.
@@ -4525,10 +4527,11 @@ pub unsafe extern "C" fn grid_view_cursor_goto(
         return;
     };
     let output = {
-        let Ok(target) = StoredGridGuard::acquire(descriptor.target) else {
+        let store = lock_grid_store();
+        let Ok(view) = store.view(descriptor) else {
             return;
         };
-        GridView::new(&target, descriptor.offset).plan_cursor_move(GridPosition::new(row, column))
+        view.plan_cursor_move(GridPosition::new(row, column))
     };
     if let Some((target, command)) = output {
         target.emit(command);
@@ -5317,10 +5320,10 @@ pub unsafe extern "C" fn grid_view_translate_to_local(
     let Some(descriptor) = (unsafe { CGridView::descriptor(view) }) else {
         return false;
     };
-    let Ok(target) = StoredGridGuard::acquire(descriptor.target) else {
+    let store = lock_grid_store();
+    let Ok(view) = store.view(descriptor) else {
         return false;
     };
-    let view = GridView::new(&target, descriptor.offset);
 
     // SAFETY: Both output pointers were checked for null, and the caller
     // guarantees that they reference valid integers.
@@ -5399,10 +5402,10 @@ pub unsafe extern "C" fn grid_view_get_cell(
         return false;
     };
 
-    let Ok(target) = StoredGridGuard::acquire(descriptor.target) else {
+    let store = lock_grid_store();
+    let Ok(view) = store.view(descriptor) else {
         return false;
     };
-    let view = GridView::new(&target, descriptor.offset);
     let Some(cell) = view.cell_for_grid(GridId::new(expected_grid), GridPosition::new(row, column))
     else {
         return false;

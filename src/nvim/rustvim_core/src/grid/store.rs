@@ -6,7 +6,7 @@ use std::{
     sync::{LazyLock, Mutex, MutexGuard},
 };
 
-use super::{GridId, ScreenGrid};
+use super::{GridId, GridView, GridViewDescriptor, ScreenGrid};
 
 /// Failures produced while managing permanently owned screen grids.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
@@ -87,6 +87,14 @@ impl GridStore {
             .ok_or(GridStoreError::UnknownGrid(grid_id))
     }
 
+    /// Resolves a descriptor into a view borrowing its registered target.
+    pub(super) fn view(&self, descriptor: GridViewDescriptor) -> GridStoreResult<GridView<'_>> {
+        Ok(GridView::new(
+            self.grid(descriptor.target)?,
+            descriptor.offset,
+        ))
+    }
+
     /// Mutably borrows one registered grid.
     pub(crate) fn grid_mut(&mut self, grid_id: GridId) -> GridStoreResult<&mut ScreenGrid> {
         self.grids
@@ -154,7 +162,7 @@ impl DerefMut for StoredGridGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::grid::LineBuffer;
+    use crate::grid::{GridPosition, LineBuffer};
 
     fn grid_with_id(grid_id: i32) -> ScreenGrid {
         let mut line_buffer = LineBuffer::new(2);
@@ -172,6 +180,20 @@ mod tests {
         store.grid_mut(grid_id).unwrap().chars[0] = 42;
 
         assert_eq!(store.grid(grid_id).unwrap().chars, [42, 0x20]);
+    }
+
+    #[test]
+    fn resolves_descriptors_into_borrowed_views() {
+        let mut store = GridStore::new();
+        let grid_id = GridId::new(7);
+        store.register(grid_with_id(7)).unwrap();
+
+        let view = store
+            .view(GridViewDescriptor::new(grid_id, GridPosition::new(2, 3)))
+            .unwrap();
+
+        assert_eq!(view.target.id(), grid_id);
+        assert_eq!(view.offset, GridPosition::new(2, 3));
     }
 
     #[test]
