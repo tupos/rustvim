@@ -187,7 +187,9 @@ bool msg_use_grid(void)
 
 void msg_grid_validate(void)
 {
-  msg_grid_handle = grid_assign_handle(&msg_grid);
+  if (msg_grid_handle == 0) {
+    msg_grid_handle = grid_assign_handle();
+  }
   bool should_alloc = msg_use_grid();
   int max_rows = Rows - (int)p_ch;
   MessageGridTransition transition = grid_prepare_for_messages(

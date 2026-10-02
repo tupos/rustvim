@@ -5506,7 +5506,7 @@ win_T *win_alloc(win_T *after, bool hidden)
   new_wp->handle = ++last_win_id;
   pmap_put(int)(&window_handles, new_wp->handle, new_wp);
 
-  new_wp->w_grid_handle = grid_assign_handle(&new_wp->w_grid_alloc);
+  new_wp->w_grid_handle = grid_assign_handle();
 
   // Init w: variables.
   new_wp->w_vars = tv_dict_alloc();
@@ -5701,10 +5701,10 @@ void win_free_grid(win_T *wp, bool reinit)
     ui_call_grid_destroy(wp->w_grid_handle);
   }
   grid_free(wp->w_grid_handle);
+  wp->w_grid_handle = 0;
   if (reinit) {
     // if a float is turned into a split, the grid data structure will be reused
-    CLEAR_FIELD(wp->w_grid_alloc);
-    wp->w_grid_handle = grid_assign_handle(&wp->w_grid_alloc);
+    wp->w_grid_handle = grid_assign_handle();
   }
 }
 

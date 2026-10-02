@@ -4,7 +4,6 @@
 
 #include "nvim/buffer_defs.h"
 #include "nvim/eval/typval_defs.h"  // IWYU pragma: keep
-#include "nvim/grid_defs.h"
 #include "nvim/macros_defs.h"
 #include "nvim/menu_defs.h"  // IWYU pragma: keep
 #include "nvim/types_defs.h"  // IWYU pragma: keep
@@ -20,7 +19,6 @@ typedef struct {
   int pum_user_kind_hlattr;  ///< highlight attribute for kind
 } pumitem_T;
 
-EXTERN ScreenGrid pum_grid INIT( = SCREEN_GRID_INIT);
 EXTERN handle_T pum_grid_handle INIT( = 0);
 
 /// state for pum_ext_select_item.

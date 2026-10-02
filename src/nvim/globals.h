@@ -95,11 +95,6 @@ EXTERN struct nvim_stats_s {
 #define NO_BUFFERS      1       // not all buffers loaded yet
 //                      0          not starting anymore
 
-// Number of Rows and Columns in the screen.
-// Note: Use default_grid.rows and default_grid.cols to access items in
-// default_grid.chars[]. They may have different values when the screen
-// wasn't (re)allocated yet after setting Rows or Columns (e.g., when starting
-// up).
 #define DFLT_COLS       80              // default value for 'columns'
 #define DFLT_ROWS       24              // default value for 'lines'
 EXTERN int Rows INIT( = DFLT_ROWS);     // nr of rows in the screen

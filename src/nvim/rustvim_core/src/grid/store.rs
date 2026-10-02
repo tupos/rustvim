@@ -151,6 +151,13 @@ impl GridStore {
         );
         Ok(grid)
     }
+
+    /// Releases every grid, view, and retired identity during shutdown.
+    pub(crate) fn clear(&mut self) {
+        self.grids.clear();
+        self.views.clear();
+        self.retired.clear();
+    }
 }
 
 static GRID_STORE: LazyLock<Mutex<GridStore>> = LazyLock::new(|| Mutex::new(GridStore::new()));

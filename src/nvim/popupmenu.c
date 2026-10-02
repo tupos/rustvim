@@ -655,7 +655,9 @@ void pum_redraw(void)
     }
   }
   bool blending = p_pb > 0 || fconfig.shadow;
-  pum_grid_handle = grid_assign_handle(&pum_grid);
+  if (pum_grid_handle == 0) {
+    pum_grid_handle = grid_assign_handle();
+  }
 
   pum_left_col = pum_col - col_off;
   pum_right_col = pum_left_col + grid_width;

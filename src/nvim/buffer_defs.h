@@ -5,7 +5,6 @@
 #include <stdio.h>
 
 #include "nvim/arglist_defs.h"
-#include "nvim/grid_defs.h"
 #include "nvim/mapping_defs.h"
 #include "nvim/marktree_defs.h"
 #include "nvim/memline_defs.h"
@@ -1382,7 +1381,6 @@ struct window_S {
   int w_tagstacklen;                    // number of tags on stack
 
   handle_T w_grid_handle;               // stable identity of this window's allocated grid
-  ScreenGrid w_grid_alloc;              // the grid specific to the window
   bool w_pos_changed;                   // true if window position changed
   bool w_floating;                      ///< whether the window is floating
   WinKind w_kind;                       ///< mutually-exclusive window role

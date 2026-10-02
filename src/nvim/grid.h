@@ -11,15 +11,6 @@
 
 #define DEFAULT_GRID_HANDLE 1  // handle for the default_grid
 
-/// By default, all windows are drawn on a single rectangular grid, represented by
-/// this ScreenGrid instance. In multigrid mode each window will have its own
-/// grid, then this is only used for global screen elements that hasn't been
-/// externalized.
-///
-/// Note: before the screen is initialized and when out of memory these can be
-/// NULL.
-EXTERN ScreenGrid default_grid INIT( = SCREEN_GRID_INIT);
-
 /// While resizing the screen this flag is set.
 EXTERN bool resizing_screen INIT( = 0);
 
@@ -213,7 +204,7 @@ extern void grid_put_window_line(handle_T window_grid_handle,
 extern void grid_draw_border(handle_T grid_handle, const GridBorderConfig *config, const int *adj,
                              int winbl, int win_hl_attr_normal);
 
-extern handle_T grid_assign_handle(ScreenGrid *grid);
+extern handle_T grid_assign_handle(void);
 
 extern void grid_ins_lines(handle_T grid_handle, int row, int line_count, int end, int col,
                            int width);
