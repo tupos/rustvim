@@ -674,7 +674,7 @@ static void redraw_wildmenu(expand_T *xp, int num_matches, char **matches, int m
     if (wild_menu_showing == WM_SCROLLED) {
       grid_message_view_line_start(row);
     } else {
-      grid_line_start(&default_gridview, row);
+      grid_line_start_grid(DEFAULT_GRID_HANDLE, row, 0);
     }
 
     grid_line_puts(0, buf, -1, attr);

@@ -120,7 +120,7 @@ void win_redr_status(win_T *wp)
       fillchar = wp->w_p_fcs_chars.vert;
     }
     int attr = win_hl_attr(wp, (int)group);
-    grid_line_start(&default_gridview, W_ENDROW(wp));
+    grid_line_start_grid(DEFAULT_GRID_HANDLE, W_ENDROW(wp), 0);
     grid_line_put_schar(W_ENDCOL(wp), fillchar, attr);
     grid_line_flush();
   }
@@ -614,7 +614,7 @@ void draw_tabline(void)
     int col = 0;
     win_T *cwp;
     int wincount;
-    grid_line_start(&default_gridview, 0);
+    grid_line_start_grid(DEFAULT_GRID_HANDLE, 0, 0);
     FOR_ALL_TABS(tp) {
       tabcount++;
     }

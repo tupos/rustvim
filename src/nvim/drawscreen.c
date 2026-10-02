@@ -537,7 +537,7 @@ int update_screen(void)
 
   // might need to clear space on default_grid for the message area.
   if (type == UPD_NOT_VALID && clear_cmdline && !ui_has(kUIMessages)) {
-    grid_clear(&default_gridview, Rows - (int)p_ch, Rows, 0, Columns, 0);
+    grid_clear_region(DEFAULT_GRID_HANDLE, Rows - (int)p_ch, Rows, 0, Columns, 0);
   }
 
   ui_comp_set_screen_valid(true);
@@ -1220,7 +1220,7 @@ static void draw_vsep_win(win_T *wp)
 
   // draw the vertical separator right of this window
   for (int row = wp->w_winrow; row < W_ENDROW(wp); row++) {
-    grid_line_start(&default_gridview, row);
+    grid_line_start_grid(DEFAULT_GRID_HANDLE, row, 0);
     grid_line_put_schar(W_ENDCOL(wp), wp->w_p_fcs_chars.vert, win_hl_attr(wp, HLF_C));
     grid_line_flush();
   }
@@ -1234,7 +1234,7 @@ static void draw_hsep_win(win_T *wp)
   }
 
   // draw the horizontal separator below this window
-  grid_line_start(&default_gridview, W_ENDROW(wp));
+  grid_line_start_grid(DEFAULT_GRID_HANDLE, W_ENDROW(wp), 0);
   grid_line_fill(wp->w_wincol, W_ENDCOL(wp), wp->w_p_fcs_chars.horiz, win_hl_attr(wp, HLF_C));
   grid_line_flush();
 }
@@ -1299,22 +1299,22 @@ static void draw_sep_connectors_win(win_T *wp)
   bool bot_right = !(win_at_bottom || win_at_right);
 
   if (top_left) {
-    grid_line_start(&default_gridview, wp->w_winrow - 1);
+    grid_line_start_grid(DEFAULT_GRID_HANDLE, wp->w_winrow - 1, 0);
     grid_line_put_schar(wp->w_wincol - 1, get_corner_sep_connector(wp, WC_TOP_LEFT), hl);
     grid_line_flush();
   }
   if (top_right) {
-    grid_line_start(&default_gridview, wp->w_winrow - 1);
+    grid_line_start_grid(DEFAULT_GRID_HANDLE, wp->w_winrow - 1, 0);
     grid_line_put_schar(W_ENDCOL(wp), get_corner_sep_connector(wp, WC_TOP_RIGHT), hl);
     grid_line_flush();
   }
   if (bot_left) {
-    grid_line_start(&default_gridview, W_ENDROW(wp));
+    grid_line_start_grid(DEFAULT_GRID_HANDLE, W_ENDROW(wp), 0);
     grid_line_put_schar(wp->w_wincol - 1, get_corner_sep_connector(wp, WC_BOTTOM_LEFT), hl);
     grid_line_flush();
   }
   if (bot_right) {
-    grid_line_start(&default_gridview, W_ENDROW(wp));
+    grid_line_start_grid(DEFAULT_GRID_HANDLE, W_ENDROW(wp), 0);
     grid_line_put_schar(W_ENDCOL(wp), get_corner_sep_connector(wp, WC_BOTTOM_RIGHT), hl);
     grid_line_flush();
   }

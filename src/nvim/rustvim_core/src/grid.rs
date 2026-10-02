@@ -3133,6 +3133,20 @@ pub unsafe extern "C" fn grid_clear(
     clear_grid_view(descriptor, start_row, end_row, start_col, end_col, attr);
 }
 
+/// Clears a rectangular region of an identified grid.
+#[unsafe(no_mangle)]
+pub extern "C" fn grid_clear_region(
+    grid_handle: VimHandleT,
+    start_row: libc::c_int,
+    end_row: libc::c_int,
+    start_col: libc::c_int,
+    end_col: libc::c_int,
+    attr: libc::c_int,
+) {
+    let descriptor = GridViewDescriptor::new(GridId::new(grid_handle), GridPosition::new(0, 0));
+    clear_grid_view(descriptor, start_row, end_row, start_col, end_col, attr);
+}
+
 /// Clears a rectangular region through the adjusted message view.
 #[unsafe(no_mangle)]
 pub extern "C" fn grid_message_view_clear(
@@ -3447,13 +3461,6 @@ impl CGridView {
         let grid_id = (view.grid_handle > 0).then_some(GridId::new(view.grid_handle))?;
         let offset = GridPosition::new(view.row_offset, view.col_offset);
         Some(GridViewDescriptor::new(grid_id, offset))
-    }
-
-    /// Initializes a process-global view of the shared default grid.
-    fn initialize_default(&mut self) {
-        self.grid_handle = DEFAULT_GRID_HANDLE;
-        self.row_offset = 0;
-        self.col_offset = 0;
     }
 }
 
@@ -4690,23 +4697,15 @@ pub unsafe extern "C" fn grid_scroll_window_lines(
     }
 }
 
-/// Assigns and permanently stores the default screen grid and initializes its
-/// process-global C view.
-///
-/// # Safety
-///
-/// `default_view` must point to an exclusively accessible `CGridView`.
+/// Assigns and permanently stores the default screen grid.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn grid_initialize_default(default_view: *mut CGridView) {
+pub extern "C" fn grid_initialize_default() {
     // SAFETY: Initialization has exclusive main-thread access to the empty
     // process-global default-grid representation.
     let cgrid =
         unsafe { (&raw mut default_grid).as_mut() }.expect("default grid is statically allocated");
     register_empty_grid(cgrid, DEFAULT_GRID_ID);
 
-    // SAFETY: The caller guarantees exclusive access to a valid view.
-    let default_view = unsafe { default_view.as_mut() }.expect("default grid view is nullptr");
-    default_view.initialize_default();
     *lock_message_grid_state() = MessageGridState::new();
 }
 

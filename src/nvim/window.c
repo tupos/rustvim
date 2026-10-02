@@ -7235,7 +7235,7 @@ void command_height(void)
       msg_grid_validate();
       grid_message_view_clear(cmdline_row, Rows, 0, Columns, 0);
     } else {
-      grid_clear(&default_gridview, cmdline_row, Rows, 0, Columns, 0);
+      grid_clear_region(DEFAULT_GRID_HANDLE, cmdline_row, Rows, 0, Columns, 0);
     }
     msg_row = cmdline_row;
   }

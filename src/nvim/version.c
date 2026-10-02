@@ -4139,7 +4139,11 @@ static void do_intro_line(int row, char *mesg, bool colon, bool is_logo)
     col = 0;
   }
 
-  grid_line_start((!colon && ui_has(kUIMultigrid)) ? &firstwin->w_grid : &default_gridview, row);
+  if (!colon && ui_has(kUIMultigrid)) {
+    grid_line_start(&firstwin->w_grid, row);
+  } else {
+    grid_line_start_grid(DEFAULT_GRID_HANDLE, row, 0);
+  }
 
   // Compute special highlighting attributes
   int id_attr = syn_id2attr(syn_name2id("Identifier"));
