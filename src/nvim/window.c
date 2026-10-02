@@ -7231,12 +7231,12 @@ void command_height(void)
 
   // Clear the cmdheight area.
   if (msg_scrolled == 0 && full_screen) {
-    GridView *grid = &default_gridview;
     if (!ui_has(kUIMessages)) {
       msg_grid_validate();
-      grid = &msg_grid_adj;
+      grid_message_view_clear(cmdline_row, Rows, 0, Columns, 0);
+    } else {
+      grid_clear(&default_gridview, cmdline_row, Rows, 0, Columns, 0);
     }
-    grid_clear(grid, cmdline_row, Rows, 0, Columns, 0);
     msg_row = cmdline_row;
   }
 

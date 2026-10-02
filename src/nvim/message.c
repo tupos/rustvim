@@ -176,8 +176,7 @@ static void ui_ext_msg_set_pos(int row, bool scrolled)
 
 void msg_grid_set_pos(int row, bool scrolled)
 {
-  grid_set_message_position(msg_grid_handle, &msg_grid_adj, row, scrolled,
-                            ui_ext_msg_set_pos);
+  grid_set_message_position(msg_grid_handle, row, scrolled, ui_ext_msg_set_pos);
   msg_grid_pos = row;
 }
 
@@ -205,18 +204,18 @@ void msg_grid_validate(void)
                      curwin ? curwin->w_grid_handle : 0);
     ui_call_grid_resize(msg_grid_handle, Columns, Rows);
 
-    grid_activate_message_view(&msg_grid_adj, msg_grid_handle);
+    grid_activate_message_view(msg_grid_handle);
   } else if (transition == kMessageGridReleaseRequired) {
     ui_comp_remove_grid(msg_grid_handle);
     grid_release_message(msg_grid_handle);
     ui_call_grid_destroy(msg_grid_handle);
-    grid_reset_message_view(&msg_grid_adj);
+    grid_reset_message_view();
     redraw_cmdline = true;
   } else if (should_alloc && !msg_scrolled && msg_grid_pos != max_rows) {
     int diff = msg_grid_pos - max_rows;
     msg_grid_set_pos(max_rows, false);
     if (diff > 0) {
-      grid_clear(&msg_grid_adj, Rows - diff, Rows, 0, Columns, HL_ATTR(HLF_MSG));
+      grid_message_view_clear(Rows - diff, Rows, 0, Columns, HL_ATTR(HLF_MSG));
     }
   }
 
@@ -2506,7 +2505,7 @@ static void msg_puts_display(const char *str, int maxlen, int hl_id, int recurse
       if (msg_row_pending >= 0) {
         msg_line_flush();
       }
-      grid_line_start(&msg_grid_adj, msg_row);
+      grid_message_view_line_start(msg_row);
       msg_row_pending = msg_row;
     }
 
@@ -2578,7 +2577,7 @@ void msg_cursor_goto(int row, int col)
   if (cmdmsg_rl) {
     col = Columns - 1 - col;
   }
-  grid_view_cursor_goto(&msg_grid_adj, row, col);
+  grid_message_view_cursor_goto(row, col);
 }
 
 /// @return  true when ":filter pattern" was used and "msg" does not match
@@ -2610,7 +2609,7 @@ void msg_scroll_up(bool may_throttle, bool zerocmd, bool discount_first_scroll)
   grid_scroll_message_up(msg_grid_handle, msg_grid_pos,
                          may_throttle && msg_do_throttle(), zerocmd,
                          discount_first_scroll, msg_grid_set_pos);
-  grid_clear(&msg_grid_adj, Rows - 1, Rows, 0, Columns, HL_ATTR(HLF_MSG));
+  grid_message_view_clear(Rows - 1, Rows, 0, Columns, HL_ATTR(HLF_MSG));
 }
 
 /// Send throttled message output to UI clients
@@ -3120,14 +3119,14 @@ static bool do_more_prompt(int typed_char)
 
           if (toscroll == -1 && !to_redraw) {
             grid_ins_lines(msg_grid_handle, 0, 1, Rows, 0, Columns);
-            grid_clear(&msg_grid_adj, 0, 1, 0, Columns, HL_ATTR(HLF_MSG));
+            grid_message_view_clear(0, 1, 0, Columns, HL_ATTR(HLF_MSG));
             // display line at top
             disp_sb_line(0, mp);
           } else {
             // redisplay all lines
             // TODO(bfredl): this case is not optimized (though only concerns
             // event fragmentation, not unnecessary scroll events).
-            grid_clear(&msg_grid_adj, 0, Rows, 0, Columns, HL_ATTR(HLF_MSG));
+            grid_message_view_clear(0, Rows, 0, Columns, HL_ATTR(HLF_MSG));
             for (int i = 0; mp != NULL && i < Rows - 1; i++) {
               mp = disp_sb_line(i, mp);
               msg_scrolled++;
@@ -3147,7 +3146,7 @@ static bool do_more_prompt(int typed_char)
           // scroll up, display line at bottom
           msg_scroll_up(true, false, true);
           inc_msg_scrolled();
-          grid_clear(&msg_grid_adj, Rows - 2, Rows - 1, 0, Columns, HL_ATTR(HLF_MSG));
+          grid_message_view_clear(Rows - 2, Rows - 1, 0, Columns, HL_ATTR(HLF_MSG));
           mp_last = disp_sb_line(Rows - 2, mp_last);
           toscroll--;
         }
@@ -3155,7 +3154,7 @@ static bool do_more_prompt(int typed_char)
 
       if (toscroll <= 0) {
         // displayed the requested text, more prompt again
-        grid_clear(&msg_grid_adj, Rows - 1, Rows, 0, Columns, HL_ATTR(HLF_MSG));
+        grid_message_view_clear(Rows - 1, Rows, 0, Columns, HL_ATTR(HLF_MSG));
         msg_moremsg(false);
         continue;
       }
@@ -3168,7 +3167,7 @@ static bool do_more_prompt(int typed_char)
   }
 
   // clear the --more-- message
-  grid_clear(&msg_grid_adj, Rows - 1, Rows, 0, Columns, HL_ATTR(HLF_MSG));
+  grid_message_view_clear(Rows - 1, Rows, 0, Columns, HL_ATTR(HLF_MSG));
   redraw_cmdline = true;
   clear_cmdline = false;
   mode_displayed = false;
@@ -3187,7 +3186,7 @@ static bool do_more_prompt(int typed_char)
 static void msg_moremsg(bool full)
 {
   int attr = hl_combine_attr(HL_ATTR(HLF_MSG), HL_ATTR(HLF_M));
-  grid_line_start(&msg_grid_adj, Rows - 1);
+  grid_message_view_line_start(Rows - 1);
   int len = grid_line_puts(0, _("-- More --"), -1, attr);
   if (full) {
     len += grid_line_puts(len, _(" SPACE/d/j: screen/page/line down, b/u/k: up, q: quit "),
@@ -3256,8 +3255,8 @@ void msg_clr_eos_force(void)
     }
   }
 
-  grid_clear(&msg_grid_adj, msg_row, msg_row + 1, msg_startcol, msg_endcol, HL_ATTR(HLF_MSG));
-  grid_clear(&msg_grid_adj, msg_row + 1, Rows, 0, Columns, HL_ATTR(HLF_MSG));
+  grid_message_view_clear(msg_row, msg_row + 1, msg_startcol, msg_endcol, HL_ATTR(HLF_MSG));
+  grid_message_view_clear(msg_row + 1, Rows, 0, Columns, HL_ATTR(HLF_MSG));
 
   redraw_cmdline = true;  // overwritten the command line
   if (msg_row < Rows - 1 || msg_col == 0) {

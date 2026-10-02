@@ -331,7 +331,7 @@ static void win_redr_stl_expr(win_T *wp, bool draw_winbar, bool draw_ruler, bool
     }
     row = Rows - 1;
     col = MAX(ru_col, Columns / 2);
-    grid_handle = grid_view_translate(&msg_grid_adj, &row, &col);
+    grid_handle = grid_message_view_translate(&row, &col);
     maxwidth = Columns - col;
     fillchar = schar_from_ascii(' ');
     group = HLF_MSG;

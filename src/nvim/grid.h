@@ -101,8 +101,8 @@ extern bool grid_view_targets_default(const GridView *view);
 extern bool grid_view_requires_redraw(const GridView *view);
 extern bool grid_view_width_matches_target(const GridView *view, int width);
 extern void grid_view_cursor_goto(const GridView *view, int row, int col);
-extern void grid_initialize_default(GridView *default_view,
-                                    GridView *message_view);
+extern void grid_message_view_cursor_goto(int row, int col);
+extern void grid_initialize_default(GridView *default_view);
 extern bool grid_configure_default(int rows, int columns);
 extern WindowGridUpdate grid_configure_for_window(
   handle_T grid_handle, GridView *view, int rows, int columns, bool use_dedicated_grid,
@@ -114,10 +114,9 @@ extern MessageGridTransition grid_prepare_for_messages(handle_T grid_handle, int
                                                        bool should_allocate,
                                                        int scrolled_lines);
 extern void grid_release_message(handle_T grid_handle);
-extern void grid_activate_message_view(GridView *view, handle_T grid_handle);
-extern void grid_reset_message_view(GridView *view);
-extern void grid_set_message_position(handle_T grid_handle, GridView *view, int row,
-                                      bool scrolled,
+extern void grid_activate_message_view(handle_T grid_handle);
+extern void grid_reset_message_view(void);
+extern void grid_set_message_position(handle_T grid_handle, int row, bool scrolled,
                                       MessageGridPositionEmitter emit_position);
 extern void grid_scroll_message_up(handle_T grid_handle, int current_position,
                                    bool enable_throttling, bool zero_cmdheight,
@@ -140,6 +139,7 @@ extern void grid_clear_default_rows(int start_row, int end_row, bool valid);
 extern void grid_scroll_window_lines(const GridView *view, int row, int line_count,
                                      int view_height, int view_width);
 extern handle_T grid_view_translate(const GridView *grid, int *row_off, int *col_off);
+extern handle_T grid_message_view_translate(int *row_off, int *col_off);
 extern bool grid_view_translate_to_local(const GridView *view, int *row,
                                          int *col);
 extern void grid_invalidate(handle_T grid_handle);
@@ -168,6 +168,7 @@ extern schar_T schar_from_char(int c);
 
 extern void grid_line_start(GridView *view, int row);
 extern void grid_line_start_grid(handle_T grid_handle, int row, int col);
+extern void grid_message_view_line_start(int row);
 extern schar_T grid_line_getchar(int col, int *attr);
 extern void grid_line_put_schar(int col, schar_T schar, int attr);
 extern void grid_line_put_truncation(int start_col, int width, schar_T marker, int attr,
@@ -205,6 +206,8 @@ extern void linebuf_fill_vcols_from(int start_col, int width, colnr_T first_vcol
 extern void grid_line_flush(void);
 extern void grid_flush_message_line(bool right_left);
 extern void grid_clear(GridView *grid, int start_row, int end_row, int start_col, int end_col, int attr);
+extern void grid_message_view_clear(int start_row, int end_row, int start_col, int end_col,
+                                    int attr);
 extern void grid_put_window_line(const GridView *view,
                                  const GridLineSubmissionConfig *config);
 extern void grid_draw_border(handle_T grid_handle, const GridBorderConfig *config, const int *adj,

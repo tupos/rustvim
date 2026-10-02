@@ -47,14 +47,6 @@ EXTERN ScreenGrid msg_grid INIT( = SCREEN_GRID_INIT);
 EXTERN handle_T msg_grid_handle INIT( = 0);
 EXTERN int msg_grid_pos INIT( = 0);
 
-/// "adjusted" message grid. This grid accepts positions relative to
-/// default_grid. Internally it will be translated to a position on msg_grid
-/// relative to the start of the message area, or directly mapped to default_grid
-/// for legacy (display-=msgsep) message scroll behavior.
-/// TODO(bfredl): refactor "internal" message logic, msg_row etc
-/// to use the correct positions already.
-EXTERN GridView msg_grid_adj INIT( = { 0 });
-
 EXTERN int msg_listdo_overwrite INIT( = 0);
 
 #include "message.h.generated.h"

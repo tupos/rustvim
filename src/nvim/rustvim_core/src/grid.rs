@@ -222,13 +222,54 @@ impl MessageScrollState {
     }
 }
 
-static MESSAGE_GRID_SCROLL_STATE: Mutex<MessageScrollState> = Mutex::new(MessageScrollState::new());
+/// Persistent state owned by the message-grid subsystem.
+struct MessageGridState {
+    view: GridViewDescriptor,
+    scroll: MessageScrollState,
+}
 
-/// Acquires the persistent message-grid scrolling state.
-fn lock_message_scroll_state() -> MutexGuard<'static, MessageScrollState> {
-    MESSAGE_GRID_SCROLL_STATE
+impl MessageGridState {
+    /// Creates the legacy message view over the shared default grid with
+    /// initial scroll bookkeeping.
+    const fn new() -> Self {
+        Self {
+            view: GridViewDescriptor::new(DEFAULT_GRID_ID, GridPosition::new(0, 0)),
+            scroll: MessageScrollState::new(),
+        }
+    }
+
+    /// Returns the descriptor used to borrow the current target grid.
+    const fn view(&self) -> GridViewDescriptor {
+        self.view
+    }
+
+    /// Selects the allocated message grid without changing the current offset.
+    fn activate_view(&mut self, grid_id: GridId) {
+        self.view.target = grid_id;
+    }
+
+    /// Restores the legacy view over the shared default grid.
+    ///
+    /// The column offset is intentionally retained to preserve the previous
+    /// transition exactly.
+    fn reset_view(&mut self) {
+        self.view.target = DEFAULT_GRID_ID;
+        self.view.offset.row = 0;
+    }
+
+    /// Updates the row translation after moving the message grid.
+    fn set_view_row_offset(&mut self, row_offset: i32) {
+        self.view.offset.row = row_offset;
+    }
+}
+
+static MESSAGE_GRID_STATE: Mutex<MessageGridState> = Mutex::new(MessageGridState::new());
+
+/// Acquires the persistent message-grid state.
+fn lock_message_grid_state() -> MutexGuard<'static, MessageGridState> {
+    MESSAGE_GRID_STATE
         .try_lock()
-        .expect("message-grid scroll state is already borrowed")
+        .expect("message-grid state is already borrowed")
 }
 
 /// Validated input for flushing pending message-grid output.
@@ -2248,6 +2289,23 @@ impl CLineGrid {
     }
 }
 
+/// Begins a buffered line operation through a persistent view descriptor.
+fn begin_grid_view_line(descriptor: GridViewDescriptor, row: i32) {
+    let row = row
+        .checked_add(descriptor.offset.row)
+        .expect("line grid row translation overflowed");
+
+    let mut line_buffer = LineBufferGuard::acquire();
+    with_line_grid(|line_grid| {
+        line_grid.begin(
+            descriptor.target,
+            row,
+            descriptor.offset.column,
+            &mut line_buffer,
+        );
+    });
+}
+
 /// Start a group of grid_line_puts calls that builds a single grid line.
 ///
 /// Must be matched with a grid_line_flush call before moving to
@@ -2263,19 +2321,16 @@ pub unsafe extern "C" fn grid_line_start(view: *mut CGridView, row: libc::c_int)
     // view.
     let descriptor =
         unsafe { CGridView::descriptor(view) }.expect("line grid view must describe a stored grid");
-    let row = row
-        .checked_add(descriptor.offset.row)
-        .expect("line grid row translation overflowed");
+    begin_grid_view_line(descriptor, row);
+}
 
-    let mut line_buffer = LineBufferGuard::acquire();
-    with_line_grid(|line_grid| {
-        line_grid.begin(
-            descriptor.target,
-            row,
-            descriptor.offset.column,
-            &mut line_buffer,
-        );
-    });
+/// Begins a buffered line operation through the adjusted message view.
+///
+/// The matching flush must occur on the same thread.
+#[unsafe(no_mangle)]
+pub extern "C" fn grid_message_view_line_start(row: libc::c_int) {
+    let descriptor = lock_message_grid_state().view();
+    begin_grid_view_line(descriptor, row);
 }
 
 /// Begins a buffered line operation on an identified screen grid.
@@ -3013,23 +3068,15 @@ pub unsafe extern "C" fn grid_put_window_line(
     output_target.emit_lines(commands);
 }
 
-/// Clears a rectangular region of a grid view.
-///
-/// # Safety
-///
-/// `view` must point to an initialized `CGridView`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn grid_clear(
-    view: *mut CGridView,
-    start_row: libc::c_int,
-    end_row: libc::c_int,
-    start_col: libc::c_int,
-    mut end_col: libc::c_int,
-    attr: libc::c_int,
+/// Clears a rectangular region through a persistent view descriptor.
+fn clear_grid_view(
+    descriptor: GridViewDescriptor,
+    start_row: i32,
+    end_row: i32,
+    start_col: i32,
+    mut end_col: i32,
+    attr: VimSAttrT,
 ) {
-    // SAFETY: The caller guarantees that `view` is initialized.
-    let descriptor =
-        unsafe { CGridView::descriptor(view) }.expect("grid view must describe a stored grid");
     let start_row = start_row
         .checked_add(descriptor.offset.row)
         .expect("grid clear start-row translation overflowed");
@@ -3064,6 +3111,39 @@ pub unsafe extern "C" fn grid_clear(
     for (target, commands) in output {
         target.emit_lines(commands);
     }
+}
+
+/// Clears a rectangular region of a grid view.
+///
+/// # Safety
+///
+/// `view` must point to an initialized `CGridView`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn grid_clear(
+    view: *mut CGridView,
+    start_row: libc::c_int,
+    end_row: libc::c_int,
+    start_col: libc::c_int,
+    end_col: libc::c_int,
+    attr: libc::c_int,
+) {
+    // SAFETY: The caller guarantees that `view` is initialized.
+    let descriptor =
+        unsafe { CGridView::descriptor(view) }.expect("grid view must describe a stored grid");
+    clear_grid_view(descriptor, start_row, end_row, start_col, end_col, attr);
+}
+
+/// Clears a rectangular region through the adjusted message view.
+#[unsafe(no_mangle)]
+pub extern "C" fn grid_message_view_clear(
+    start_row: libc::c_int,
+    end_row: libc::c_int,
+    start_col: libc::c_int,
+    end_col: libc::c_int,
+    attr: libc::c_int,
+) {
+    let descriptor = lock_message_grid_state().view();
+    clear_grid_view(descriptor, start_row, end_row, start_col, end_col, attr);
 }
 
 /// Draws a floating-window border from a stable subset of `WinConfig`.
@@ -3374,20 +3454,6 @@ impl CGridView {
         self.grid_handle = DEFAULT_GRID_HANDLE;
         self.row_offset = 0;
         self.col_offset = 0;
-    }
-
-    /// Selects the allocated message grid without changing its current offset.
-    fn activate_message(&mut self, grid_id: GridId) {
-        self.grid_handle = grid_id.as_native_handle();
-    }
-
-    /// Restores the legacy message view after message-grid release.
-    ///
-    /// The column offset is intentionally retained to preserve the previous C
-    /// transition exactly.
-    fn reset_message(&mut self) {
-        self.grid_handle = DEFAULT_GRID_HANDLE;
-        self.row_offset = 0;
     }
 }
 
@@ -4509,6 +4575,20 @@ pub unsafe extern "C" fn grid_view_width_matches_target(
     view.width_matches_target(width)
 }
 
+/// Moves the UI cursor through a persistent view descriptor.
+fn move_grid_view_cursor(descriptor: GridViewDescriptor, position: GridPosition) {
+    let output = {
+        let store = lock_grid_store();
+        let Ok(view) = store.view(descriptor) else {
+            return;
+        };
+        view.plan_cursor_move(position)
+    };
+    if let Some((target, command)) = output {
+        target.emit(command);
+    }
+}
+
 /// Moves the UI cursor through a translated grid view.
 ///
 /// Grid ownership is restored before the cursor command is emitted.
@@ -4526,16 +4606,14 @@ pub unsafe extern "C" fn grid_view_cursor_goto(
     let Some(descriptor) = (unsafe { CGridView::descriptor(view) }) else {
         return;
     };
-    let output = {
-        let store = lock_grid_store();
-        let Ok(view) = store.view(descriptor) else {
-            return;
-        };
-        view.plan_cursor_move(GridPosition::new(row, column))
-    };
-    if let Some((target, command)) = output {
-        target.emit(command);
-    }
+    move_grid_view_cursor(descriptor, GridPosition::new(row, column));
+}
+
+/// Moves the UI cursor through the adjusted message view.
+#[unsafe(no_mangle)]
+pub extern "C" fn grid_message_view_cursor_goto(row: libc::c_int, column: libc::c_int) {
+    let descriptor = lock_message_grid_state().view();
+    move_grid_view_cursor(descriptor, GridPosition::new(row, column));
 }
 
 /// Refreshes the external representation of an allocated message grid.
@@ -4612,31 +4690,24 @@ pub unsafe extern "C" fn grid_scroll_window_lines(
     }
 }
 
-/// Assigns and permanently stores the default screen grid and initializes the
-/// process-global default and message views.
+/// Assigns and permanently stores the default screen grid and initializes its
+/// process-global C view.
 ///
 /// # Safety
 ///
-/// `default_view` and `message_view` must point to distinct, exclusively
-/// accessible `CGridView` values.
+/// `default_view` must point to an exclusively accessible `CGridView`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn grid_initialize_default(
-    default_view: *mut CGridView,
-    message_view: *mut CGridView,
-) {
+pub unsafe extern "C" fn grid_initialize_default(default_view: *mut CGridView) {
     // SAFETY: Initialization has exclusive main-thread access to the empty
     // process-global default-grid representation.
     let cgrid =
         unsafe { (&raw mut default_grid).as_mut() }.expect("default grid is statically allocated");
     register_empty_grid(cgrid, DEFAULT_GRID_ID);
 
-    // SAFETY: The caller guarantees exclusive access to two valid views.
+    // SAFETY: The caller guarantees exclusive access to a valid view.
     let default_view = unsafe { default_view.as_mut() }.expect("default grid view is nullptr");
-    // SAFETY: The caller guarantees that the message view is valid and does
-    // not alias the default view.
-    let message_view = unsafe { message_view.as_mut() }.expect("message grid view is nullptr");
     default_view.initialize_default();
-    message_view.initialize_default();
+    *lock_message_grid_state() = MessageGridState::new();
 }
 
 /// Resizes the default screen grid when its configured dimensions changed.
@@ -4724,7 +4795,9 @@ pub extern "C" fn grid_prepare_for_messages(
     };
 
     if transition == MessageGridTransition::Resized {
-        lock_message_scroll_state().record_resize(scrolled_lines);
+        lock_message_grid_state()
+            .scroll
+            .record_resize(scrolled_lines);
     }
     transition.into()
 }
@@ -4737,31 +4810,26 @@ pub extern "C" fn grid_release_message(grid_handle: VimHandleT) {
     }
 }
 
-/// Selects the allocated message grid for an adjusted message view.
-///
-/// # Safety
-///
-/// `view` must point to an exclusively accessible, initialized `CGridView`.
+/// Selects the allocated message grid for the adjusted message view.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn grid_activate_message_view(view: *mut CGridView, grid_handle: VimHandleT) {
-    // SAFETY: The caller guarantees exclusive access to a valid view.
-    let view = unsafe { view.as_mut() }.expect("message grid view is nullptr");
-    view.activate_message(GridId::new(grid_handle));
+pub extern "C" fn grid_activate_message_view(grid_handle: VimHandleT) {
+    let grid_id = GridId::new(grid_handle);
+    {
+        let store = lock_grid_store();
+        store
+            .grid(grid_id)
+            .expect("message grid identity must resolve to permanent storage");
+    }
+    lock_message_grid_state().activate_view(grid_id);
 }
 
 /// Restores an adjusted message view to the shared default grid.
-///
-/// # Safety
-///
-/// `view` must point to an exclusively accessible, initialized `CGridView`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn grid_reset_message_view(view: *mut CGridView) {
-    // SAFETY: The caller guarantees exclusive access to a valid view.
-    let view = unsafe { view.as_mut() }.expect("message grid view is nullptr");
-    view.reset_message();
+pub extern "C" fn grid_reset_message_view() {
+    lock_message_grid_state().reset_view();
 }
 
-/// Updates the message-grid position and its legacy adjusted view.
+/// Updates the message-grid position and its adjusted view.
 ///
 /// The position callback and view mutation occur only after the grid-store
 /// borrow has been released.
@@ -4770,19 +4838,14 @@ pub unsafe extern "C" fn grid_reset_message_view(view: *mut CGridView) {
 ///
 /// # Safety
 ///
-/// `view` must point to a valid, exclusively accessible `CGridView`.
 /// `emit_position` must remain callable for the duration of this operation.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn grid_set_message_position(
     grid_handle: VimHandleT,
-    view: *mut CGridView,
     row: libc::c_int,
     scrolled: bool,
     emit_position: CMessageGridPositionEmitter,
 ) {
-    if view.is_null() {
-        return;
-    }
     let update = {
         let Ok(grid) = StoredGridGuard::acquire(GridId::new(grid_handle)) else {
             return;
@@ -4797,13 +4860,14 @@ pub unsafe extern "C" fn grid_set_message_position(
         unsafe {
             emit_position(row, scrolled);
         }
-        lock_message_scroll_state().record_position(row);
+    }
+
+    let mut state = lock_message_grid_state();
+    if update.publish {
+        state.scroll.record_position(row);
     }
     if let Some(row_offset) = update.view_row_offset {
-        // SAFETY: The caller guarantees exclusive access to a valid view.
-        unsafe {
-            (*view).row_offset = row_offset;
-        }
+        state.set_view_row_offset(row_offset);
     }
 }
 
@@ -4837,7 +4901,7 @@ pub unsafe extern "C" fn grid_scroll_message_up(
     } = scroll_up;
 
     if started_throttling && discount_first_scroll {
-        lock_message_scroll_state().discount_first_scroll();
+        lock_message_grid_state().scroll.discount_first_scroll();
     }
     match action {
         MessageGridScrollUpAction::Reposition {
@@ -4883,7 +4947,7 @@ pub extern "C" fn grid_prepare_message_redraw(
         };
         grid.prepare_message_redraw(rows_to_clear, valid_rows);
     }
-    lock_message_scroll_state().reset_progress();
+    lock_message_grid_state().scroll.reset_progress();
 }
 
 /// Ends message scrolling, publishes its resting position, and clears hidden
@@ -4922,7 +4986,7 @@ pub unsafe extern "C" fn grid_reset_message_scroll(
             grid.clear_message_rows(rows_to_clear, 0);
         }
     }
-    lock_message_scroll_state().reset_progress();
+    lock_message_grid_state().scroll.reset_progress();
 }
 
 /// Flushes pending throttled message-grid scrolling and row updates.
@@ -4948,7 +5012,7 @@ pub unsafe extern "C" fn grid_flush_message_scroll(
         screen_size,
         clear_attribute: request.clear_attribute,
     };
-    let state = *lock_message_scroll_state();
+    let state = lock_message_grid_state().scroll;
     let plan = {
         let Ok(mut grid) = StoredGridGuard::acquire(GridId::new(grid_handle)) else {
             return;
@@ -4973,7 +5037,9 @@ pub unsafe extern "C" fn grid_flush_message_scroll(
         target.emit(scroll);
     }
     target.emit_lines(lines);
-    lock_message_scroll_state().finish_flush(request.position, request.scrolled_lines);
+    lock_message_grid_state()
+        .scroll
+        .finish_flush(request.position, request.scrolled_lines);
 }
 
 /// Applies the complete allocation and validity transition for one window
@@ -5081,7 +5147,7 @@ pub unsafe extern "C" fn grid_free_all_mem() {
         }
     }
 
-    *lock_message_scroll_state() = MessageScrollState::new();
+    *lock_message_grid_state() = MessageGridState::new();
 
     // The caller guarantees that no line-buffer user remains.
     let mut line_buffer = LineBufferGuard::acquire();
@@ -5294,6 +5360,47 @@ pub unsafe extern "C" fn grid_view_translate(
 
         (*grid).grid_handle
     }
+}
+
+/// Translates grid-local offsets through the adjusted message view.
+///
+/// Returns the selected grid handle.
+///
+/// # Safety
+///
+/// `row_offset` and `col_offset` must point to valid, properly aligned
+/// writable integers.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn grid_message_view_translate(
+    row_offset: *mut libc::c_int,
+    col_offset: *mut libc::c_int,
+) -> VimHandleT {
+    assert!(
+        !row_offset.is_null() && !col_offset.is_null(),
+        "message-view position is nullptr"
+    );
+    let descriptor = lock_message_grid_state().view();
+    let (grid_id, position) = {
+        let store = lock_grid_store();
+        let view = store
+            .view(descriptor)
+            .expect("message view must resolve to permanent storage");
+        // SAFETY: The caller guarantees that both pointers reference
+        // initialized integers.
+        let position = unsafe { GridPosition::new(*row_offset, *col_offset) };
+        let position = view
+            .translated_position(position)
+            .expect("message-view coordinate translation overflowed");
+        (view.target.id(), position)
+    };
+
+    // SAFETY: The caller guarantees exclusive writable access to both
+    // position outputs.
+    unsafe {
+        *row_offset = position.row;
+        *col_offset = position.column;
+    }
+    grid_id.as_native_handle()
 }
 
 /// Translates a target-grid position into coordinates relative to a grid view.
@@ -7032,29 +7139,23 @@ mod tests {
     }
 
     #[test]
-    fn message_view_activation_and_reset_preserve_legacy_offsets() {
-        let mut view = CGridView {
-            grid_handle: DEFAULT_GRID_HANDLE,
-            row_offset: -3,
-            col_offset: 2,
+    fn message_grid_state_preserves_view_offsets() {
+        let mut state = MessageGridState {
+            view: GridViewDescriptor::new(DEFAULT_GRID_ID, GridPosition::new(-3, 2)),
+            scroll: MessageScrollState::new(),
         };
 
-        // SAFETY: `view` is initialized and exclusively accessible.
-        unsafe {
-            grid_activate_message_view(&raw mut view, 7);
-        }
+        state.activate_view(GridId::new(7));
         assert_eq!(
-            (view.grid_handle, view.row_offset, view.col_offset),
-            (7, -3, 2)
+            state.view(),
+            GridViewDescriptor::new(GridId::new(7), GridPosition::new(-3, 2))
         );
 
-        // SAFETY: `view` remains initialized and exclusively accessible.
-        unsafe {
-            grid_reset_message_view(&raw mut view);
-        }
+        state.set_view_row_offset(-5);
+        state.reset_view();
         assert_eq!(
-            (view.grid_handle, view.row_offset, view.col_offset),
-            (DEFAULT_GRID_HANDLE, 0, 2)
+            state.view(),
+            GridViewDescriptor::new(DEFAULT_GRID_ID, GridPosition::new(0, 2))
         );
     }
 

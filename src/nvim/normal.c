@@ -2068,7 +2068,7 @@ void display_showcmd(void)
 
   msg_grid_validate();
   int showcmd_row = Rows - 1;
-  grid_line_start(&msg_grid_adj, showcmd_row);
+  grid_message_view_line_start(showcmd_row);
 
   int len = mc_len > 0 ? grid_line_puts(sc_col, mc_buf, -1, 0) : 0;
   if (!showcmd_is_clear) {
