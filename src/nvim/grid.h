@@ -86,6 +86,18 @@ typedef struct {
 
 typedef struct {
   handle_T grid_handle;
+  int current_position;
+  int screen_rows;
+  int screen_columns;
+  bool enable_throttling;
+  bool zero_cmdheight;
+  bool discount_first_scroll;
+  MessageGridPositionConfig position;
+  sattr_T clear_attribute;
+} MessageSurfaceScrollRequest;
+
+typedef struct {
+  handle_T grid_handle;
   int screen_rows;
   int screen_columns;
   bool should_allocate;
@@ -140,11 +152,8 @@ extern MessageSurfaceUpdate grid_update_message_surface(
 extern void grid_set_message_position(handle_T grid_handle, int row, bool scrolled,
                                       MessageGridPositionConfig config,
                                       MessageGridPositionEmitter emit_position);
-extern int grid_scroll_message_up(handle_T grid_handle, int current_position,
-                                  bool enable_throttling, bool zero_cmdheight,
-                                  bool discount_first_scroll,
-                                  MessageGridPositionConfig config,
-                                  MessageGridPositionEmitter set_position);
+extern int grid_scroll_message_surface_up(
+  MessageSurfaceScrollRequest request, MessageGridPositionEmitter emit_position);
 extern void grid_prepare_message_redraw(handle_T grid_handle, int rows_to_clear,
                                         int valid_rows);
 extern int grid_reset_message_scroll(handle_T grid_handle, int position,

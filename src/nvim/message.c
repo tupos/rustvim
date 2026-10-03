@@ -2609,10 +2609,19 @@ bool msg_do_throttle(void)
 /// Scroll the screen up one line for displaying the next message line.
 void msg_scroll_up(bool may_throttle, bool zerocmd, bool discount_first_scroll)
 {
-  msg_grid_pos = grid_scroll_message_up(
-    msg_grid_handle, msg_grid_pos, may_throttle && msg_do_throttle(), zerocmd,
-    discount_first_scroll, message_grid_position_config(), ui_ext_msg_set_pos);
-  grid_message_view_clear(Rows - 1, Rows, 0, Columns, HL_ATTR(HLF_MSG));
+  msg_grid_pos = grid_scroll_message_surface_up(
+    (MessageSurfaceScrollRequest){
+      .grid_handle = msg_grid_handle,
+      .current_position = msg_grid_pos,
+      .screen_rows = Rows,
+      .screen_columns = Columns,
+      .enable_throttling = may_throttle && msg_do_throttle(),
+      .zero_cmdheight = zerocmd,
+      .discount_first_scroll = discount_first_scroll,
+      .position = message_grid_position_config(),
+      .clear_attribute = HL_ATTR(HLF_MSG),
+    },
+    ui_ext_msg_set_pos);
 }
 
 /// Send throttled message output to UI clients

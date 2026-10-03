@@ -3,7 +3,7 @@
 use crate::{
     ui::{
         GridOutputTarget,
-        output::{OwnedRawLineCommand, UiOutput},
+        output::{OwnedRawLineCommand, UiCommand, UiOutput},
     },
     ui_compositor::{
         CompositorContext, CompositorGridPlacement, CompositorGridPlacementRequest,
@@ -13,9 +13,10 @@ use crate::{
 };
 
 use super::{
-    CMessageSurfaceRequest, CMessageSurfaceUpdate, ComposedGridSpace, GridContext, GridId,
-    GridSize, GridViewDescriptor, LineGrid, MessageGridMode, MessageGridPositionUpdate,
-    MessageGridTransition, VimSAttrT, VimSCharT,
+    CMessageSurfaceRequest, CMessageSurfaceScrollRequest, CMessageSurfaceUpdate, ComposedGridSpace,
+    GridContext, GridId, GridSize, GridViewDescriptor, LineGrid, LocalGridSpace, MessageGridMode,
+    MessageGridPositionUpdate, MessageGridScrollFlushPlan, MessageGridScrollFlushRequest,
+    MessageGridScrollUp, MessageGridScrollUpAction, MessageGridTransition, VimSAttrT, VimSCharT,
 };
 
 /// Appearance and stacking policy of the message surface.
@@ -24,6 +25,52 @@ struct MessageSurfaceAppearance {
     separator_character: VimSCharT,
     z_index: i32,
     blending: bool,
+}
+
+/// Rendering policy needed to publish one message-grid position.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct MessagePositionPolicy {
+    separator_character: VimSCharT,
+    z_index: i32,
+}
+
+impl MessagePositionPolicy {
+    /// Creates position policy from validated editor state.
+    pub(super) const fn new(separator_character: VimSCharT, z_index: i32) -> Self {
+        Self {
+            separator_character,
+            z_index,
+        }
+    }
+}
+
+/// One validated message-grid position transition.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct MessagePositionRequest {
+    grid_id: GridId,
+    row: i32,
+    scrolled: bool,
+    screen_size: GridSize,
+    policy: MessagePositionPolicy,
+}
+
+impl MessagePositionRequest {
+    /// Creates a position request for a registered message grid.
+    pub(super) const fn new(
+        grid_id: GridId,
+        row: i32,
+        scrolled: bool,
+        screen_size: GridSize,
+        policy: MessagePositionPolicy,
+    ) -> Self {
+        Self {
+            grid_id,
+            row,
+            scrolled,
+            screen_size,
+            policy,
+        }
+    }
 }
 
 /// Validated input for one complete message-surface lifecycle update.
@@ -82,6 +129,49 @@ impl CMessageSurfaceRequest {
     }
 }
 
+impl MessageSurfaceRequest {
+    /// Returns the UI policy shared by position changes during this update.
+    const fn position_policy(self) -> MessagePositionPolicy {
+        MessagePositionPolicy::new(self.appearance.separator_character, self.appearance.z_index)
+    }
+}
+
+/// Validated input for one upward message-surface scroll.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct MessageSurfaceScrollRequest {
+    grid_id: GridId,
+    current_position: i32,
+    screen_size: GridSize,
+    enable_throttling: bool,
+    zero_cmdheight: bool,
+    discount_first_scroll: bool,
+    position: MessagePositionPolicy,
+    clear_attribute: VimSAttrT,
+}
+
+impl CMessageSurfaceScrollRequest {
+    /// Converts C-owned scroll policy into validated native Rust state.
+    pub(super) fn try_into_native(self) -> Option<MessageSurfaceScrollRequest> {
+        if self.grid_handle <= 0 || self.current_position < 0 {
+            return None;
+        }
+        let screen_size = GridSize::try_new(self.screen_rows, self.screen_columns)?;
+        Some(MessageSurfaceScrollRequest {
+            grid_id: GridId::new(self.grid_handle),
+            current_position: self.current_position,
+            screen_size,
+            enable_throttling: self.enable_throttling,
+            zero_cmdheight: self.zero_cmdheight,
+            discount_first_scroll: self.discount_first_scroll,
+            position: MessagePositionPolicy::new(
+                self.position.separator_character,
+                self.position.z_index,
+            ),
+            clear_attribute: self.clear_attribute,
+        })
+    }
+}
+
 /// Editor-owned state produced by one message-surface lifecycle update.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct MessageSurfaceUpdate {
@@ -118,6 +208,9 @@ pub(crate) trait MessageSurfaceOutput: UiOutput<ComposedGridSpace> {
 
     /// Publishes final destruction of the message grid's current storage.
     fn emit_grid_destroy(&mut self, grid_id: GridId);
+
+    /// Publishes one message-grid command after storage borrows are released.
+    fn emit_grid_command(&mut self, target: GridOutputTarget, command: UiCommand<LocalGridSpace>);
 
     /// Publishes owned grid-line updates produced while clearing a view.
     fn emit_grid_lines(&mut self, target: GridOutputTarget, lines: Vec<OwnedRawLineCommand>);
@@ -177,11 +270,14 @@ impl<'context> MessageSurface<'context> {
                     (request.screen_size.height - request.command_height - request.scrolled_lines)
                         .max(0)
                 };
-                self.update_position(
-                    grid_id,
-                    position,
-                    request.scrolled_lines != 0,
-                    request,
+                self.set_position(
+                    MessagePositionRequest::new(
+                        grid_id,
+                        position,
+                        request.scrolled_lines != 0,
+                        request.screen_size,
+                        request.position_policy(),
+                    ),
                     runtime,
                     output,
                 )?;
@@ -239,7 +335,17 @@ impl<'context> MessageSurface<'context> {
                 let max_rows = request.screen_size.height - request.command_height;
                 let difference = position - max_rows;
                 position = max_rows;
-                self.update_position(grid_id, position, false, request, runtime, output)?;
+                self.set_position(
+                    MessagePositionRequest::new(
+                        grid_id,
+                        position,
+                        false,
+                        request.screen_size,
+                        request.position_policy(),
+                    ),
+                    runtime,
+                    output,
+                )?;
                 let descriptor = self.grids.lock_message_state().view();
                 if difference > 0 {
                     let (target, lines) = self.grids.clear_view(
@@ -276,15 +382,13 @@ impl<'context> MessageSurface<'context> {
     }
 
     /// Updates the adjusted view and publishes an unthrottled position.
-    fn update_position(
+    pub(super) fn set_position(
         &self,
-        grid_id: GridId,
-        row: i32,
-        scrolled: bool,
-        request: MessageSurfaceRequest,
+        request: MessagePositionRequest,
         runtime: CompositorRuntime,
         output: &mut impl MessageSurfaceOutput,
     ) -> CompositorResult<()> {
+        let MessagePositionRequest { grid_id, row, .. } = request;
         let MessageGridPositionUpdate {
             publish,
             view_row_offset,
@@ -296,27 +400,7 @@ impl<'context> MessageSurface<'context> {
             .update_message_position(row);
 
         if publish {
-            let compositor_index = self.compositor.route_message_position(
-                self.grids,
-                grid_id,
-                CompositorMessagePositionRequest::new(
-                    row,
-                    request.appearance.z_index,
-                    Some(request.appearance.separator_character),
-                    request.screen_size,
-                    scrolled,
-                ),
-                runtime,
-                output,
-            )?;
-            output.emit_message_position(
-                grid_id,
-                row,
-                scrolled,
-                request.appearance.separator_character,
-                request.appearance.z_index,
-                compositor_index,
-            );
+            self.publish_position(request, runtime, output)?;
         }
 
         let mut state = self.grids.lock_message_state();
@@ -326,6 +410,154 @@ impl<'context> MessageSurface<'context> {
         if let Some(row_offset) = view_row_offset {
             state.set_view_row_offset(row_offset);
         }
+        Ok(())
+    }
+
+    /// Publishes one position without changing message scroll bookkeeping.
+    pub(super) fn publish_position(
+        &self,
+        request: MessagePositionRequest,
+        runtime: CompositorRuntime,
+        output: &mut impl MessageSurfaceOutput,
+    ) -> CompositorResult<()> {
+        let compositor_index = self.compositor.route_message_position(
+            self.grids,
+            request.grid_id,
+            CompositorMessagePositionRequest::new(
+                request.row,
+                request.policy.z_index,
+                Some(request.policy.separator_character),
+                request.screen_size,
+                request.scrolled,
+            ),
+            runtime,
+            output,
+        )?;
+        output.emit_message_position(
+            request.grid_id,
+            request.row,
+            request.scrolled,
+            request.policy.separator_character,
+            request.policy.z_index,
+            compositor_index,
+        );
+        Ok(())
+    }
+
+    /// Scrolls the complete message surface upward by one row.
+    pub(super) fn scroll_up(
+        &self,
+        request: MessageSurfaceScrollRequest,
+        runtime: CompositorRuntime,
+        output: &mut impl MessageSurfaceOutput,
+    ) -> CompositorResult<i32> {
+        let scroll_up = {
+            let mut store = self.grids.lock_store();
+            store
+                .grid_mut(request.grid_id)
+                .expect("message grid must remain permanently registered")
+                .scroll_message_up(
+                    request.current_position,
+                    request.enable_throttling,
+                    request.zero_cmdheight,
+                )
+        };
+        let MessageGridScrollUp {
+            started_throttling,
+            action,
+        } = scroll_up;
+
+        if started_throttling && request.discount_first_scroll {
+            self.grids
+                .lock_message_state()
+                .scroll
+                .discount_first_scroll();
+        }
+        let position = match action {
+            MessageGridScrollUpAction::Reposition {
+                position,
+                scrolled,
+                clear_first_row,
+            } => {
+                self.set_position(
+                    MessagePositionRequest::new(
+                        request.grid_id,
+                        position,
+                        scrolled,
+                        request.screen_size,
+                        request.position,
+                    ),
+                    runtime,
+                    output,
+                )?;
+                if clear_first_row {
+                    self.grids
+                        .lock_store()
+                        .grid_mut(request.grid_id)
+                        .expect("message grid must remain permanently registered")
+                        .clear_first_message_row();
+                }
+                position
+            }
+            MessageGridScrollUpAction::ShiftRows { target, scroll } => {
+                if let Some(scroll) = scroll {
+                    output.emit_grid_command(target, scroll);
+                }
+                request.current_position
+            }
+        };
+
+        let descriptor = self.grids.lock_message_state().view();
+        let (target, lines) = self.grids.clear_view(
+            descriptor,
+            request.screen_size.height - 1,
+            request.screen_size.height,
+            0,
+            request.screen_size.width,
+            request.clear_attribute,
+        );
+        output.emit_grid_lines(target, lines);
+        Ok(position)
+    }
+
+    /// Flushes pending throttled message-grid scrolling and row updates.
+    pub(super) fn flush_scroll(
+        &self,
+        grid_id: GridId,
+        request: MessageGridScrollFlushRequest,
+        position: MessagePositionPolicy,
+        runtime: CompositorRuntime,
+        output: &mut impl MessageSurfaceOutput,
+    ) -> CompositorResult<()> {
+        let state = self.grids.lock_message_state().scroll;
+        let plan = self
+            .grids
+            .lock_store()
+            .grid_mut(grid_id)
+            .expect("message grid must remain permanently registered")
+            .flush_message_scroll(request, state);
+
+        let MessageGridScrollFlushPlan {
+            target,
+            position_update,
+            scroll,
+            lines,
+        } = plan;
+        if let Some(row) = position_update {
+            self.publish_position(
+                MessagePositionRequest::new(grid_id, row, true, request.screen_size, position),
+                runtime,
+                output,
+            )?;
+        }
+        if let Some(scroll) = scroll {
+            output.emit_grid_command(target, scroll);
+        }
+        output.emit_grid_lines(target, lines);
+        self.grids
+            .lock_message_state()
+            .scroll
+            .finish_flush(request.position, request.scrolled_lines);
         Ok(())
     }
 }

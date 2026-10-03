@@ -7,17 +7,15 @@ use crate::{
         GridOutputTarget,
         output::{OwnedRawLineCommand, RawLineCells, RawLineCommand, UiCommand, UiOutput},
     },
-    ui_compositor::{
-        CompositorMessagePositionRequest, NvimComposedOutput, compositor_runtime_snapshot,
-    },
+    ui_compositor::{NvimComposedOutput, compositor_runtime_snapshot},
 };
 
 use super::super::{
     CMessageGridPositionConfig, CMessageGridPositionEmitter, CMessageGridScrollFlushRequest,
-    CMessageGridTransition, CMessageSurfaceRequest, CMessageSurfaceUpdate, ComposedGridSpace,
-    GridId, GridSize, LineBufferGuard, MessageGridMode, MessageGridScrollFlushPlan,
-    MessageGridScrollFlushRequest, MessageGridScrollUp, MessageGridScrollUpAction,
-    MessageGridTransition, MessageSurfaceOutput, StoredGridGuard, VimHandleT, VimSCharT,
+    CMessageGridTransition, CMessageSurfaceRequest, CMessageSurfaceScrollRequest,
+    CMessageSurfaceUpdate, ComposedGridSpace, GridId, GridSize, LineBufferGuard, LocalGridSpace,
+    MessageGridMode, MessageGridScrollFlushRequest, MessageGridTransition, MessagePositionPolicy,
+    MessagePositionRequest, MessageSurfaceOutput, StoredGridGuard, VimHandleT, VimSCharT,
     lock_grid_store, lock_message_grid_state,
 };
 
@@ -88,6 +86,10 @@ impl MessageSurfaceOutput for NvimMessageSurfaceOutput {
         }
     }
 
+    fn emit_grid_command(&mut self, target: GridOutputTarget, command: UiCommand<LocalGridSpace>) {
+        target.emit(command);
+    }
+
     fn emit_grid_lines(&mut self, target: GridOutputTarget, lines: Vec<OwnedRawLineCommand>) {
         target.emit_lines(lines);
     }
@@ -119,59 +121,7 @@ pub unsafe extern "C" fn grid_update_message_surface(
         .into()
 }
 
-/// Processes and publishes one message-grid position.
-///
-/// Composed output is emitted before the original uncomposed event callback.
-///
-/// # Safety
-///
-/// `emit_position` must remain callable for the duration of this operation.
-pub(super) unsafe fn publish_message_grid_position(
-    grid_handle: VimHandleT,
-    row: libc::c_int,
-    scrolled: bool,
-    config: CMessageGridPositionConfig,
-    emit_position: CMessageGridPositionEmitter,
-) {
-    let context = registered_context();
-    let runtime = compositor_runtime_snapshot().expect("compositor runtime must be valid");
-    let request = CompositorMessagePositionRequest::new(
-        row,
-        config.z_index,
-        Some(config.separator_character),
-        runtime.screen_size(),
-        scrolled,
-    );
-    let mut output = NvimComposedOutput;
-    let layer_index = context
-        .compositor()
-        .route_message_position(
-            context.grid(),
-            GridId::new(grid_handle),
-            request,
-            runtime,
-            &mut output,
-        )
-        .expect("message-grid position update must preserve compositor invariants");
-    let compositor_index = i32::try_from(layer_index)
-        .expect("compositor layer index must fit the C UI event representation");
-
-    // SAFETY: The caller guarantees that the callback is valid. All Rust
-    // subsystem borrows were released before this callback can reenter editor
-    // code.
-    unsafe {
-        emit_position(
-            grid_handle,
-            row,
-            scrolled,
-            config.separator_character,
-            config.z_index,
-            compositor_index,
-        );
-    }
-}
-
-/// Updates Rust-owned message position state and publishes when not throttled.
+/// Converts one FFI position update and delegates it to `MessageSurface`.
 ///
 /// # Safety
 ///
@@ -183,27 +133,56 @@ unsafe fn update_message_grid_position(
     config: CMessageGridPositionConfig,
     emit_position: CMessageGridPositionEmitter,
 ) {
-    let update = {
-        let Ok(grid) = StoredGridGuard::acquire(GridId::new(grid_handle)) else {
-            return;
-        };
-        grid.update_message_position(row)
+    assert!(grid_handle > 0, "message grid handle must be positive");
+    assert!(row >= 0, "message grid position must be nonnegative");
+    let runtime = compositor_runtime_snapshot().expect("compositor runtime must be valid");
+    let request = MessagePositionRequest::new(
+        GridId::new(grid_handle),
+        row,
+        scrolled,
+        runtime.screen_size(),
+        MessagePositionPolicy::new(config.separator_character, config.z_index),
+    );
+    let mut output = NvimMessageSurfaceOutput {
+        composed: NvimComposedOutput,
+        emit_position,
     };
+    registered_context()
+        .message_surface()
+        .set_position(request, runtime, &mut output)
+        .expect("message-grid position update must preserve rendering invariants");
+}
 
-    if update.publish {
-        // SAFETY: The caller guarantees that the callback is valid.
-        unsafe {
-            publish_message_grid_position(grid_handle, row, scrolled, config, emit_position);
-        }
-    }
-
-    let mut state = lock_message_grid_state();
-    if update.publish {
-        state.scroll.record_position(row);
-    }
-    if let Some(row_offset) = update.view_row_offset {
-        state.set_view_row_offset(row_offset);
-    }
+/// Converts one FFI position publication and delegates it to `MessageSurface`.
+///
+/// # Safety
+///
+/// `emit_position` must remain callable for the duration of this operation.
+pub(super) unsafe fn publish_message_grid_position(
+    grid_handle: VimHandleT,
+    row: libc::c_int,
+    scrolled: bool,
+    config: CMessageGridPositionConfig,
+    emit_position: CMessageGridPositionEmitter,
+) {
+    assert!(grid_handle > 0, "message grid handle must be positive");
+    assert!(row >= 0, "message grid position must be nonnegative");
+    let runtime = compositor_runtime_snapshot().expect("compositor runtime must be valid");
+    let request = MessagePositionRequest::new(
+        GridId::new(grid_handle),
+        row,
+        scrolled,
+        runtime.screen_size(),
+        MessagePositionPolicy::new(config.separator_character, config.z_index),
+    );
+    let mut output = NvimMessageSurfaceOutput {
+        composed: NvimComposedOutput,
+        emit_position,
+    };
+    registered_context()
+        .message_surface()
+        .publish_position(request, runtime, &mut output)
+        .expect("message-grid position publication must preserve rendering invariants");
 }
 
 /// Prepares the message grid for its requested visibility and size.
@@ -288,7 +267,7 @@ pub unsafe extern "C" fn grid_set_message_position(
     config: CMessageGridPositionConfig,
     emit_position: CMessageGridPositionEmitter,
 ) {
-    // SAFETY: The caller guarantees that the callback is valid.
+    // SAFETY: The caller guarantees that the callback remains valid.
     unsafe {
         update_message_grid_position(grid_handle, row, scrolled, config, emit_position);
     }
@@ -303,52 +282,22 @@ pub unsafe extern "C" fn grid_set_message_position(
 ///
 /// `set_position` must remain callable for the duration of this operation.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn grid_scroll_message_up(
-    grid_handle: VimHandleT,
-    current_position: libc::c_int,
-    enable_throttling: bool,
-    zero_cmdheight: bool,
-    discount_first_scroll: bool,
-    config: CMessageGridPositionConfig,
-    set_position: CMessageGridPositionEmitter,
+pub unsafe extern "C" fn grid_scroll_message_surface_up(
+    request: CMessageSurfaceScrollRequest,
+    emit_position: CMessageGridPositionEmitter,
 ) -> libc::c_int {
-    let grid_id = GridId::new(grid_handle);
-    let scroll_up = {
-        let Ok(mut grid) = StoredGridGuard::acquire(grid_id) else {
-            return current_position;
-        };
-        grid.scroll_message_up(current_position, enable_throttling, zero_cmdheight)
+    let request = request
+        .try_into_native()
+        .expect("message scroll request must contain valid editor state");
+    let runtime = compositor_runtime_snapshot().expect("compositor runtime must be valid");
+    let mut output = NvimMessageSurfaceOutput {
+        composed: NvimComposedOutput,
+        emit_position,
     };
-    let MessageGridScrollUp {
-        started_throttling,
-        action,
-    } = scroll_up;
-
-    if started_throttling && discount_first_scroll {
-        lock_message_grid_state().scroll.discount_first_scroll();
-    }
-    match action {
-        MessageGridScrollUpAction::Reposition {
-            position,
-            scrolled,
-            clear_first_row,
-        } => {
-            // SAFETY: The caller guarantees that the callback is valid.
-            unsafe {
-                update_message_grid_position(grid_handle, position, scrolled, config, set_position);
-            }
-            if clear_first_row && let Ok(mut grid) = StoredGridGuard::acquire(grid_id) {
-                grid.clear_first_message_row();
-            }
-            position
-        }
-        MessageGridScrollUpAction::ShiftRows { target, scroll } => {
-            if let Some(scroll) = scroll {
-                target.emit(scroll);
-            }
-            current_position
-        }
-    }
+    registered_context()
+        .message_surface()
+        .scroll_up(request, runtime, &mut output)
+        .expect("message scroll must preserve rendering invariants")
 }
 
 /// Clears message-grid rows in preparation for a screen redraw.
@@ -431,6 +380,9 @@ pub unsafe extern "C" fn grid_flush_message_scroll(
     config: CMessageGridPositionConfig,
     emit_position: CMessageGridPositionEmitter,
 ) {
+    if grid_handle <= 0 {
+        return;
+    }
     let Some(screen_size) = GridSize::try_new(request.screen_rows, request.screen_columns) else {
         return;
     };
@@ -440,31 +392,20 @@ pub unsafe extern "C" fn grid_flush_message_scroll(
         screen_size,
         clear_attribute: request.clear_attribute,
     };
-    let state = lock_message_grid_state().scroll;
-    let plan = {
-        let Ok(mut grid) = StoredGridGuard::acquire(GridId::new(grid_handle)) else {
-            return;
-        };
-        grid.flush_message_scroll(request, state)
+    let runtime = compositor_runtime_snapshot().expect("compositor runtime must be valid");
+    let position = MessagePositionPolicy::new(config.separator_character, config.z_index);
+    let mut output = NvimMessageSurfaceOutput {
+        composed: NvimComposedOutput,
+        emit_position,
     };
-
-    let MessageGridScrollFlushPlan {
-        target,
-        position_update,
-        scroll,
-        lines,
-    } = plan;
-    if let Some(row) = position_update {
-        // SAFETY: The caller guarantees that the callback is valid.
-        unsafe {
-            publish_message_grid_position(grid_handle, row, true, config, emit_position);
-        }
-    }
-    if let Some(scroll) = scroll {
-        target.emit(scroll);
-    }
-    target.emit_lines(lines);
-    lock_message_grid_state()
-        .scroll
-        .finish_flush(request.position, request.scrolled_lines);
+    registered_context()
+        .message_surface()
+        .flush_scroll(
+            GridId::new(grid_handle),
+            request,
+            position,
+            runtime,
+            &mut output,
+        )
+        .expect("message scroll flush must preserve rendering invariants");
 }

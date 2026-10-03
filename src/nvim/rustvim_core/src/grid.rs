@@ -44,6 +44,7 @@ use fold_column::{FoldColumn, FoldColumnInfo, FoldColumnSymbols};
 pub use line_buffer::LineBuffer;
 use line_buffer::{LineTextRenderOptions, LineTextVirtualColumns};
 use line_submission::{LineSubmission, SmoothScrollMarker};
+use message_surface::{MessagePositionPolicy, MessagePositionRequest};
 pub(crate) use message_surface::{MessageSurface, MessageSurfaceOutput};
 pub(crate) use row::{GridRow, GridRowSegment};
 use store::StoredGridGuard;
@@ -2542,6 +2543,21 @@ pub struct CWindowGridUpdate {
 pub struct CMessageGridPositionConfig {
     separator_character: VimSCharT,
     z_index: libc::c_int,
+}
+
+/// C representation of one upward message-surface scroll request.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct CMessageSurfaceScrollRequest {
+    grid_handle: VimHandleT,
+    current_position: libc::c_int,
+    screen_rows: libc::c_int,
+    screen_columns: libc::c_int,
+    enable_throttling: bool,
+    zero_cmdheight: bool,
+    discount_first_scroll: bool,
+    position: CMessageGridPositionConfig,
+    clear_attribute: VimSAttrT,
 }
 
 /// C representation of one complete message-surface lifecycle request.
