@@ -35,9 +35,9 @@ unsafe extern "C" {
 }
 
 /// Emits safe compositor commands through Neovim's C UI interface.
-pub(in crate::ui_compositor) struct NvimOutput;
+pub(crate) struct NvimComposedOutput;
 
-impl UiOutput<ComposedGridSpace> for NvimOutput {
+impl UiOutput<ComposedGridSpace> for NvimComposedOutput {
     fn emit(&mut self, command: UiCommand<ComposedGridSpace>) {
         match command {
             UiCommand::GridResize(size) => {

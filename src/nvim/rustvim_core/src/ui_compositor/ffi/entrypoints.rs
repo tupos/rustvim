@@ -13,11 +13,10 @@ use crate::{
 };
 
 use super::super::*;
-use super::{NvimOutput, compositor_runtime_snapshot, initialize_debug_highlights};
-
-unsafe extern "C" {
-    static mut msg_grid_handle: VimHandleT;
-}
+use super::{
+    NvimComposedOutput, compositor_runtime_snapshot, current_message_grid_id,
+    initialize_debug_highlights,
+};
 
 /// C representation of a compositor grid hit.
 #[repr(C)]
@@ -36,14 +35,6 @@ impl From<CompositorGridHit> for CCompositorGridHit {
             column: hit.local_position.column,
         }
     }
-}
-
-/// Returns the current message-grid identity when one has been assigned.
-fn current_message_grid_id() -> Option<GridId> {
-    // SAFETY: Compositor events read Neovim globals synchronously on the main
-    // thread.
-    let grid_handle = unsafe { msg_grid_handle };
-    (grid_handle > 0).then_some(GridId::new(grid_handle))
 }
 
 /// Initializes the compositor with the process-global default grid.
@@ -113,7 +104,7 @@ pub extern "C" fn ui_comp_grid_resize(grid: Integer, width: Integer, height: Int
     };
     let size =
         GridSize::try_new(height, width).expect("grid-resize dimensions must be nonnegative");
-    let mut output = NvimOutput;
+    let mut output = NvimComposedOutput;
 
     registered_context()
         .compositor()
@@ -185,7 +176,7 @@ pub unsafe extern "C" fn ui_comp_msg_set_pos(
         runtime.screen_size,
         scrolled,
     );
-    let mut output = NvimOutput;
+    let mut output = NvimComposedOutput;
 
     update_message_position(GridId::new(grid), request, runtime, &mut output)
         .expect("message-grid position update must preserve compositor invariants");
@@ -212,7 +203,7 @@ pub extern "C" fn ui_comp_compose_grid(grid_handle: Integer) {
     let runtime = compositor_runtime_snapshot().expect("compositor runtime must be valid");
     let area =
         recompose_area_for_registered_grid(grid_id).expect("grid to recompose must be registered");
-    let mut output = NvimOutput;
+    let mut output = NvimComposedOutput;
 
     recompose_area_from_registered_grids(current_message_grid_id(), area, runtime, &mut output)
         .expect("grid recomposition must preserve compositor invariants");
@@ -288,7 +279,7 @@ fn place_registered_grid(
             .flatten();
         (target, current_window_layer)
     };
-    let mut output = NvimOutput;
+    let mut output = NvimComposedOutput;
     let recompose_area = |area| {
         recompose_area_from_registered_grids(message_grid_id, area, runtime, &mut output)
             .map_err(|_| CompositorError::RecompositionFailed)
@@ -406,7 +397,7 @@ pub extern "C" fn ui_comp_grid_cursor_goto(grid_handle: Integer, row: Integer, c
         grid_id: GridId::new(grid_handle),
         local_position: GridPosition::new(row, column),
     };
-    let mut output = NvimOutput;
+    let mut output = NvimComposedOutput;
 
     process_grid_cursor_goto(current_message_grid_id(), request, &mut output)
         .expect("cursor update must preserve compositor invariants");
@@ -470,7 +461,7 @@ pub extern "C" fn ui_comp_remove_grid(grid_handle: Integer) {
 
     if let Some(area) = removal.recompose_area {
         let runtime = compositor_runtime_snapshot().expect("compositor runtime must be valid");
-        let mut output = NvimOutput;
+        let mut output = NvimComposedOutput;
         recompose_area_from_registered_grids(current_message_grid_id(), area, runtime, &mut output)
             .expect("removed layer area must be recomposed");
     }
@@ -830,7 +821,7 @@ pub unsafe extern "C" fn ui_comp_raw_line(
     .expect("raw-line command must contain matching ordered cell data");
     let context = registered_context();
     let runtime = compositor_runtime_snapshot().expect("compositor runtime must be valid");
-    let mut output = NvimOutput;
+    let mut output = NvimComposedOutput;
 
     context
         .compositor()
@@ -873,7 +864,7 @@ pub extern "C" fn ui_comp_grid_scroll(
     let request = CompositorScrollRequest::new(region, delta);
     let context = registered_context();
     let runtime = compositor_runtime_snapshot().expect("compositor runtime must be valid");
-    let mut output = NvimOutput;
+    let mut output = NvimComposedOutput;
 
     context
         .compositor()

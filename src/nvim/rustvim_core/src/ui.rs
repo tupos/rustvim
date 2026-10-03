@@ -13,6 +13,10 @@ use crate::{
     defines::{Integer, OptInt},
     generated::enums::RdbFlags,
     grid::{GridId, GridRow, LocalGridSpace, ScreenGrid, VimHandleT, VimSAttrT, VimSCharT},
+    ui_compositor::{
+        CompositorEventOutputs, CompositorScrollRequest, NvimComposedOutput,
+        compositor_runtime_snapshot, current_message_grid_id,
+    },
 };
 
 use output::{
@@ -74,8 +78,8 @@ unsafe extern "C" {
         cterm_fg: Integer,
         cterm_bg: Integer,
     );
-    fn ui_call_grid_resize(grid: Integer, width: Integer, height: Integer);
-    fn ui_call_raw_line(
+    fn ui_uncomposed_call_grid_resize(grid: Integer, width: Integer, height: Integer);
+    fn ui_uncomposed_call_raw_line(
         grid: Integer,
         row: Integer,
         startcol: Integer,
@@ -91,7 +95,7 @@ unsafe extern "C" {
     pub fn ui_grid_cursor_goto(grid_handle: VimHandleT, new_row: libc::c_int, new_col: libc::c_int);
     fn log_debug_message(message: *const libc::c_char);
     fn os_sleep(ms: u64);
-    pub fn ui_call_grid_scroll(
+    fn ui_uncomposed_call_grid_scroll(
         grid: Integer,
         top: Integer,
         bot: Integer,
@@ -130,20 +134,20 @@ impl GridOutputTarget {
     }
 }
 
-/// Emits normal-grid commands through Neovim's C UI interface.
-struct NvimGridOutput {
+/// Delivers original grid events only to non-composed Neovim UIs.
+struct NvimUncomposedOutput {
     target: GridOutputTarget,
 }
 
-impl UiOutput<LocalGridSpace> for NvimGridOutput {
+impl UiOutput<LocalGridSpace> for NvimUncomposedOutput {
     fn emit(&mut self, command: UiCommand<LocalGridSpace>) {
         let grid = Integer::from(self.target.grid.as_native_handle());
         match command {
             UiCommand::GridResize(size) => {
-                // SAFETY: The dimensions and grid identity were validated in
-                // safe Rust and are converted at the final C boundary.
+                // SAFETY: The identity and dimensions were validated in safe
+                // Rust and the generated callback is synchronous.
                 unsafe {
-                    ui_call_grid_resize(
+                    ui_uncomposed_call_grid_resize(
                         grid,
                         Integer::from(size.width),
                         Integer::from(size.height),
@@ -162,10 +166,10 @@ impl UiOutput<LocalGridSpace> for NvimGridOutput {
                 }
             }
             UiCommand::GridScroll { region, delta } => {
-                // SAFETY: The ordered region and its delta remain valid for
-                // this synchronous callback.
+                // SAFETY: The region and delta were validated in safe Rust and
+                // the generated callback is synchronous.
                 unsafe {
-                    ui_call_grid_scroll(
+                    ui_uncomposed_call_grid_scroll(
                         grid,
                         Integer::from(region.rows.start),
                         Integer::from(region.rows.end),
@@ -200,12 +204,10 @@ impl UiOutput<LocalGridSpace> for NvimGridOutput {
 
     fn emit_raw_line<Cells: RawLineCells>(&mut self, line: RawLineCommand<Cells>) {
         let grid = Integer::from(self.target.grid.as_native_handle());
-        // SAFETY: `RawLineCommand` guarantees equally sized readable payloads
-        // matching the changed range. They remain alive for this synchronous
-        // callback.
+        // SAFETY: `RawLineCommand` owns or borrows equally sized readable
+        // payloads for the synchronous generated callback.
         unsafe {
-            ui_may_set_default_colors();
-            ui_call_raw_line(
+            ui_uncomposed_call_raw_line(
                 grid,
                 Integer::from(line.row),
                 Integer::from(line.columns.start),
@@ -216,12 +218,95 @@ impl UiOutput<LocalGridSpace> for NvimGridOutput {
                 line.characters().as_ptr(),
                 line.attributes().as_ptr(),
             );
+        }
+    }
+}
 
+/// Routes Rust-originated grid events through the compositor before delivery.
+struct NvimGridOutput {
+    target: GridOutputTarget,
+}
+
+impl UiOutput<LocalGridSpace> for NvimGridOutput {
+    fn emit(&mut self, command: UiCommand<LocalGridSpace>) {
+        match command {
+            UiCommand::GridResize(size) => {
+                let context = registered_context();
+                let mut composed = NvimComposedOutput;
+                let mut uncomposed = NvimUncomposedOutput {
+                    target: self.target,
+                };
+                let mut outputs = CompositorEventOutputs::new(&mut composed, &mut uncomposed);
+
+                context
+                    .compositor()
+                    .route_grid_resize(self.target.grid, size, &mut outputs)
+                    .expect("grid-resize routing must preserve compositor invariants");
+            }
+            UiCommand::GridScroll { region, delta } => {
+                let context = registered_context();
+                let runtime =
+                    compositor_runtime_snapshot().expect("compositor runtime must be valid");
+                let request = CompositorScrollRequest::new(region, delta);
+                let mut composed = NvimComposedOutput;
+                let mut uncomposed = NvimUncomposedOutput {
+                    target: self.target,
+                };
+                let mut outputs = CompositorEventOutputs::new(&mut composed, &mut uncomposed);
+
+                context
+                    .compositor()
+                    .route_grid_scroll(
+                        context.grid(),
+                        current_message_grid_id(),
+                        self.target.grid,
+                        request,
+                        runtime,
+                        &mut outputs,
+                    )
+                    .expect("grid-scroll routing must preserve compositor invariants");
+            }
+            command => NvimUncomposedOutput {
+                target: self.target,
+            }
+            .emit(command),
+        }
+    }
+
+    fn emit_raw_line<Cells: RawLineCells>(&mut self, line: RawLineCommand<Cells>) {
+        ui_may_set_default_colors();
+
+        let row = line.row;
+        let clear_column = line.clear_column;
+        let context = registered_context();
+        let runtime = compositor_runtime_snapshot().expect("compositor runtime must be valid");
+        let mut composed = NvimComposedOutput;
+        let mut uncomposed = NvimUncomposedOutput {
+            target: self.target,
+        };
+        let mut outputs = CompositorEventOutputs::new(&mut composed, &mut uncomposed);
+
+        context
+            .compositor()
+            .route_grid_raw_line(
+                context.grid(),
+                current_message_grid_id(),
+                self.target.grid,
+                line,
+                runtime,
+                &mut outputs,
+            )
+            .expect("raw-line routing must preserve compositor invariants");
+
+        let grid = Integer::from(self.target.grid.as_native_handle());
+        // SAFETY: Redraw-delay diagnostics run synchronously on Neovim's main
+        // thread after both composed and uncomposed line delivery.
+        unsafe {
             if p_wd != 0 && (rdb_flags & RdbFlags::Line as u32) != 0 {
                 ui_call_grid_cursor_goto(
                     grid,
-                    Integer::from(line.row),
-                    Integer::from(std::cmp::min(line.clear_column, self.target.width - 1)),
+                    Integer::from(row),
+                    Integer::from(std::cmp::min(clear_column, self.target.width - 1)),
                 );
                 ui_call_flush();
                 os_sleep(p_wd.unsigned_abs());

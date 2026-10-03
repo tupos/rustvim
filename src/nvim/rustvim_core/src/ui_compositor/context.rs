@@ -5,7 +5,7 @@
 use std::sync::{Mutex, MutexGuard};
 
 use crate::{
-    grid::{ComposedGridSpace, DEFAULT_GRID_ID, GridContext, GridId, GridSize},
+    grid::{ComposedGridSpace, DEFAULT_GRID_ID, GridContext, GridId, GridSize, LocalGridSpace},
     ui::{
         LineFlags,
         output::{
@@ -22,6 +22,27 @@ use super::{
     CompositorScrollRequest, RawLineDiagnostic, log_raw_line_diagnostic,
 };
 
+/// Output sinks for composed and original uncomposed event delivery.
+pub(crate) struct CompositorEventOutputs<'output, ComposedOutput, UncomposedOutput> {
+    composed: &'output mut ComposedOutput,
+    uncomposed: &'output mut UncomposedOutput,
+}
+
+impl<'output, ComposedOutput, UncomposedOutput>
+    CompositorEventOutputs<'output, ComposedOutput, UncomposedOutput>
+{
+    /// Borrows both destinations for one complete routed event.
+    pub(crate) fn new(
+        composed: &'output mut ComposedOutput,
+        uncomposed: &'output mut UncomposedOutput,
+    ) -> Self {
+        Self {
+            composed,
+            uncomposed,
+        }
+    }
+}
+
 /// State owned by the compositor subsystem for the lifetime of the editor.
 pub(crate) struct CompositorContext {
     state: Mutex<Compositor>,
@@ -37,6 +58,22 @@ impl CompositorContext {
             buffer_pool: Mutex::new(CellBufferPool::new()),
             debug_highlights: Mutex::new(CompositorDebugHighlights::empty()),
         }
+    }
+
+    /// Routes one grid-resize event to composed and uncomposed outputs.
+    pub(crate) fn route_grid_resize<ComposedOutput, UncomposedOutput>(
+        &self,
+        grid_id: GridId,
+        size: GridSize,
+        outputs: &mut CompositorEventOutputs<'_, ComposedOutput, UncomposedOutput>,
+    ) -> CompositorResult<()>
+    where
+        ComposedOutput: UiOutput<ComposedGridSpace>,
+        UncomposedOutput: UiOutput<LocalGridSpace>,
+    {
+        self.process_grid_resize(grid_id, size, outputs.composed)?;
+        outputs.uncomposed.emit(UiCommand::GridResize(size));
+        Ok(())
     }
 
     /// Processes one validated grid-resize event.
@@ -114,6 +151,33 @@ impl CompositorContext {
         )
         .ok_or(CompositorError::InvalidLineState)?;
         output.emit_raw_line(command);
+        Ok(())
+    }
+
+    /// Routes one raw-line event to composed and uncomposed outputs.
+    pub(crate) fn route_grid_raw_line<Cells, ComposedOutput, UncomposedOutput>(
+        &self,
+        grids: &GridContext,
+        message_grid_id: Option<GridId>,
+        grid_id: GridId,
+        line: RawLineCommand<Cells>,
+        runtime: CompositorRuntime,
+        outputs: &mut CompositorEventOutputs<'_, ComposedOutput, UncomposedOutput>,
+    ) -> CompositorResult<()>
+    where
+        Cells: RawLineCells,
+        ComposedOutput: UiOutput<ComposedGridSpace>,
+        UncomposedOutput: UiOutput<LocalGridSpace>,
+    {
+        self.process_grid_raw_line(
+            grids,
+            message_grid_id,
+            grid_id,
+            &line,
+            runtime,
+            outputs.composed,
+        )?;
+        outputs.uncomposed.emit_raw_line(line);
         Ok(())
     }
 
@@ -237,6 +301,37 @@ impl CompositorContext {
         }
     }
 
+    /// Routes one grid-scroll event to composed and uncomposed outputs.
+    pub(crate) fn route_grid_scroll<ComposedOutput, UncomposedOutput>(
+        &self,
+        grids: &GridContext,
+        message_grid_id: Option<GridId>,
+        grid_id: GridId,
+        request: CompositorScrollRequest,
+        runtime: CompositorRuntime,
+        outputs: &mut CompositorEventOutputs<'_, ComposedOutput, UncomposedOutput>,
+    ) -> CompositorResult<()>
+    where
+        ComposedOutput: UiOutput<ComposedGridSpace>,
+        UncomposedOutput: UiOutput<LocalGridSpace>,
+    {
+        let original_region = request.region.clone();
+        let original_delta = request.delta;
+        self.process_grid_scroll(
+            grids,
+            message_grid_id,
+            grid_id,
+            request,
+            runtime,
+            outputs.composed,
+        )?;
+        outputs.uncomposed.emit(UiCommand::GridScroll {
+            region: original_region,
+            delta: original_delta,
+        });
+        Ok(())
+    }
+
     /// Processes one validated grid-scroll event.
     ///
     /// A disabled compositor or a grid absent from the registered layers
@@ -323,5 +418,160 @@ impl CompositorContext {
         self.debug_highlights
             .try_lock()
             .expect("compositor debug highlights are already borrowed")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{cell::RefCell, marker::PhantomData, rc::Rc};
+
+    use crate::{
+        grid::{GridDelta, GridRegion, LineBuffer, LocalGridSpace, ScreenGrid, schar_from_ascii},
+        ui::output::BorrowedRawLineCommand,
+    };
+
+    use super::*;
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum OutputDestination {
+        Composed,
+        Uncomposed,
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum RecordedCommand {
+        Resize,
+        RawLine,
+        Scroll,
+    }
+
+    /// Records output while proving that subsystem locks are reentrant.
+    struct ReentrantRecordingOutput<'context, Space> {
+        destination: OutputDestination,
+        events: Rc<RefCell<Vec<(OutputDestination, RecordedCommand)>>>,
+        grids: &'context GridContext,
+        compositor: &'context CompositorContext,
+        space: PhantomData<Space>,
+    }
+
+    impl<'context, Space> ReentrantRecordingOutput<'context, Space> {
+        fn new(
+            destination: OutputDestination,
+            events: Rc<RefCell<Vec<(OutputDestination, RecordedCommand)>>>,
+            grids: &'context GridContext,
+            compositor: &'context CompositorContext,
+        ) -> Self {
+            Self {
+                destination,
+                events,
+                grids,
+                compositor,
+                space: PhantomData,
+            }
+        }
+
+        fn record(&self, command: RecordedCommand) {
+            {
+                let _grid_store = self.grids.lock_store();
+                let _compositor = self.compositor.lock_state();
+                let _buffer_pool = self.compositor.lock_buffer_pool();
+            }
+            self.events.borrow_mut().push((self.destination, command));
+        }
+    }
+
+    impl<Space> UiOutput<Space> for ReentrantRecordingOutput<'_, Space> {
+        fn emit(&mut self, command: UiCommand<Space>) {
+            let command = match command {
+                UiCommand::GridResize(_) => RecordedCommand::Resize,
+                UiCommand::GridScroll { .. } => RecordedCommand::Scroll,
+                _ => panic!("unexpected command emitted by routing test"),
+            };
+            self.record(command);
+        }
+
+        fn emit_raw_line<Cells: RawLineCells>(&mut self, _line: RawLineCommand<Cells>) {
+            self.record(RecordedCommand::RawLine);
+        }
+    }
+
+    #[test]
+    fn routes_compositor_events_before_uncomposed_delivery_without_held_locks() {
+        let grids = GridContext::new();
+        let mut line_buffer = LineBuffer::new(3);
+        let mut default_grid = ScreenGrid::new(2, 3, true, &mut line_buffer);
+        default_grid.set_id_for_test(DEFAULT_GRID_ID);
+        grids.lock_store().register(default_grid).unwrap();
+
+        let compositor = CompositorContext::new();
+        {
+            let mut state = compositor.lock_state();
+            state.initialize_layers(DEFAULT_GRID_ID).unwrap();
+            state.attach();
+        }
+
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let mut composed = ReentrantRecordingOutput::<ComposedGridSpace>::new(
+            OutputDestination::Composed,
+            Rc::clone(&events),
+            &grids,
+            &compositor,
+        );
+        let mut uncomposed = ReentrantRecordingOutput::<LocalGridSpace>::new(
+            OutputDestination::Uncomposed,
+            Rc::clone(&events),
+            &grids,
+            &compositor,
+        );
+        let mut outputs = CompositorEventOutputs::new(&mut composed, &mut uncomposed);
+        let size = GridSize::try_new(2, 3).unwrap();
+        let runtime =
+            CompositorRuntime::try_new(2, 3, 0, 0, 0, CompositorDebugHighlights::empty()).unwrap();
+
+        compositor
+            .route_grid_resize(DEFAULT_GRID_ID, size, &mut outputs)
+            .unwrap();
+
+        let characters = [schar_from_ascii('x')];
+        let attributes = [0];
+        let line = BorrowedRawLineCommand::try_new(
+            0,
+            0..1,
+            3,
+            0,
+            LineFlags::default(),
+            &characters,
+            &attributes,
+        )
+        .unwrap();
+        compositor
+            .route_grid_raw_line(&grids, None, DEFAULT_GRID_ID, line, runtime, &mut outputs)
+            .unwrap();
+
+        compositor
+            .route_grid_scroll(
+                &grids,
+                None,
+                DEFAULT_GRID_ID,
+                CompositorScrollRequest::new(
+                    GridRegion::try_new(0..2, 0..3).unwrap(),
+                    GridDelta::new(-1, 0),
+                ),
+                runtime,
+                &mut outputs,
+            )
+            .unwrap();
+
+        assert_eq!(
+            *events.borrow(),
+            [
+                (OutputDestination::Composed, RecordedCommand::Resize),
+                (OutputDestination::Uncomposed, RecordedCommand::Resize),
+                (OutputDestination::Composed, RecordedCommand::RawLine),
+                (OutputDestination::Uncomposed, RecordedCommand::RawLine),
+                (OutputDestination::Composed, RecordedCommand::Scroll),
+                (OutputDestination::Uncomposed, RecordedCommand::Scroll),
+            ]
+        );
     }
 }

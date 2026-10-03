@@ -8,7 +8,6 @@ mod runtime;
 pub(in crate::ui_compositor) use entrypoints::{
     place_grid_in_registered_layers, remove_registered_layer, update_registered_layer_policy,
 };
-pub(in crate::ui_compositor) use nvim_output::NvimOutput;
-pub(in crate::ui_compositor) use runtime::{
-    compositor_runtime_snapshot, initialize_debug_highlights,
-};
+pub(crate) use nvim_output::NvimComposedOutput;
+pub(in crate::ui_compositor) use runtime::initialize_debug_highlights;
+pub(crate) use runtime::{compositor_runtime_snapshot, current_message_grid_id};

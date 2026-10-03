@@ -1,7 +1,8 @@
 mod context;
 mod ffi;
 
-pub(crate) use context::CompositorContext;
+pub(crate) use context::{CompositorContext, CompositorEventOutputs};
+pub(crate) use ffi::{NvimComposedOutput, compositor_runtime_snapshot, current_message_grid_id};
 
 use std::{ops::Range, sync::MutexGuard};
 

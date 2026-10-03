@@ -6,7 +6,7 @@ use crate::{
     context::registered_context,
     defines::OptInt,
     globals,
-    grid::{ComposedGridSpace, VimSAttrT, lock_grid_store},
+    grid::{ComposedGridSpace, GridId, VimHandleT, VimSAttrT, lock_grid_store},
     ui::output::{UiCommand, UiOutput},
 };
 
@@ -18,6 +18,7 @@ use super::super::{
 unsafe extern "C" {
     static mut p_wd: OptInt;
     static mut rdb_flags: libc::c_uint;
+    static mut msg_grid_handle: VimHandleT;
 
     fn syn_check_group(name: *const libc::c_char, length: libc::size_t) -> libc::c_int;
     fn syn_id2attr(highlight_id: libc::c_int) -> libc::c_int;
@@ -47,8 +48,16 @@ pub(in crate::ui_compositor) fn initialize_debug_highlights() {
     *lock_compositor_debug_highlights() = highlights;
 }
 
+/// Returns the current message-grid identity when one has been assigned.
+pub(crate) fn current_message_grid_id() -> Option<GridId> {
+    // SAFETY: Rendering events read Neovim globals synchronously on the main
+    // thread.
+    let grid_handle = unsafe { msg_grid_handle };
+    (grid_handle > 0).then_some(GridId::new(grid_handle))
+}
+
 /// Captures C-owned settings as validated native Rust values.
-pub(in crate::ui_compositor) fn compositor_runtime_snapshot() -> Option<CompositorRuntime> {
+pub(crate) fn compositor_runtime_snapshot() -> Option<CompositorRuntime> {
     // SAFETY: Compositor events run on Neovim's main thread. The accessor
     // returns the current dynamic MsgSeparator attribute by value.
     let (screen_rows, screen_columns, message_separator_attribute, flags, write_delay) = unsafe {
