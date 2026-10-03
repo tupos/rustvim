@@ -185,48 +185,6 @@ pub extern "C" fn ui_comp_compose_grid(grid_handle: Integer) {
         .expect("grid recomposition must preserve compositor invariants");
 }
 
-/// Places a new or existing grid in the registered compositor layers.
-///
-/// An existing grid is restored to its requested placement even if recomposing
-/// an exposed area fails. The grid-store borrow is released before invoking
-/// the callback.
-pub(in crate::ui_compositor) fn place_grid_in_registered_layers(
-    grid_store: impl GridAccess,
-    target: CompositorGridPlacementTarget,
-    current_window_layer: Option<usize>,
-    request: CompositorGridPlacementRequest,
-    mut recompose_area: impl FnMut(CompositorRecomposeArea) -> CompositorResult<()>,
-) -> CompositorResult<CompositorGridPlacementOutcome> {
-    let preparation = {
-        let grid_store = grid_store;
-        lock_compositor().prepare_grid_placement(
-            &grid_store,
-            target,
-            current_window_layer,
-            request,
-        )?
-    };
-
-    let outcome = CompositorGridPlacementOutcome::from_moved(preparation.plan.moved);
-    let exposed_areas_result = preparation
-        .plan
-        .exposed_areas
-        .iter()
-        .cloned()
-        .try_for_each(&mut recompose_area);
-
-    if let Some(completion) = preparation.deferred_completion {
-        lock_compositor().finish_grid_placement(completion)?;
-    }
-
-    exposed_areas_result?;
-    if let Some(area) = preparation.plan.redraw_area {
-        recompose_area(area)?;
-    }
-
-    Ok(outcome)
-}
-
 /// Places one validated grid in the registered compositor layer stack.
 fn place_registered_grid(
     grid_id: GridId,
@@ -260,15 +218,17 @@ fn place_registered_grid(
         recompose_area_from_registered_grids(message_grid_id, area, runtime, &mut output)
             .map_err(|_| CompositorError::RecompositionFailed)
     };
-    place_grid_in_registered_layers(
-        grid_store,
-        target,
-        current_window_layer,
-        request,
-        recompose_area,
-    )
-    .expect("grid placement must preserve compositor invariants")
-    .did_move()
+    registered_context()
+        .compositor()
+        .place_grid_in_registered_layers(
+            grid_store,
+            target,
+            current_window_layer,
+            request,
+            recompose_area,
+        )
+        .expect("grid placement must preserve compositor invariants")
+        .did_move()
 }
 
 /// Places a new or existing regular grid in the compositor layer stack.
@@ -376,14 +336,6 @@ pub extern "C" fn ui_comp_update_grid_layer(
     .expect("layer policy update must preserve compositor invariants");
 }
 
-/// Removes one registered grid from the compositor layer stack.
-pub(in crate::ui_compositor) fn remove_registered_layer(
-    grid_store: impl GridAccess,
-    layer_index: usize,
-) -> CompositorResult<CompositorLayerRemoval> {
-    lock_compositor().remove_layer(&grid_store, layer_index)
-}
-
 /// Removes one grid from the registered layer stack and recomposes its area.
 ///
 /// An unregistered grid is an expected successful no-op.
@@ -400,7 +352,9 @@ pub extern "C" fn ui_comp_remove_grid(grid_handle: Integer) {
         return;
     };
     let grid_store = lock_grid_store();
-    let removal = remove_registered_layer(grid_store, layer_index)
+    let removal = registered_context()
+        .compositor()
+        .remove_registered_layer(grid_store, layer_index)
         .expect("registered layer removal must preserve compositor invariants");
 
     if let Some(area) = removal.recompose_area {

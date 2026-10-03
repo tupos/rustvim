@@ -19,11 +19,6 @@ use crate::{
         output::{BorrowedRawLineCommand, CellBuffer, CellBufferPool, UiCommand, UiOutput},
     },
 };
-#[cfg(test)]
-use ffi::{
-    place_grid_in_registered_layers, remove_registered_layer, update_registered_layer_policy,
-};
-
 /// Result of composing one foreground segment over its background.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct SegmentComposition {
@@ -3167,6 +3162,7 @@ fn is_negative_space(character: VimSCharT) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::ffi::update_registered_layer_policy;
     use super::*;
     use std::sync::{
         Mutex,
@@ -4070,23 +4066,25 @@ mod tests {
             .grid_placement_target(moving_grid_id, true)
             .unwrap();
         assert_eq!(
-            place_grid_in_registered_layers(
-                grid_store,
-                target,
-                None,
-                CompositorGridPlacementRequest {
-                    placement: CompositorGridPlacement::try_new(1, 2, 2, 2).unwrap(),
-                    z_index: 0,
-                    blending: false,
-                    valid: true,
-                    on_top: false,
-                    accepts_mouse_input: true,
-                },
-                |area| {
-                    recomposed_areas.push(area);
-                    Ok(())
-                },
-            ),
+            registered_context()
+                .compositor()
+                .place_grid_in_registered_layers(
+                    grid_store,
+                    target,
+                    None,
+                    CompositorGridPlacementRequest {
+                        placement: CompositorGridPlacement::try_new(1, 2, 2, 2).unwrap(),
+                        z_index: 0,
+                        blending: false,
+                        valid: true,
+                        on_top: false,
+                        accepts_mouse_input: true,
+                    },
+                    |area| {
+                        recomposed_areas.push(area);
+                        Ok(())
+                    },
+                ),
             Ok(CompositorGridPlacementOutcome::Moved)
         );
         assert_eq!(
@@ -4152,23 +4150,25 @@ mod tests {
             )
         };
         assert_eq!(
-            place_grid_in_registered_layers(
-                grid_store,
-                target,
-                current_window_layer,
-                CompositorGridPlacementRequest {
-                    placement: CompositorGridPlacement::try_new(1, 2, 2, 2).unwrap(),
-                    z_index: 0,
-                    blending: false,
-                    valid: true,
-                    on_top: false,
-                    accepts_mouse_input: true,
-                },
-                |area| {
-                    recomposed_areas.push(area);
-                    Ok(())
-                },
-            ),
+            registered_context()
+                .compositor()
+                .place_grid_in_registered_layers(
+                    grid_store,
+                    target,
+                    current_window_layer,
+                    CompositorGridPlacementRequest {
+                        placement: CompositorGridPlacement::try_new(1, 2, 2, 2).unwrap(),
+                        z_index: 0,
+                        blending: false,
+                        valid: true,
+                        on_top: false,
+                        accepts_mouse_input: true,
+                    },
+                    |area| {
+                        recomposed_areas.push(area);
+                        Ok(())
+                    },
+                ),
             Ok(CompositorGridPlacementOutcome::Moved)
         );
         assert_eq!(
@@ -4372,7 +4372,9 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(
-            remove_registered_layer(grid_store, layer_index),
+            registered_context()
+                .compositor()
+                .remove_registered_layer(grid_store, layer_index),
             Ok(CompositorLayerRemoval {
                 recompose_area: Some(CompositorRecomposeArea {
                     rows: 1..3,

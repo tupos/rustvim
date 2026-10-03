@@ -20,10 +20,12 @@ use crate::{
 
 use super::{
     Compositor, CompositorAreaRequest, CompositorCursorRequest, CompositorCursorUpdate,
-    CompositorDebugHighlights, CompositorError, CompositorLineInput,
-    CompositorMessagePositionRequest, CompositorRawLineAction, CompositorRawLineOperation,
-    CompositorRawLineRequest, CompositorRecomposeArea, CompositorResult, CompositorRuntime,
-    CompositorScrollOperation, CompositorScrollRequest, RawLineDiagnostic, log_raw_line_diagnostic,
+    CompositorDebugHighlights, CompositorError, CompositorGridPlacementOutcome,
+    CompositorGridPlacementRequest, CompositorGridPlacementTarget, CompositorLayerRemoval,
+    CompositorLineInput, CompositorMessagePositionRequest, CompositorRawLineAction,
+    CompositorRawLineOperation, CompositorRawLineRequest, CompositorRecomposeArea,
+    CompositorResult, CompositorRuntime, CompositorScrollOperation, CompositorScrollRequest,
+    RawLineDiagnostic, log_raw_line_diagnostic,
 };
 
 /// Output sinks for composed and original uncomposed event delivery.
@@ -155,6 +157,58 @@ impl CompositorContext {
                 .map_err(|_| CompositorError::RecompositionFailed)?;
         }
         Ok(())
+    }
+
+    /// Places a new or existing grid in the compositor layer stack.
+    ///
+    /// An existing grid is restored to its requested placement even if
+    /// recomposing an exposed area fails. The grid-store borrow is released
+    /// before invoking the callback.
+    pub(in crate::ui_compositor) fn place_grid_in_registered_layers(
+        &self,
+        grid_store: impl super::GridAccess,
+        target: CompositorGridPlacementTarget,
+        current_window_layer: Option<usize>,
+        request: CompositorGridPlacementRequest,
+        mut recompose_area: impl FnMut(CompositorRecomposeArea) -> CompositorResult<()>,
+    ) -> CompositorResult<CompositorGridPlacementOutcome> {
+        let preparation = {
+            let grid_store = grid_store;
+            self.lock_state().prepare_grid_placement(
+                &grid_store,
+                target,
+                current_window_layer,
+                request,
+            )?
+        };
+
+        let outcome = CompositorGridPlacementOutcome::from_moved(preparation.plan.moved);
+        let exposed_areas_result = preparation
+            .plan
+            .exposed_areas
+            .iter()
+            .cloned()
+            .try_for_each(&mut recompose_area);
+
+        if let Some(completion) = preparation.deferred_completion {
+            self.lock_state().finish_grid_placement(completion)?;
+        }
+
+        exposed_areas_result?;
+        if let Some(area) = preparation.plan.redraw_area {
+            recompose_area(area)?;
+        }
+
+        Ok(outcome)
+    }
+
+    /// Removes one registered grid from the compositor layer stack.
+    pub(in crate::ui_compositor) fn remove_registered_layer(
+        &self,
+        grid_store: impl super::GridAccess,
+        layer_index: usize,
+    ) -> CompositorResult<CompositorLayerRemoval> {
+        self.lock_state().remove_layer(&grid_store, layer_index)
     }
 
     /// Routes one grid-cursor event to composed and uncomposed outputs.
