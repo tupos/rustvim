@@ -6,7 +6,7 @@ use std::sync::{Mutex, MutexGuard};
 
 use crate::{
     grid::{
-        ComposedGridSpace, DEFAULT_GRID_ID, GridContext, GridId, GridPosition, GridSize,
+        ComposedGridSpace, DEFAULT_GRID_ID, GridContext, GridId, GridPosition, GridSize, GridStore,
         LocalGridSpace,
     },
     ui::{
@@ -25,7 +25,7 @@ use super::{
     CompositorLineInput, CompositorMessagePositionRequest, CompositorRawLineAction,
     CompositorRawLineOperation, CompositorRawLineRequest, CompositorRecomposeArea,
     CompositorResult, CompositorRuntime, CompositorScrollOperation, CompositorScrollRequest,
-    RawLineDiagnostic, log_raw_line_diagnostic,
+    RawLineDiagnostic, RegisteredGridPlacement, log_raw_line_diagnostic,
 };
 
 /// Output sinks for composed and original uncomposed event delivery.
@@ -154,6 +154,75 @@ impl CompositorContext {
         }
         if let Some(area) = plan.recompose {
             self.recompose_registered_area(grids, Some(message_grid_id), area, runtime, output)
+                .map_err(|_| CompositorError::RecompositionFailed)?;
+        }
+        Ok(())
+    }
+
+    /// Places one identified grid and recomposes every affected screen area.
+    ///
+    /// Grid and compositor borrows are released before recomposition emits
+    /// output.
+    pub(in crate::ui_compositor) fn place_registered_grid(
+        &self,
+        grids: &GridContext,
+        placement: RegisteredGridPlacement,
+        output: &mut impl UiOutput<ComposedGridSpace>,
+    ) -> CompositorResult<bool> {
+        let grid_store = grids.lock_store();
+        if GridStore::grid(&grid_store, placement.grid_id).is_err() {
+            return Ok(false);
+        }
+        let (target, current_window_layer) = {
+            let compositor = self.lock_state();
+            let was_registered = compositor.layer_index(placement.grid_id)?.is_some();
+            let target = compositor.grid_placement_target(placement.grid_id, was_registered)?;
+            let current_window_layer = placement
+                .current_window_grid_id
+                .map(|grid_id| compositor.layer_index(grid_id))
+                .transpose()?
+                .flatten();
+            (target, current_window_layer)
+        };
+        let recompose_area = |area| {
+            self.recompose_registered_area(
+                grids,
+                placement.message_grid_id,
+                area,
+                placement.runtime,
+                output,
+            )
+            .map_err(|_| CompositorError::RecompositionFailed)
+        };
+        let outcome = self.place_grid_in_registered_layers(
+            grid_store,
+            target,
+            current_window_layer,
+            placement.request,
+            recompose_area,
+        )?;
+
+        Ok(outcome.did_move())
+    }
+
+    /// Removes one identified grid and recomposes the area it exposed.
+    ///
+    /// An unregistered grid is an expected successful no-op.
+    pub(in crate::ui_compositor) fn remove_registered_grid(
+        &self,
+        grids: &GridContext,
+        grid_id: GridId,
+        message_grid_id: Option<GridId>,
+        runtime: CompositorRuntime,
+        output: &mut impl UiOutput<ComposedGridSpace>,
+    ) -> CompositorResult<()> {
+        let Some(layer_index) = self.lock_state().layer_index(grid_id)? else {
+            return Ok(());
+        };
+        let removal = self.remove_registered_layer(grids.lock_store(), layer_index)?;
+
+        if let Some(area) = removal.recompose_area {
+            self.recompose_registered_area(grids, message_grid_id, area, runtime, output)
                 .map_err(|_| CompositorError::RecompositionFailed)?;
         }
         Ok(())

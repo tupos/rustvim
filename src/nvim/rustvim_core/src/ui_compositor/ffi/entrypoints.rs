@@ -185,52 +185,6 @@ pub extern "C" fn ui_comp_compose_grid(grid_handle: Integer) {
         .expect("grid recomposition must preserve compositor invariants");
 }
 
-/// Places one validated grid in the registered compositor layer stack.
-fn place_registered_grid(
-    grid_id: GridId,
-    current_window_grid_id: Option<GridId>,
-    message_grid_id: Option<GridId>,
-    request: CompositorGridPlacementRequest,
-    runtime: CompositorRuntime,
-) -> bool {
-    let grid_store = lock_grid_store();
-    if grid_store.grid(grid_id).is_none() {
-        return false;
-    }
-    let (target, current_window_layer) = {
-        let compositor = lock_compositor();
-        let was_registered = compositor
-            .layer_index(grid_id)
-            .expect("compositor layers must be initialized")
-            .is_some();
-        let target = compositor
-            .grid_placement_target(grid_id, was_registered)
-            .expect("grid identity and compositor layers must agree");
-        let current_window_layer = current_window_grid_id
-            .map(|grid_id| compositor.layer_index(grid_id))
-            .transpose()
-            .expect("compositor layers must be initialized")
-            .flatten();
-        (target, current_window_layer)
-    };
-    let mut output = NvimComposedOutput;
-    let recompose_area = |area| {
-        recompose_area_from_registered_grids(message_grid_id, area, runtime, &mut output)
-            .map_err(|_| CompositorError::RecompositionFailed)
-    };
-    registered_context()
-        .compositor()
-        .place_grid_in_registered_layers(
-            grid_store,
-            target,
-            current_window_layer,
-            request,
-            recompose_area,
-        )
-        .expect("grid placement must preserve compositor invariants")
-        .did_move()
-}
-
 /// Places a new or existing regular grid in the compositor layer stack.
 ///
 /// Rust determines whether the identity is already registered and performs
@@ -271,13 +225,22 @@ pub extern "C" fn ui_comp_put_grid(
     );
     let runtime = compositor_runtime_snapshot().expect("compositor runtime must be valid");
 
-    place_registered_grid(
-        GridId::new(grid_handle),
-        current_window_grid_id,
-        current_message_grid_id(),
-        request,
-        runtime,
-    )
+    let context = registered_context();
+    let mut output = NvimComposedOutput;
+    context
+        .compositor()
+        .place_registered_grid(
+            context.grid(),
+            RegisteredGridPlacement::new(
+                GridId::new(grid_handle),
+                current_window_grid_id,
+                current_message_grid_id(),
+                request,
+                runtime,
+            ),
+            &mut output,
+        )
+        .expect("grid placement must preserve compositor invariants")
 }
 
 /// Handles one generated grid-cursor event.
@@ -345,24 +308,20 @@ pub extern "C" fn ui_comp_remove_grid(grid_handle: Integer) {
         i32::try_from(grid_handle).expect("grid handle must fit the compositor grid identity");
     assert_ne!(grid_handle, 1);
     let grid_id = GridId::new(grid_handle);
-    let Some(layer_index) = lock_compositor()
-        .layer_index(grid_id)
-        .expect("compositor layers must be initialized")
-    else {
-        return;
-    };
-    let grid_store = lock_grid_store();
-    let removal = registered_context()
-        .compositor()
-        .remove_registered_layer(grid_store, layer_index)
-        .expect("registered layer removal must preserve compositor invariants");
 
-    if let Some(area) = removal.recompose_area {
-        let runtime = compositor_runtime_snapshot().expect("compositor runtime must be valid");
-        let mut output = NvimComposedOutput;
-        recompose_area_from_registered_grids(current_message_grid_id(), area, runtime, &mut output)
-            .expect("removed layer area must be recomposed");
-    }
+    let context = registered_context();
+    let runtime = compositor_runtime_snapshot().expect("compositor runtime must be valid");
+    let mut output = NvimComposedOutput;
+    context
+        .compositor()
+        .remove_registered_grid(
+            context.grid(),
+            grid_id,
+            current_message_grid_id(),
+            runtime,
+            &mut output,
+        )
+        .expect("registered layer removal must preserve compositor invariants");
 }
 
 /// Reads the cell from the topmost non-default compositor grid at one screen

@@ -300,6 +300,34 @@ impl CompositorGridPlacementRequest {
     }
 }
 
+/// Complete inputs for placing one registered compositor grid.
+pub(in crate::ui_compositor) struct RegisteredGridPlacement {
+    grid_id: GridId,
+    current_window_grid_id: Option<GridId>,
+    message_grid_id: Option<GridId>,
+    request: CompositorGridPlacementRequest,
+    runtime: CompositorRuntime,
+}
+
+impl RegisteredGridPlacement {
+    /// Combines grid identities, placement policy, and one runtime snapshot.
+    pub(in crate::ui_compositor) const fn new(
+        grid_id: GridId,
+        current_window_grid_id: Option<GridId>,
+        message_grid_id: Option<GridId>,
+        request: CompositorGridPlacementRequest,
+        runtime: CompositorRuntime,
+    ) -> Self {
+        Self {
+            grid_id,
+            current_window_grid_id,
+            message_grid_id,
+            request,
+            runtime,
+        }
+    }
+}
+
 impl CompositorGridPlacement {
     /// Constructs a placement with nonnegative dimensions.
     fn try_new(row: i32, column: i32, height: i32, width: i32) -> Option<Self> {
