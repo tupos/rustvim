@@ -3,7 +3,7 @@ pub(crate) mod output;
 use std::{
     ffi::CString,
     sync::{
-        Mutex,
+        Mutex, MutexGuard,
         atomic::{AtomicBool, Ordering},
     },
 };
@@ -12,7 +12,10 @@ use crate::{
     context::registered_context,
     defines::{Integer, OptInt},
     generated::enums::RdbFlags,
-    grid::{GridId, GridRow, LocalGridSpace, ScreenGrid, VimHandleT, VimSAttrT, VimSCharT},
+    grid::{
+        DEFAULT_GRID_ID, GridId, GridPosition, GridRow, LocalGridSpace, ScreenGrid, VimHandleT,
+        VimSAttrT, VimSCharT,
+    },
     ui_compositor::{
         CompositorEventOutputs, CompositorScrollRequest, NvimComposedOutput,
         compositor_runtime_snapshot, current_message_grid_id,
@@ -26,9 +29,77 @@ use output::{
 // TODO: move to highlight
 pub type RgbValue = i32;
 
+/// One grid-local cursor selected for eventual UI publication.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct GridCursor {
+    grid_id: GridId,
+    position: GridPosition,
+}
+
+impl GridCursor {
+    /// Combines one grid identity with its local cursor position.
+    const fn new(grid_id: GridId, position: GridPosition) -> Self {
+        Self { grid_id, position }
+    }
+}
+
+/// Current cursor and whether it must be republished to UI clients.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PendingGridCursorState {
+    current: GridCursor,
+    publication_pending: bool,
+}
+
+impl PendingGridCursorState {
+    /// Constructs the initial default-grid cursor without pending output.
+    const fn new() -> Self {
+        Self {
+            current: GridCursor::new(DEFAULT_GRID_ID, GridPosition::new(0, 0)),
+            publication_pending: false,
+        }
+    }
+
+    /// Selects a changed cursor and schedules it for publication.
+    fn schedule(&mut self, cursor: GridCursor) {
+        if cursor != self.current {
+            self.current = cursor;
+            self.publication_pending = true;
+        }
+    }
+
+    /// Schedules republication when the current cursor's grid moved.
+    fn mark_grid_moved(&mut self, grid_id: GridId) {
+        if self.current.grid_id == grid_id {
+            self.publication_pending = true;
+        }
+    }
+
+    /// Resets local coordinates while retaining the current grid identity.
+    fn reset_position_for_refresh(&mut self) {
+        self.current.position = GridPosition::new(0, 0);
+        self.publication_pending = true;
+    }
+
+    /// Schedules the current cursor for unconditional republication.
+    fn force_republication(&mut self) {
+        self.publication_pending = true;
+    }
+
+    /// Returns the current cursor without changing pending state.
+    const fn current(self) -> GridCursor {
+        self.current
+    }
+
+    /// Takes the current cursor when publication is pending.
+    fn take_pending(&mut self) -> Option<GridCursor> {
+        std::mem::replace(&mut self.publication_pending, false).then_some(self.current)
+    }
+}
+
 /// State owned by the UI output subsystem for the lifetime of the editor.
 pub(crate) struct UiContext {
     grid_output_buffer_pool: Mutex<CellBufferPool>,
+    pending_grid_cursor: Mutex<PendingGridCursorState>,
     pending_default_colors: AtomicBool,
 }
 
@@ -37,8 +108,46 @@ impl UiContext {
     pub(crate) const fn new() -> Self {
         Self {
             grid_output_buffer_pool: Mutex::new(CellBufferPool::new()),
+            pending_grid_cursor: Mutex::new(PendingGridCursorState::new()),
             pending_default_colors: AtomicBool::new(false),
         }
+    }
+
+    /// Acquires the pending grid-cursor state.
+    fn lock_pending_grid_cursor(&self) -> MutexGuard<'_, PendingGridCursorState> {
+        self.pending_grid_cursor
+            .try_lock()
+            .expect("pending grid cursor is already borrowed")
+    }
+
+    /// Selects a changed cursor and schedules it for publication.
+    fn schedule_grid_cursor(&self, cursor: GridCursor) {
+        self.lock_pending_grid_cursor().schedule(cursor);
+    }
+
+    /// Schedules republication when the current cursor's grid moved.
+    fn mark_grid_cursor_moved(&self, grid_id: GridId) {
+        self.lock_pending_grid_cursor().mark_grid_moved(grid_id);
+    }
+
+    /// Resets local coordinates while retaining the current grid identity.
+    fn reset_grid_cursor_position(&self) {
+        self.lock_pending_grid_cursor().reset_position_for_refresh();
+    }
+
+    /// Schedules the current cursor for unconditional republication.
+    fn force_grid_cursor_republication(&self) {
+        self.lock_pending_grid_cursor().force_republication();
+    }
+
+    /// Returns the current cursor without changing pending state.
+    fn current_grid_cursor(&self) -> GridCursor {
+        self.lock_pending_grid_cursor().current()
+    }
+
+    /// Takes the current cursor when publication is pending.
+    fn take_pending_grid_cursor(&self) -> Option<GridCursor> {
+        self.lock_pending_grid_cursor().take_pending()
     }
 
     /// Returns the reusable grid-output buffer pool.
@@ -60,7 +169,6 @@ impl UiContext {
 unsafe extern "C" {
     static mut p_wd: OptInt;
     static mut rdb_flags: libc::c_uint;
-    static mut pending_cursor_update: bool;
 
     static mut normal_fg: RgbValue;
     static mut normal_bg: RgbValue;
@@ -79,6 +187,7 @@ unsafe extern "C" {
         cterm_bg: Integer,
     );
     fn ui_uncomposed_call_grid_resize(grid: Integer, width: Integer, height: Integer);
+    fn ui_uncomposed_call_grid_cursor_goto(grid: Integer, row: Integer, col: Integer);
     fn ui_uncomposed_call_raw_line(
         grid: Integer,
         row: Integer,
@@ -90,9 +199,7 @@ unsafe extern "C" {
         chunk: *const VimSCharT,
         attrs: *const VimSAttrT,
     );
-    fn ui_call_grid_cursor_goto(grid: Integer, row: Integer, col: Integer);
     fn ui_call_flush();
-    pub fn ui_grid_cursor_goto(grid_handle: VimHandleT, new_row: libc::c_int, new_col: libc::c_int);
     fn log_debug_message(message: *const libc::c_char);
     fn os_sleep(ms: u64);
     fn ui_uncomposed_call_grid_scroll(
@@ -136,12 +243,12 @@ impl GridOutputTarget {
 
 /// Delivers original grid events only to non-composed Neovim UIs.
 struct NvimUncomposedOutput {
-    target: GridOutputTarget,
+    grid_id: GridId,
 }
 
 impl UiOutput<LocalGridSpace> for NvimUncomposedOutput {
     fn emit(&mut self, command: UiCommand<LocalGridSpace>) {
-        let grid = Integer::from(self.target.grid.as_native_handle());
+        let grid = Integer::from(self.grid_id.as_native_handle());
         match command {
             UiCommand::GridResize(size) => {
                 // SAFETY: The identity and dimensions were validated in safe
@@ -155,13 +262,13 @@ impl UiOutput<LocalGridSpace> for NvimUncomposedOutput {
                 }
             }
             UiCommand::GridCursorGoto(position) => {
-                // SAFETY: The grid identity and coordinates are converted at
+                // SAFETY: The validated cursor is delivered synchronously at
                 // the final C boundary.
                 unsafe {
-                    ui_grid_cursor_goto(
-                        self.target.grid.as_native_handle(),
-                        position.row,
-                        position.column,
+                    ui_uncomposed_call_grid_cursor_goto(
+                        grid,
+                        Integer::from(position.row),
+                        Integer::from(position.column),
                     );
                 }
             }
@@ -203,7 +310,7 @@ impl UiOutput<LocalGridSpace> for NvimUncomposedOutput {
     }
 
     fn emit_raw_line<Cells: RawLineCells>(&mut self, line: RawLineCommand<Cells>) {
-        let grid = Integer::from(self.target.grid.as_native_handle());
+        let grid = Integer::from(self.grid_id.as_native_handle());
         // SAFETY: `RawLineCommand` owns or borrows equally sized readable
         // payloads for the synchronous generated callback.
         unsafe {
@@ -227,6 +334,31 @@ struct NvimGridOutput {
     target: GridOutputTarget,
 }
 
+impl NvimGridOutput {
+    /// Publishes one pending cursor through composed and uncomposed outputs.
+    fn publish_cursor(cursor: GridCursor) {
+        let context = registered_context();
+        let runtime = compositor_runtime_snapshot().expect("compositor runtime must be valid");
+        let mut composed = NvimComposedOutput;
+        let mut uncomposed = NvimUncomposedOutput {
+            grid_id: cursor.grid_id,
+        };
+        let mut outputs = CompositorEventOutputs::new(&mut composed, &mut uncomposed);
+
+        context
+            .compositor()
+            .route_grid_cursor(
+                context.grid(),
+                current_message_grid_id(),
+                cursor.grid_id,
+                cursor.position,
+                runtime,
+                &mut outputs,
+            )
+            .expect("grid-cursor routing must preserve compositor invariants");
+    }
+}
+
 impl UiOutput<LocalGridSpace> for NvimGridOutput {
     fn emit(&mut self, command: UiCommand<LocalGridSpace>) {
         match command {
@@ -234,7 +366,7 @@ impl UiOutput<LocalGridSpace> for NvimGridOutput {
                 let context = registered_context();
                 let mut composed = NvimComposedOutput;
                 let mut uncomposed = NvimUncomposedOutput {
-                    target: self.target,
+                    grid_id: self.target.grid,
                 };
                 let mut outputs = CompositorEventOutputs::new(&mut composed, &mut uncomposed);
 
@@ -243,6 +375,9 @@ impl UiOutput<LocalGridSpace> for NvimGridOutput {
                     .route_grid_resize(self.target.grid, size, &mut outputs)
                     .expect("grid-resize routing must preserve compositor invariants");
             }
+            UiCommand::GridCursorGoto(position) => registered_context()
+                .ui()
+                .schedule_grid_cursor(GridCursor::new(self.target.grid, position)),
             UiCommand::GridScroll { region, delta } => {
                 let context = registered_context();
                 let runtime =
@@ -250,7 +385,7 @@ impl UiOutput<LocalGridSpace> for NvimGridOutput {
                 let request = CompositorScrollRequest::new(region, delta);
                 let mut composed = NvimComposedOutput;
                 let mut uncomposed = NvimUncomposedOutput {
-                    target: self.target,
+                    grid_id: self.target.grid,
                 };
                 let mut outputs = CompositorEventOutputs::new(&mut composed, &mut uncomposed);
 
@@ -267,7 +402,7 @@ impl UiOutput<LocalGridSpace> for NvimGridOutput {
                     .expect("grid-scroll routing must preserve compositor invariants");
             }
             command => NvimUncomposedOutput {
-                target: self.target,
+                grid_id: self.target.grid,
             }
             .emit(command),
         }
@@ -282,7 +417,7 @@ impl UiOutput<LocalGridSpace> for NvimGridOutput {
         let runtime = compositor_runtime_snapshot().expect("compositor runtime must be valid");
         let mut composed = NvimComposedOutput;
         let mut uncomposed = NvimUncomposedOutput {
-            target: self.target,
+            grid_id: self.target.grid,
         };
         let mut outputs = CompositorEventOutputs::new(&mut composed, &mut uncomposed);
 
@@ -298,22 +433,83 @@ impl UiOutput<LocalGridSpace> for NvimGridOutput {
             )
             .expect("raw-line routing must preserve compositor invariants");
 
-        let grid = Integer::from(self.target.grid.as_native_handle());
-        // SAFETY: Redraw-delay diagnostics run synchronously on Neovim's main
-        // thread after both composed and uncomposed line delivery.
-        unsafe {
-            if p_wd != 0 && (rdb_flags & RdbFlags::Line as u32) != 0 {
-                ui_call_grid_cursor_goto(
-                    grid,
-                    Integer::from(row),
-                    Integer::from(std::cmp::min(clear_column, self.target.width - 1)),
-                );
+        // SAFETY: Redraw options are read synchronously on Neovim's main
+        // thread.
+        let (write_delay, visualize_line) =
+            unsafe { (p_wd, (rdb_flags & RdbFlags::Line as u32) != 0) };
+        if write_delay != 0 && visualize_line {
+            Self::publish_cursor(GridCursor::new(
+                self.target.grid,
+                GridPosition::new(row, std::cmp::min(clear_column, self.target.width - 1)),
+            ));
+            // SAFETY: Redraw-delay callbacks run synchronously on Neovim's
+            // main thread after cursor delivery.
+            unsafe {
                 ui_call_flush();
-                os_sleep(p_wd.unsigned_abs());
-                pending_cursor_update = true;
+                os_sleep(write_delay.unsigned_abs());
             }
+            context.ui().force_grid_cursor_republication();
         }
     }
+}
+
+/// Schedules one grid-local cursor received through the C adapter.
+#[unsafe(no_mangle)]
+pub extern "C" fn rustvim_ui_schedule_grid_cursor(
+    grid_handle: VimHandleT,
+    row: libc::c_int,
+    column: libc::c_int,
+) {
+    registered_context()
+        .ui()
+        .schedule_grid_cursor(GridCursor::new(
+            GridId::new(grid_handle),
+            GridPosition::new(row, column),
+        ));
+}
+
+/// Schedules cursor republication when its grid moved.
+#[unsafe(no_mangle)]
+pub extern "C" fn rustvim_ui_mark_grid_cursor_moved(grid_handle: VimHandleT) {
+    registered_context()
+        .ui()
+        .mark_grid_cursor_moved(GridId::new(grid_handle));
+}
+
+/// Resets cursor coordinates for a UI refresh while retaining its grid.
+#[unsafe(no_mangle)]
+pub extern "C" fn rustvim_ui_reset_grid_cursor_position() {
+    registered_context().ui().reset_grid_cursor_position();
+}
+
+/// Returns the current grid-local cursor row.
+#[unsafe(no_mangle)]
+pub extern "C" fn rustvim_ui_current_grid_cursor_row() -> libc::c_int {
+    registered_context().ui().current_grid_cursor().position.row
+}
+
+/// Returns the current grid-local cursor column.
+#[unsafe(no_mangle)]
+pub extern "C" fn rustvim_ui_current_grid_cursor_column() -> libc::c_int {
+    registered_context()
+        .ui()
+        .current_grid_cursor()
+        .position
+        .column
+}
+
+/// Publishes and clears the pending grid cursor.
+///
+/// Returns whether a cursor was published and window output must be flushed
+/// again after possible compositor layer movement.
+#[unsafe(no_mangle)]
+pub extern "C" fn rustvim_ui_flush_pending_grid_cursor() -> bool {
+    let Some(cursor) = registered_context().ui().take_pending_grid_cursor() else {
+        return false;
+    };
+
+    NvimGridOutput::publish_cursor(cursor);
+    true
 }
 
 /// Flags controlling one raw-line UI update.
@@ -419,4 +615,41 @@ pub(crate) fn ui_line_r(
         registered_context().ui().grid_output_buffer_pool(),
     )
     .expect("valid grid line output")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pending_grid_cursor_preserves_current_state_and_publication_rules() {
+        let mut state = PendingGridCursorState::new();
+        let initial = GridCursor::new(DEFAULT_GRID_ID, GridPosition::new(0, 0));
+
+        assert_eq!(state.current(), initial);
+        assert_eq!(state.take_pending(), None);
+
+        state.schedule(initial);
+        assert_eq!(state.take_pending(), None);
+
+        let moved = GridCursor::new(GridId::new(2), GridPosition::new(3, 4));
+        state.schedule(moved);
+        assert_eq!(state.current(), moved);
+        assert_eq!(state.take_pending(), Some(moved));
+        assert_eq!(state.take_pending(), None);
+
+        state.mark_grid_moved(DEFAULT_GRID_ID);
+        assert_eq!(state.take_pending(), None);
+
+        state.mark_grid_moved(moved.grid_id);
+        assert_eq!(state.take_pending(), Some(moved));
+
+        state.reset_position_for_refresh();
+        let refreshed = GridCursor::new(moved.grid_id, GridPosition::new(0, 0));
+        assert_eq!(state.current(), refreshed);
+        assert_eq!(state.take_pending(), Some(refreshed));
+
+        state.force_republication();
+        assert_eq!(state.take_pending(), Some(refreshed));
+    }
 }

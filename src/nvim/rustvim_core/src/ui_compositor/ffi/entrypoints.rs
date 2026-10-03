@@ -344,45 +344,6 @@ pub extern "C" fn ui_comp_put_grid(
     )
 }
 
-/// Applies one cursor update and publishes any resulting layer movement.
-pub(in crate::ui_compositor) fn apply_cursor_update_to_registered_grids(
-    request: CompositorCursorRequest,
-) -> CompositorResult<CompositorCursorUpdate> {
-    let grid_store = lock_grid_store();
-    lock_compositor().move_cursor(&grid_store, request)
-}
-
-/// Applies one cursor update to the compositor layer stack.
-///
-/// Any required layer movement is completed before recomposition and cursor
-/// output are emitted. Grid-store borrows are released before visualization
-/// or UI callbacks.
-fn process_grid_cursor_goto(
-    message_grid_id: Option<GridId>,
-    request: CompositorCursorRequest,
-    output: &mut impl UiOutput<ComposedGridSpace>,
-) -> CompositorResult<()> {
-    let update = apply_cursor_update_to_registered_grids(request)?;
-    let CompositorCursorUpdate::Apply {
-        plan,
-        recompose_areas,
-    } = update
-    else {
-        return Ok(());
-    };
-
-    let runtime = compositor_runtime_snapshot().ok_or(CompositorError::InvalidGeometry)?;
-    for area in recompose_areas {
-        recompose_area_from_registered_grids(message_grid_id, area, runtime, output)?;
-    }
-
-    if plan.emit {
-        output.emit(UiCommand::GridCursorGoto(plan.screen_position));
-    }
-
-    Ok(())
-}
-
 /// Handles one generated grid-cursor event.
 #[unsafe(no_mangle)]
 pub extern "C" fn ui_comp_grid_cursor_goto(grid_handle: Integer, row: Integer, column: Integer) {
@@ -393,13 +354,20 @@ pub extern "C" fn ui_comp_grid_cursor_goto(grid_handle: Integer, row: Integer, c
     ) else {
         panic!("grid-cursor arguments must fit native compositor coordinates");
     };
-    let request = CompositorCursorRequest {
-        grid_id: GridId::new(grid_handle),
-        local_position: GridPosition::new(row, column),
-    };
+    let context = registered_context();
+    let runtime = compositor_runtime_snapshot().expect("compositor runtime must be valid");
     let mut output = NvimComposedOutput;
 
-    process_grid_cursor_goto(current_message_grid_id(), request, &mut output)
+    context
+        .compositor()
+        .process_grid_cursor_goto(
+            context.grid(),
+            current_message_grid_id(),
+            GridId::new(grid_handle),
+            GridPosition::new(row, column),
+            runtime,
+            &mut output,
+        )
         .expect("cursor update must preserve compositor invariants");
 }
 
@@ -712,35 +680,6 @@ pub extern "C" fn ui_comp_cursor_is_covered_by_higher_layer(
         .unwrap_or(false)
 }
 
-/// Composes and submits one validated line from registered compositor grids.
-fn compose_line_from_registered_grids(
-    message_grid_id: Option<GridId>,
-    request: CompositorLineInput,
-    output: &mut impl UiOutput<ComposedGridSpace>,
-) -> CompositorResult<()> {
-    let context = registered_context();
-    context
-        .compositor()
-        .compose_registered_line(context.grid(), message_grid_id, request, output)
-}
-
-/// Composes and submits a clipped screen area from registered compositor grids.
-fn compose_area_from_registered_grids(
-    message_grid_id: Option<GridId>,
-    request: CompositorAreaRequest,
-    output: &mut impl UiOutput<ComposedGridSpace>,
-) -> CompositorResult<()> {
-    let plan = {
-        let grid_store = lock_grid_store();
-        lock_compositor().plan_recompose_area(&grid_store, request)?
-    };
-
-    for line in plan.into_line_inputs() {
-        compose_line_from_registered_grids(message_grid_id, line, output)?;
-    }
-    Ok(())
-}
-
 /// Visualizes and composes one screen area from registered grids.
 fn recompose_area_from_registered_grids(
     message_grid_id: Option<GridId>,
@@ -748,14 +687,12 @@ fn recompose_area_from_registered_grids(
     runtime: CompositorRuntime,
     output: &mut impl UiOutput<ComposedGridSpace>,
 ) -> CompositorResult<()> {
-    runtime.visualize(&area, runtime.debug_highlights.recomposed, true, output);
-
-    compose_area_from_registered_grids(
+    let context = registered_context();
+    context.compositor().recompose_registered_area(
+        context.grid(),
         message_grid_id,
-        CompositorAreaRequest {
-            area,
-            settings: runtime.line_settings,
-        },
+        area,
+        runtime,
         output,
     )
 }

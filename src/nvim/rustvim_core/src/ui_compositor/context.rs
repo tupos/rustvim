@@ -5,7 +5,10 @@
 use std::sync::{Mutex, MutexGuard};
 
 use crate::{
-    grid::{ComposedGridSpace, DEFAULT_GRID_ID, GridContext, GridId, GridSize, LocalGridSpace},
+    grid::{
+        ComposedGridSpace, DEFAULT_GRID_ID, GridContext, GridId, GridPosition, GridSize,
+        LocalGridSpace,
+    },
     ui::{
         LineFlags,
         output::{
@@ -16,10 +19,11 @@ use crate::{
 };
 
 use super::{
-    Compositor, CompositorDebugHighlights, CompositorError, CompositorLineInput,
-    CompositorRawLineAction, CompositorRawLineOperation, CompositorRawLineRequest,
-    CompositorRecomposeArea, CompositorResult, CompositorRuntime, CompositorScrollOperation,
-    CompositorScrollRequest, RawLineDiagnostic, log_raw_line_diagnostic,
+    Compositor, CompositorAreaRequest, CompositorCursorRequest, CompositorCursorUpdate,
+    CompositorDebugHighlights, CompositorError, CompositorLineInput, CompositorRawLineAction,
+    CompositorRawLineOperation, CompositorRawLineRequest, CompositorRecomposeArea,
+    CompositorResult, CompositorRuntime, CompositorScrollOperation, CompositorScrollRequest,
+    RawLineDiagnostic, log_raw_line_diagnostic,
 };
 
 /// Output sinks for composed and original uncomposed event delivery.
@@ -98,6 +102,72 @@ impl CompositorContext {
         Ok(())
     }
 
+    /// Routes one grid-cursor event to composed and uncomposed outputs.
+    pub(crate) fn route_grid_cursor<ComposedOutput, UncomposedOutput>(
+        &self,
+        grids: &GridContext,
+        message_grid_id: Option<GridId>,
+        grid_id: GridId,
+        position: GridPosition,
+        runtime: CompositorRuntime,
+        outputs: &mut CompositorEventOutputs<'_, ComposedOutput, UncomposedOutput>,
+    ) -> CompositorResult<()>
+    where
+        ComposedOutput: UiOutput<ComposedGridSpace>,
+        UncomposedOutput: UiOutput<LocalGridSpace>,
+    {
+        self.process_grid_cursor_goto(
+            grids,
+            message_grid_id,
+            grid_id,
+            position,
+            runtime,
+            outputs.composed,
+        )?;
+        outputs.uncomposed.emit(UiCommand::GridCursorGoto(position));
+        Ok(())
+    }
+
+    /// Applies one cursor update to the compositor layer stack.
+    ///
+    /// Grid and compositor borrows are released before recomposition and
+    /// output callbacks.
+    pub(crate) fn process_grid_cursor_goto(
+        &self,
+        grids: &GridContext,
+        message_grid_id: Option<GridId>,
+        grid_id: GridId,
+        position: GridPosition,
+        runtime: CompositorRuntime,
+        output: &mut impl UiOutput<ComposedGridSpace>,
+    ) -> CompositorResult<()> {
+        let update = {
+            let grid_store = grids.lock_store();
+            self.lock_state().move_cursor(
+                &grid_store,
+                CompositorCursorRequest {
+                    grid_id,
+                    local_position: position,
+                },
+            )?
+        };
+        let CompositorCursorUpdate::Apply {
+            plan,
+            recompose_areas,
+        } = update
+        else {
+            return Ok(());
+        };
+
+        for area in recompose_areas {
+            self.recompose_registered_area(grids, message_grid_id, area, runtime, output)?;
+        }
+        if plan.emit {
+            output.emit(UiCommand::GridCursorGoto(plan.screen_position));
+        }
+        Ok(())
+    }
+
     /// Composes and submits one validated line from registered grids.
     pub(in crate::ui_compositor) fn compose_registered_line(
         &self,
@@ -152,6 +222,47 @@ impl CompositorContext {
         .ok_or(CompositorError::InvalidLineState)?;
         output.emit_raw_line(command);
         Ok(())
+    }
+
+    /// Composes and submits a clipped screen area from registered grids.
+    fn compose_registered_area(
+        &self,
+        grids: &GridContext,
+        message_grid_id: Option<GridId>,
+        request: CompositorAreaRequest,
+        output: &mut impl UiOutput<ComposedGridSpace>,
+    ) -> CompositorResult<()> {
+        let plan = {
+            let grid_store = grids.lock_store();
+            self.lock_state()
+                .plan_recompose_area(&grid_store, request)?
+        };
+
+        for line in plan.into_line_inputs() {
+            self.compose_registered_line(grids, message_grid_id, line, output)?;
+        }
+        Ok(())
+    }
+
+    /// Visualizes and composes one screen area from registered grids.
+    pub(in crate::ui_compositor) fn recompose_registered_area(
+        &self,
+        grids: &GridContext,
+        message_grid_id: Option<GridId>,
+        area: CompositorRecomposeArea,
+        runtime: CompositorRuntime,
+        output: &mut impl UiOutput<ComposedGridSpace>,
+    ) -> CompositorResult<()> {
+        runtime.visualize(&area, runtime.debug_highlights.recomposed, true, output);
+        self.compose_registered_area(
+            grids,
+            message_grid_id,
+            CompositorAreaRequest {
+                area,
+                settings: runtime.line_settings,
+            },
+            output,
+        )
     }
 
     /// Routes one raw-line event to composed and uncomposed outputs.
@@ -441,6 +552,7 @@ mod tests {
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     enum RecordedCommand {
         Resize,
+        Cursor,
         RawLine,
         Scroll,
     }
@@ -484,6 +596,7 @@ mod tests {
         fn emit(&mut self, command: UiCommand<Space>) {
             let command = match command {
                 UiCommand::GridResize(_) => RecordedCommand::Resize,
+                UiCommand::GridCursorGoto(_) => RecordedCommand::Cursor,
                 UiCommand::GridScroll { .. } => RecordedCommand::Scroll,
                 _ => panic!("unexpected command emitted by routing test"),
             };
@@ -532,6 +645,17 @@ mod tests {
             .route_grid_resize(DEFAULT_GRID_ID, size, &mut outputs)
             .unwrap();
 
+        compositor
+            .route_grid_cursor(
+                &grids,
+                None,
+                DEFAULT_GRID_ID,
+                GridPosition::new(1, 2),
+                runtime,
+                &mut outputs,
+            )
+            .unwrap();
+
         let characters = [schar_from_ascii('x')];
         let attributes = [0];
         let line = BorrowedRawLineCommand::try_new(
@@ -567,6 +691,8 @@ mod tests {
             [
                 (OutputDestination::Composed, RecordedCommand::Resize),
                 (OutputDestination::Uncomposed, RecordedCommand::Resize),
+                (OutputDestination::Composed, RecordedCommand::Cursor),
+                (OutputDestination::Uncomposed, RecordedCommand::Cursor),
                 (OutputDestination::Composed, RecordedCommand::RawLine),
                 (OutputDestination::Uncomposed, RecordedCommand::RawLine),
                 (OutputDestination::Composed, RecordedCommand::Scroll),

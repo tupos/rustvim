@@ -34,6 +34,7 @@
 #include "nvim/option_vars.h"
 #include "nvim/os/os_defs.h"
 #include "nvim/os/time.h"
+#include "nvim/rustvim.h"
 #include "nvim/state_defs.h"
 #include "nvim/strings.h"
 #include "nvim/ui.h"
@@ -56,12 +57,9 @@ static RemoteUI *uis[MAX_UI_COUNT];
 static bool ui_ext[kUIExtCount] = { 0 };
 static size_t ui_count = 0;
 static int ui_mode_idx = SHAPE_IDX_N;
-static int cursor_row = 0, cursor_col = 0;
-bool pending_cursor_update = false;
 static int busy = 0;
 static bool pending_mode_info_update = false;
 static bool pending_mode_update = false;
-static handle_T cursor_grid_handle = DEFAULT_GRID_HANDLE;
 
 static PMap(uint32_t) ui_event_cbs = MAP_INIT;
 bool ui_cb_ext[kUIExtCount];  ///< Internalized UI capabilities.
@@ -209,8 +207,7 @@ void ui_refresh(void)
     }
   }
 
-  cursor_row = cursor_col = 0;
-  pending_cursor_update = true;
+  rustvim_ui_reset_grid_cursor_position();
 
   bool had_message = ui_ext[kUIMessages];
   for (UIExtension i = 0; (int)i < kUIExtCount; i++) {
@@ -458,24 +455,13 @@ void ui_cursor_goto(int new_row, int new_col)
 
 void ui_grid_cursor_goto(handle_T grid_handle, int new_row, int new_col)
 {
-  if (new_row == cursor_row
-      && new_col == cursor_col
-      && grid_handle == cursor_grid_handle) {
-    return;
-  }
-
-  cursor_row = new_row;
-  cursor_col = new_col;
-  cursor_grid_handle = grid_handle;
-  pending_cursor_update = true;
+  rustvim_ui_schedule_grid_cursor(grid_handle, new_row, new_col);
 }
 
 /// moving the cursor grid will implicitly move the cursor
 void ui_check_cursor_grid(handle_T grid_handle)
 {
-  if (cursor_grid_handle == grid_handle) {
-    pending_cursor_update = true;
-  }
+  rustvim_ui_mark_grid_cursor_moved(grid_handle);
 }
 
 void ui_mode_info_set(void)
@@ -485,12 +471,12 @@ void ui_mode_info_set(void)
 
 int ui_current_row(void)
 {
-  return cursor_row;
+  return rustvim_ui_current_grid_cursor_row();
 }
 
 int ui_current_col(void)
 {
-  return cursor_col;
+  return rustvim_ui_current_grid_cursor_column();
 }
 
 void ui_flush(void)
@@ -520,9 +506,7 @@ void ui_flush(void)
   }
   msg_scroll_flush();
 
-  if (pending_cursor_update) {
-    ui_call_grid_cursor_goto(cursor_grid_handle, cursor_row, cursor_col);
-    pending_cursor_update = false;
+  if (rustvim_ui_flush_pending_grid_cursor()) {
     // The cursor move might change the composition order,
     // so flush again to update the windows that changed
     // TODO(bfredl): refactor the flow of information so that win_ui_flush()
