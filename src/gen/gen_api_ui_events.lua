@@ -125,6 +125,16 @@ for i = 1, #events do
     end
   end
 
+  if ev.compositor_impl then
+    call_output:write('void ui_uncomposed_call_' .. ev.name)
+    write_signature(call_output, ev, '')
+    call_output:write('\n{\n')
+    call_output:write('  UI_CALL')
+    write_signature(call_output, ev, '!ui->composed, ' .. ev.name .. ', ui', true)
+    call_output:write(';\n')
+    call_output:write('}\n\n')
+  end
+
   if not (ev.remote_only and ev.remote_impl) then
     call_output:write('void ui_call_' .. ev.name)
     write_signature(call_output, ev, '')
@@ -144,8 +154,8 @@ for i = 1, #events do
       call_output:write('  ui_comp_' .. ev.name)
       write_signature(call_output, ev, '', true)
       call_output:write(';\n')
-      call_output:write('  UI_CALL')
-      write_signature(call_output, ev, '!ui->composed, ' .. ev.name .. ', ui', true)
+      call_output:write('  ui_uncomposed_call_' .. ev.name)
+      write_signature(call_output, ev, '', true)
       call_output:write(';\n')
     else
       call_output:write('  UI_CALL')
