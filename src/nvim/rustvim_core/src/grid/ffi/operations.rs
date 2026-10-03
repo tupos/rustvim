@@ -3,8 +3,8 @@
 use crate::ui::GridOutputTarget;
 
 use super::super::{
-    CGridCell, CGridCellInspectionResult, DEFAULT_GRID_HANDLE, GRID_HANDLE_ALLOCATOR, GridId,
-    GridInspectionTarget, InvalidGridId, StoredGridGuard, VimHandleT, register_empty_grid,
+    CGridCell, CGridCellInspectionResult, DEFAULT_GRID_HANDLE, GridId, GridInspectionTarget,
+    InvalidGridId, StoredGridGuard, VimHandleT, allocate_grid_id, register_empty_grid,
 };
 
 /// Invalidates every cell in a permanently stored grid.
@@ -85,7 +85,7 @@ pub unsafe extern "C" fn grid_inspect_cell(
 /// storage.
 #[unsafe(no_mangle)]
 pub extern "C" fn grid_assign_handle() -> VimHandleT {
-    let grid_id = GRID_HANDLE_ALLOCATOR.allocate();
+    let grid_id = allocate_grid_id();
     register_empty_grid(grid_id);
     grid_id.as_native_handle()
 }

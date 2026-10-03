@@ -3,8 +3,10 @@
 use std::{
     collections::{HashMap, HashSet, hash_map::Entry},
     ops::{Deref, DerefMut},
-    sync::{LazyLock, Mutex, MutexGuard},
+    sync::MutexGuard,
 };
+
+use crate::context::registered_context;
 
 use super::{GridId, GridView, GridViewDescriptor, ScreenGrid};
 
@@ -160,13 +162,9 @@ impl GridStore {
     }
 }
 
-static GRID_STORE: LazyLock<Mutex<GridStore>> = LazyLock::new(|| Mutex::new(GridStore::new()));
-
 /// Acquires exclusive access to permanent screen-grid storage.
 pub(crate) fn lock_grid_store() -> MutexGuard<'static, GridStore> {
-    GRID_STORE
-        .try_lock()
-        .expect("permanent grid store is already borrowed")
+    registered_context().grid().lock_store()
 }
 
 /// One exclusive borrow of a permanently stored screen grid.

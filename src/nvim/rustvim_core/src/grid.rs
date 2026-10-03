@@ -13,6 +13,7 @@ mod virtual_text;
 pub(crate) use ffi::screen_character::schar_from_buf;
 
 use crate::{
+    context::registered_context,
     defines::OptInt,
     generated::enums::{RdbFlags, Slf},
     mbyte,
@@ -266,13 +267,9 @@ impl MessageGridState {
     }
 }
 
-static MESSAGE_GRID_STATE: Mutex<MessageGridState> = Mutex::new(MessageGridState::new());
-
 /// Acquires the persistent message-grid state.
 fn lock_message_grid_state() -> MutexGuard<'static, MessageGridState> {
-    MESSAGE_GRID_STATE
-        .try_lock()
-        .expect("message-grid state is already borrowed")
+    registered_context().grid().lock_message_state()
 }
 
 /// Validated input for flushing pending message-grid output.
@@ -360,13 +357,9 @@ static MAX_SCHAR_SIZE: usize = 32;
 
 static NULL_TERMINATOR: u8 = b'\0';
 
-static GLYPH_MAPPING: Mutex<GlyphMapping> = Mutex::new(GlyphMapping::new());
-
-/// Acquires access to the process-global glyph mapping.
+/// Acquires access to the context-owned glyph mapping.
 fn lock_glyph_mapping() -> MutexGuard<'static, GlyphMapping> {
-    GLYPH_MAPPING
-        .lock()
-        .expect("glyph mapping mutex must not be poisoned")
+    registered_context().grid().lock_glyph_mapping()
 }
 
 const DEFAULT_GRID_HANDLE: VimHandleT = 1;
@@ -399,7 +392,65 @@ impl GridHandleAllocator {
     }
 }
 
-static GRID_HANDLE_ALLOCATOR: GridHandleAllocator = GridHandleAllocator::new(DEFAULT_GRID_ID);
+/// State owned by the grid subsystem for the lifetime of the editor.
+pub(crate) struct GridContext {
+    store: Mutex<GridStore>,
+    message_state: Mutex<MessageGridState>,
+    glyph_mapping: Mutex<GlyphMapping>,
+    handle_allocator: GridHandleAllocator,
+    line_buffer: Mutex<LineBuffer>,
+}
+
+impl GridContext {
+    /// Constructs empty grid-subsystem state before grid initialization.
+    pub(crate) fn new() -> Self {
+        Self {
+            store: Mutex::new(GridStore::new()),
+            message_state: Mutex::new(MessageGridState::new()),
+            glyph_mapping: Mutex::new(GlyphMapping::new()),
+            handle_allocator: GridHandleAllocator::new(DEFAULT_GRID_ID),
+            line_buffer: Mutex::new(LineBuffer::empty()),
+        }
+    }
+
+    /// Acquires permanent screen-grid storage.
+    fn lock_store(&self) -> MutexGuard<'_, GridStore> {
+        self.store
+            .try_lock()
+            .expect("permanent grid store is already borrowed")
+    }
+
+    /// Acquires persistent message-grid state.
+    fn lock_message_state(&self) -> MutexGuard<'_, MessageGridState> {
+        self.message_state
+            .try_lock()
+            .expect("message-grid state is already borrowed")
+    }
+
+    /// Acquires the screen-character glyph mapping.
+    fn lock_glyph_mapping(&self) -> MutexGuard<'_, GlyphMapping> {
+        self.glyph_mapping
+            .lock()
+            .expect("glyph mapping mutex must not be poisoned")
+    }
+
+    /// Allocates the next stable screen-grid identity.
+    fn allocate_grid_id(&self) -> GridId {
+        self.handle_allocator.allocate()
+    }
+
+    /// Acquires the transitional shared line buffer.
+    fn lock_line_buffer(&self) -> MutexGuard<'_, LineBuffer> {
+        self.line_buffer
+            .try_lock()
+            .expect("line buffer is already borrowed")
+    }
+}
+
+/// Allocates the next stable screen-grid identity.
+fn allocate_grid_id() -> GridId {
+    registered_context().grid().allocate_grid_id()
+}
 
 unsafe extern "C" {
     static mut full_screen: bool;
@@ -1782,19 +1833,17 @@ enum VirtualColumns<'a> {
 }
 
 //                                                                  abcdef           fedcba
-/// Exclusive access to the process-global Rust-owned line buffer.
+/// Exclusive access to the context-owned Rust line buffer.
 struct LineBufferGuard {
     line_buffer: MutexGuard<'static, LineBuffer>,
 }
 
 impl LineBufferGuard {
-    /// Borrows the global line buffer for one non-reentrant rendering
+    /// Borrows the shared line buffer for one non-reentrant rendering
     /// operation.
     fn acquire() -> Self {
         Self {
-            line_buffer: LINE_BUFFER
-                .try_lock()
-                .expect("line buffer is already borrowed"),
+            line_buffer: registered_context().grid().lock_line_buffer(),
         }
     }
 }
@@ -1812,8 +1861,6 @@ impl std::ops::DerefMut for LineBufferGuard {
         &mut self.line_buffer
     }
 }
-
-static LINE_BUFFER: Mutex<LineBuffer> = Mutex::new(LineBuffer::empty());
 
 /// Grid-independent state for one buffered line operation.
 ///
