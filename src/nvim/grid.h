@@ -143,10 +143,8 @@ extern size_t schar_get(char *buf_out, schar_T sc);
 extern int schar_get_first_codepoint(schar_T sc);
 extern size_t schar_get_adv(char **buf_out, schar_T sc);
 extern size_t schar_len(schar_T sc);
-extern bool schar_in_arabic_block(schar_T sc);
 extern char schar_get_ascii(schar_T sc);
 extern int schar_cells(schar_T sc);
-extern void line_do_arabic_shape(schar_T *buf, int cols);
 extern bool grid_view_get_cell(
   handle_T window_grid_handle, handle_T expected_grid,
   int row, int col, GridCell *cell);
