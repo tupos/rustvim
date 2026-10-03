@@ -20,10 +20,10 @@ use crate::{
 
 use super::{
     Compositor, CompositorAreaRequest, CompositorCursorRequest, CompositorCursorUpdate,
-    CompositorDebugHighlights, CompositorError, CompositorLineInput, CompositorRawLineAction,
-    CompositorRawLineOperation, CompositorRawLineRequest, CompositorRecomposeArea,
-    CompositorResult, CompositorRuntime, CompositorScrollOperation, CompositorScrollRequest,
-    RawLineDiagnostic, log_raw_line_diagnostic,
+    CompositorDebugHighlights, CompositorError, CompositorLineInput,
+    CompositorMessagePositionRequest, CompositorRawLineAction, CompositorRawLineOperation,
+    CompositorRawLineRequest, CompositorRecomposeArea, CompositorResult, CompositorRuntime,
+    CompositorScrollOperation, CompositorScrollRequest, RawLineDiagnostic, log_raw_line_diagnostic,
 };
 
 /// Output sinks for composed and original uncomposed event delivery.
@@ -99,6 +99,61 @@ impl CompositorContext {
         output.emit(UiCommand::GridResize(plan.size));
 
         self.lock_buffer_pool().resize(plan.buffer_width);
+        Ok(())
+    }
+
+    /// Routes one message-position event to composed output and returns its
+    /// layer index for final uncomposed delivery.
+    pub(crate) fn route_message_position(
+        &self,
+        grids: &GridContext,
+        message_grid_id: GridId,
+        request: CompositorMessagePositionRequest,
+        runtime: CompositorRuntime,
+        output: &mut impl UiOutput<ComposedGridSpace>,
+    ) -> CompositorResult<usize> {
+        let layer_index = self
+            .lock_state()
+            .take_grid_publication(message_grid_id)?
+            .map_or(0, |publication| publication.layer_index);
+
+        self.process_message_position(grids, message_grid_id, request, runtime, output)?;
+        Ok(layer_index)
+    }
+
+    /// Updates message-grid state and executes its scrolling and
+    /// recomposition.
+    pub(crate) fn process_message_position(
+        &self,
+        grids: &GridContext,
+        message_grid_id: GridId,
+        request: CompositorMessagePositionRequest,
+        runtime: CompositorRuntime,
+        output: &mut impl UiOutput<ComposedGridSpace>,
+    ) -> CompositorResult<()> {
+        if message_grid_id == DEFAULT_GRID_ID {
+            return Err(CompositorError::InvalidLayerState);
+        }
+
+        let plan = {
+            let grid_store = grids.lock_store();
+            let default_grid = grid_store
+                .grid(DEFAULT_GRID_ID)
+                .map_err(|_| CompositorError::InvalidLayerState)?;
+            self.lock_state()
+                .set_message_position(message_grid_id, default_grid, request)
+        }?;
+
+        if let Some(scroll) = plan.scroll {
+            output.emit(UiCommand::GridScroll {
+                region: scroll.region,
+                delta: scroll.delta,
+            });
+        }
+        if let Some(area) = plan.recompose {
+            self.recompose_registered_area(grids, Some(message_grid_id), area, runtime, output)
+                .map_err(|_| CompositorError::RecompositionFailed)?;
+        }
         Ok(())
     }
 
@@ -553,6 +608,7 @@ mod tests {
     enum RecordedCommand {
         Resize,
         Cursor,
+        MessagePosition,
         RawLine,
         Scroll,
     }
@@ -697,6 +753,96 @@ mod tests {
                 (OutputDestination::Uncomposed, RecordedCommand::RawLine),
                 (OutputDestination::Composed, RecordedCommand::Scroll),
                 (OutputDestination::Uncomposed, RecordedCommand::Scroll),
+            ]
+        );
+    }
+
+    #[test]
+    fn routes_message_position_after_composed_output_without_held_locks() {
+        let grids = GridContext::new();
+        let mut line_buffer = LineBuffer::new(3);
+        let mut default_grid = ScreenGrid::new(3, 3, true, &mut line_buffer);
+        default_grid.set_id_for_test(DEFAULT_GRID_ID);
+        let message_grid_id = GridId::new(2);
+        let mut message_grid = ScreenGrid::new(2, 3, true, &mut line_buffer);
+        message_grid.set_id_for_test(message_grid_id);
+        {
+            let mut store = grids.lock_store();
+            store.register(default_grid).unwrap();
+            store.register(message_grid).unwrap();
+        }
+
+        let compositor = CompositorContext::new();
+        {
+            let mut state = compositor.lock_state();
+            state.initialize_layers(DEFAULT_GRID_ID).unwrap();
+            state.attach();
+        }
+
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let mut composed = ReentrantRecordingOutput::<ComposedGridSpace>::new(
+            OutputDestination::Composed,
+            Rc::clone(&events),
+            &grids,
+            &compositor,
+        );
+        let uncomposed = ReentrantRecordingOutput::<LocalGridSpace>::new(
+            OutputDestination::Uncomposed,
+            Rc::clone(&events),
+            &grids,
+            &compositor,
+        );
+        let runtime =
+            CompositorRuntime::try_new(3, 3, 0, 0, 0, CompositorDebugHighlights::empty()).unwrap();
+
+        assert_eq!(
+            compositor
+                .route_message_position(
+                    &grids,
+                    message_grid_id,
+                    CompositorMessagePositionRequest::new(2, 200, None, runtime.screen_size, false),
+                    runtime,
+                    &mut composed,
+                )
+                .unwrap(),
+            0
+        );
+        uncomposed.record(RecordedCommand::MessagePosition);
+
+        compositor
+            .lock_state()
+            .layers
+            .as_mut()
+            .unwrap()
+            .overlays
+            .push(super::super::LayerState::unplaced(message_grid_id));
+
+        assert_eq!(
+            compositor
+                .route_message_position(
+                    &grids,
+                    message_grid_id,
+                    CompositorMessagePositionRequest::new(1, 200, None, runtime.screen_size, false),
+                    runtime,
+                    &mut composed,
+                )
+                .unwrap(),
+            1
+        );
+        uncomposed.record(RecordedCommand::MessagePosition);
+
+        assert_eq!(
+            *events.borrow(),
+            [
+                (
+                    OutputDestination::Uncomposed,
+                    RecordedCommand::MessagePosition,
+                ),
+                (OutputDestination::Composed, RecordedCommand::Scroll),
+                (
+                    OutputDestination::Uncomposed,
+                    RecordedCommand::MessagePosition,
+                ),
             ]
         );
     }

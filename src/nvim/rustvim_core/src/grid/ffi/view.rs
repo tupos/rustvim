@@ -3,10 +3,11 @@
 use crate::ui::GridOutputTarget;
 
 use super::super::{
-    CGridCell, CMessageGridPositionEmitter, DEFAULT_GRID_ID, GridId, GridPosition, GridSize,
-    GridViewDescriptor, StoredGridGuard, VimHandleT, WindowLineScrollRequest, lock_grid_store,
-    lock_message_grid_state,
+    CGridCell, CMessageGridPositionConfig, CMessageGridPositionEmitter, DEFAULT_GRID_ID, GridId,
+    GridPosition, GridSize, GridViewDescriptor, StoredGridGuard, VimHandleT,
+    WindowLineScrollRequest, lock_grid_store, lock_message_grid_state,
 };
+use super::message::publish_message_grid_position;
 
 /// Reports whether a window grid owns a registered view.
 #[unsafe(no_mangle)]
@@ -104,10 +105,12 @@ pub unsafe extern "C" fn grid_refresh_message_ui(
     grid_handle: VimHandleT,
     position: libc::c_int,
     scrolled: bool,
+    config: CMessageGridPositionConfig,
     emit_position: CMessageGridPositionEmitter,
 ) {
+    let grid_id = GridId::new(grid_handle);
     let resize = {
-        let Ok(grid) = StoredGridGuard::acquire(GridId::new(grid_handle)) else {
+        let Ok(grid) = StoredGridGuard::acquire(grid_id) else {
             return;
         };
         grid.resize_command_if_allocated()
@@ -117,10 +120,9 @@ pub unsafe extern "C" fn grid_refresh_message_ui(
     };
 
     target.emit(command);
-    // SAFETY: The caller guarantees that the callback is valid. The store
-    // borrow was released before this callback can reenter editor code.
+    // SAFETY: The caller guarantees that the callback is valid.
     unsafe {
-        emit_position(position, scrolled);
+        publish_message_grid_position(grid_handle, position, scrolled, config, emit_position);
     }
 }
 

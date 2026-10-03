@@ -429,7 +429,7 @@ impl CompositorGridPlacementPlan {
 
 /// Validated native inputs for positioning the message grid.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct CompositorMessagePositionRequest {
+pub(crate) struct CompositorMessagePositionRequest {
     row: i32,
     z_index: i32,
     separator_character: Option<VimSCharT>,
@@ -439,7 +439,7 @@ struct CompositorMessagePositionRequest {
 
 impl CompositorMessagePositionRequest {
     /// Constructs a message-position request from validated native values.
-    fn new(
+    pub(crate) fn new(
         row: i32,
         z_index: i32,
         separator_character: Option<VimSCharT>,
@@ -2738,6 +2738,11 @@ impl CompositorRuntime {
             debug_enabled: redraw_debug_flags & RdbFlags::Compositor as u32 != 0,
             write_delay_ms: write_delay.unsigned_abs(),
         })
+    }
+
+    /// Returns the composed-screen dimensions captured for this event.
+    pub(crate) const fn screen_size(self) -> GridSize {
+        self.screen_size
     }
 }
 

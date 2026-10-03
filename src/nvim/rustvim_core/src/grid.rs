@@ -330,7 +330,14 @@ struct MessageGridPositionUpdate {
 }
 
 /// C callback used to publish a message-grid position.
-type CMessageGridPositionEmitter = unsafe extern "C" fn(row: libc::c_int, scrolled: bool);
+type CMessageGridPositionEmitter = unsafe extern "C" fn(
+    grid_handle: VimHandleT,
+    row: libc::c_int,
+    scrolled: bool,
+    separator_character: VimSCharT,
+    z_index: libc::c_int,
+    compositor_index: libc::c_int,
+);
 
 /// State transition performed while configuring one window grid.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2498,6 +2505,14 @@ pub struct CWindowGridUpdate {
     grid_handle: VimHandleT,
     resized: bool,
     row_offset_changed: bool,
+}
+
+/// C representation of message-position UI policy.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct CMessageGridPositionConfig {
+    separator_character: VimSCharT,
+    z_index: libc::c_int,
 }
 
 /// C representation of the inputs needed to flush message-grid output.

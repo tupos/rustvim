@@ -112,38 +112,6 @@ pub extern "C" fn ui_comp_grid_resize(grid: Integer, width: Integer, height: Int
         .expect("grid-resize processing must preserve compositor invariants");
 }
 
-/// Updates message-grid state and executes its scrolling and recomposition.
-fn update_message_position(
-    message_grid_id: GridId,
-    request: CompositorMessagePositionRequest,
-    runtime: CompositorRuntime,
-    output: &mut impl UiOutput<ComposedGridSpace>,
-) -> CompositorResult<()> {
-    if message_grid_id == DEFAULT_GRID_ID {
-        return Err(CompositorError::InvalidLayerState);
-    }
-
-    let plan = {
-        let grid_store = lock_grid_store();
-        let default_grid = grid_store
-            .grid(DEFAULT_GRID_ID)
-            .ok_or(CompositorError::InvalidLayerState)?;
-        lock_compositor().set_message_position(message_grid_id, default_grid, request)
-    }?;
-
-    if let Some(scroll) = plan.scroll {
-        output.emit(UiCommand::GridScroll {
-            region: scroll.region,
-            delta: scroll.delta,
-        });
-    }
-    if let Some(area) = plan.recompose {
-        recompose_area_from_registered_grids(Some(message_grid_id), area, runtime, output)
-            .map_err(|_| CompositorError::RecompositionFailed)?;
-    }
-    Ok(())
-}
-
 /// Handles one generated message-grid position event.
 ///
 /// # Safety
@@ -178,7 +146,15 @@ pub unsafe extern "C" fn ui_comp_msg_set_pos(
     );
     let mut output = NvimComposedOutput;
 
-    update_message_position(GridId::new(grid), request, runtime, &mut output)
+    registered_context()
+        .compositor()
+        .process_message_position(
+            registered_context().grid(),
+            GridId::new(grid),
+            request,
+            runtime,
+            &mut output,
+        )
         .expect("message-grid position update must preserve compositor invariants");
 }
 

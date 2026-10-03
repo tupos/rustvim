@@ -1,11 +1,106 @@
 //! C boundary adapters for message-grid operations.
 
-use super::super::{
-    CMessageGridPositionEmitter, CMessageGridScrollFlushRequest, CMessageGridTransition, GridId,
-    GridSize, LineBufferGuard, MessageGridMode, MessageGridScrollFlushPlan,
-    MessageGridScrollFlushRequest, MessageGridScrollUp, MessageGridScrollUpAction,
-    MessageGridTransition, StoredGridGuard, VimHandleT, lock_grid_store, lock_message_grid_state,
+use crate::{
+    context::registered_context,
+    ui_compositor::{
+        CompositorMessagePositionRequest, NvimComposedOutput, compositor_runtime_snapshot,
+    },
 };
+
+use super::super::{
+    CMessageGridPositionConfig, CMessageGridPositionEmitter, CMessageGridScrollFlushRequest,
+    CMessageGridTransition, GridId, GridSize, LineBufferGuard, MessageGridMode,
+    MessageGridScrollFlushPlan, MessageGridScrollFlushRequest, MessageGridScrollUp,
+    MessageGridScrollUpAction, MessageGridTransition, StoredGridGuard, VimHandleT, lock_grid_store,
+    lock_message_grid_state,
+};
+
+/// Processes and publishes one message-grid position.
+///
+/// Composed output is emitted before the original uncomposed event callback.
+///
+/// # Safety
+///
+/// `emit_position` must remain callable for the duration of this operation.
+pub(super) unsafe fn publish_message_grid_position(
+    grid_handle: VimHandleT,
+    row: libc::c_int,
+    scrolled: bool,
+    config: CMessageGridPositionConfig,
+    emit_position: CMessageGridPositionEmitter,
+) {
+    let context = registered_context();
+    let runtime = compositor_runtime_snapshot().expect("compositor runtime must be valid");
+    let request = CompositorMessagePositionRequest::new(
+        row,
+        config.z_index,
+        Some(config.separator_character),
+        runtime.screen_size(),
+        scrolled,
+    );
+    let mut output = NvimComposedOutput;
+    let layer_index = context
+        .compositor()
+        .route_message_position(
+            context.grid(),
+            GridId::new(grid_handle),
+            request,
+            runtime,
+            &mut output,
+        )
+        .expect("message-grid position update must preserve compositor invariants");
+    let compositor_index = i32::try_from(layer_index)
+        .expect("compositor layer index must fit the C UI event representation");
+
+    // SAFETY: The caller guarantees that the callback is valid. All Rust
+    // subsystem borrows were released before this callback can reenter editor
+    // code.
+    unsafe {
+        emit_position(
+            grid_handle,
+            row,
+            scrolled,
+            config.separator_character,
+            config.z_index,
+            compositor_index,
+        );
+    }
+}
+
+/// Updates Rust-owned message position state and publishes when not throttled.
+///
+/// # Safety
+///
+/// `emit_position` must remain callable for the duration of this operation.
+unsafe fn update_message_grid_position(
+    grid_handle: VimHandleT,
+    row: libc::c_int,
+    scrolled: bool,
+    config: CMessageGridPositionConfig,
+    emit_position: CMessageGridPositionEmitter,
+) {
+    let update = {
+        let Ok(grid) = StoredGridGuard::acquire(GridId::new(grid_handle)) else {
+            return;
+        };
+        grid.update_message_position(row)
+    };
+
+    if update.publish {
+        // SAFETY: The caller guarantees that the callback is valid.
+        unsafe {
+            publish_message_grid_position(grid_handle, row, scrolled, config, emit_position);
+        }
+    }
+
+    let mut state = lock_message_grid_state();
+    if update.publish {
+        state.scroll.record_position(row);
+    }
+    if let Some(row_offset) = update.view_row_offset {
+        state.set_view_row_offset(row_offset);
+    }
+}
 
 /// Prepares the message grid for its requested visibility and size.
 ///
@@ -86,30 +181,12 @@ pub unsafe extern "C" fn grid_set_message_position(
     grid_handle: VimHandleT,
     row: libc::c_int,
     scrolled: bool,
+    config: CMessageGridPositionConfig,
     emit_position: CMessageGridPositionEmitter,
 ) {
-    let update = {
-        let Ok(grid) = StoredGridGuard::acquire(GridId::new(grid_handle)) else {
-            return;
-        };
-        grid.update_message_position(row)
-    };
-
-    if update.publish {
-        // SAFETY: The caller guarantees that the callback is valid. The grid
-        // store borrow was released before this callback can reenter editor
-        // code.
-        unsafe {
-            emit_position(row, scrolled);
-        }
-    }
-
-    let mut state = lock_message_grid_state();
-    if update.publish {
-        state.scroll.record_position(row);
-    }
-    if let Some(row_offset) = update.view_row_offset {
-        state.set_view_row_offset(row_offset);
+    // SAFETY: The caller guarantees that the callback is valid.
+    unsafe {
+        update_message_grid_position(grid_handle, row, scrolled, config, emit_position);
     }
 }
 
@@ -128,12 +205,13 @@ pub unsafe extern "C" fn grid_scroll_message_up(
     enable_throttling: bool,
     zero_cmdheight: bool,
     discount_first_scroll: bool,
+    config: CMessageGridPositionConfig,
     set_position: CMessageGridPositionEmitter,
-) {
+) -> libc::c_int {
     let grid_id = GridId::new(grid_handle);
     let scroll_up = {
         let Ok(mut grid) = StoredGridGuard::acquire(grid_id) else {
-            return;
+            return current_position;
         };
         grid.scroll_message_up(current_position, enable_throttling, zero_cmdheight)
     };
@@ -151,20 +229,20 @@ pub unsafe extern "C" fn grid_scroll_message_up(
             scrolled,
             clear_first_row,
         } => {
-            // SAFETY: The caller guarantees that the callback is valid. The
-            // store borrow was released before this callback can reenter
-            // editor code.
+            // SAFETY: The caller guarantees that the callback is valid.
             unsafe {
-                set_position(position, scrolled);
+                update_message_grid_position(grid_handle, position, scrolled, config, set_position);
             }
             if clear_first_row && let Ok(mut grid) = StoredGridGuard::acquire(grid_id) {
                 grid.clear_first_message_row();
             }
+            position
         }
         MessageGridScrollUpAction::ShiftRows { target, scroll } => {
             if let Some(scroll) = scroll {
                 target.emit(scroll);
             }
+            current_position
         }
     }
 }
@@ -207,21 +285,23 @@ pub unsafe extern "C" fn grid_reset_message_scroll(
     grid_handle: VimHandleT,
     position: libc::c_int,
     rows_to_clear: libc::c_int,
+    config: CMessageGridPositionConfig,
     set_position: CMessageGridPositionEmitter,
-) {
+) -> libc::c_int {
     let Ok(rows_to_clear) = usize::try_from(rows_to_clear) else {
-        return;
+        return position;
     };
     let grid_id = GridId::new(grid_handle);
 
     {
         let Ok(mut grid) = StoredGridGuard::acquire(grid_id) else {
-            return;
+            return position;
         };
         grid.disable_message_throttling();
     }
+    // SAFETY: The caller guarantees that the callback is valid.
     unsafe {
-        set_position(position, false);
+        update_message_grid_position(grid_handle, position, false, config, set_position);
     }
     {
         if let Ok(mut grid) = StoredGridGuard::acquire(grid_id) {
@@ -229,6 +309,7 @@ pub unsafe extern "C" fn grid_reset_message_scroll(
         }
     }
     lock_message_grid_state().scroll.reset_progress();
+    position
 }
 
 /// Flushes pending throttled message-grid scrolling and row updates.
@@ -243,6 +324,7 @@ pub unsafe extern "C" fn grid_reset_message_scroll(
 pub unsafe extern "C" fn grid_flush_message_scroll(
     grid_handle: VimHandleT,
     request: CMessageGridScrollFlushRequest,
+    config: CMessageGridPositionConfig,
     emit_position: CMessageGridPositionEmitter,
 ) {
     let Some(screen_size) = GridSize::try_new(request.screen_rows, request.screen_columns) else {
@@ -269,10 +351,9 @@ pub unsafe extern "C" fn grid_flush_message_scroll(
         lines,
     } = plan;
     if let Some(row) = position_update {
-        // SAFETY: The caller guarantees that the callback is valid. The grid
-        // guard was dropped before this callback can reenter editor code.
+        // SAFETY: The caller guarantees that the callback is valid.
         unsafe {
-            emit_position(row, true);
+            publish_message_grid_position(grid_handle, row, true, config, emit_position);
         }
     }
     if let Some(scroll) = scroll {

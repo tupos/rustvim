@@ -164,19 +164,29 @@ bool msg_id_exists(int64_t id)
   return id > 0 && id < msg_id_next;
 }
 
-static void ui_ext_msg_set_pos(int row, bool scrolled)
+static MessageGridPositionConfig message_grid_position_config(void)
+{
+  return (MessageGridPositionConfig){
+    .separator_character = curwin->w_p_fcs_chars.msgsep,
+    .z_index = kZIndexMessages,
+  };
+}
+
+static void ui_ext_msg_set_pos(handle_T grid_handle, int row, bool scrolled,
+                               schar_T separator_character, int z_index,
+                               int compositor_index)
 {
   char buf[MAX_SCHAR_SIZE];
-  size_t size = schar_get(buf, curwin->w_p_fcs_chars.msgsep);
-  int compositor_index = ui_comp_take_grid_publication(msg_grid_handle);
-  ui_call_msg_set_pos(msg_grid_handle, row, scrolled,
-                      (String){ .data = buf, .size = size }, kZIndexMessages,
-                      compositor_index);
+  size_t size = schar_get(buf, separator_character);
+  ui_uncomposed_call_msg_set_pos(grid_handle, row, scrolled,
+                                 (String){ .data = buf, .size = size },
+                                 z_index, compositor_index);
 }
 
 void msg_grid_set_pos(int row, bool scrolled)
 {
-  grid_set_message_position(msg_grid_handle, row, scrolled, ui_ext_msg_set_pos);
+  grid_set_message_position(msg_grid_handle, row, scrolled,
+                            message_grid_position_config(), ui_ext_msg_set_pos);
   msg_grid_pos = row;
 }
 
@@ -2608,9 +2618,9 @@ bool msg_do_throttle(void)
 /// Scroll the screen up one line for displaying the next message line.
 void msg_scroll_up(bool may_throttle, bool zerocmd, bool discount_first_scroll)
 {
-  grid_scroll_message_up(msg_grid_handle, msg_grid_pos,
-                         may_throttle && msg_do_throttle(), zerocmd,
-                         discount_first_scroll, msg_grid_set_pos);
+  msg_grid_pos = grid_scroll_message_up(
+    msg_grid_handle, msg_grid_pos, may_throttle && msg_do_throttle(), zerocmd,
+    discount_first_scroll, message_grid_position_config(), ui_ext_msg_set_pos);
   grid_message_view_clear(Rows - 1, Rows, 0, Columns, HL_ATTR(HLF_MSG));
 }
 
@@ -2642,6 +2652,7 @@ void msg_scroll_flush(void)
       .screen_columns = Columns,
       .clear_attribute = HL_ATTR(HLF_MSG),
     },
+    message_grid_position_config(),
     ui_ext_msg_set_pos);
 }
 
@@ -2654,8 +2665,9 @@ void msg_reset_scroll(void)
   // we should properly disentangle message clear with full screen redraw.
   // TODO(bfredl): risk for extra flicker i e with
   // "nvim -o has_swap also_has_swap"
-  grid_reset_message_scroll(msg_grid_handle, Rows - (int)p_ch, msg_scrollsize(),
-                            msg_grid_set_pos);
+  msg_grid_pos = grid_reset_message_scroll(
+    msg_grid_handle, Rows - (int)p_ch, msg_scrollsize(),
+    message_grid_position_config(), ui_ext_msg_set_pos);
   clear_cmdline = true;
   msg_scrolled = 0;
 }
@@ -2664,6 +2676,7 @@ void msg_ui_refresh(void)
 {
   if (ui_has(kUIMultigrid)) {
     grid_refresh_message_ui(msg_grid_handle, msg_grid_pos, msg_scrolled,
+                            message_grid_position_config(),
                             ui_ext_msg_set_pos);
   }
 }
@@ -2672,7 +2685,9 @@ void msg_ui_flush(void)
 {
   if (ui_has(kUIMultigrid) && grid_is_allocated(msg_grid_handle)
       && ui_comp_grid_publication_pending(msg_grid_handle)) {
-    ui_ext_msg_set_pos(msg_grid_pos, msg_scrolled);
+    grid_set_message_position(msg_grid_handle, msg_grid_pos, msg_scrolled,
+                              message_grid_position_config(),
+                              ui_ext_msg_set_pos);
   }
 }
 
