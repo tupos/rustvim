@@ -1,8 +1,9 @@
 //! Access to compositor settings and highlights owned by Neovim.
 
-use std::sync::{Mutex, MutexGuard};
+use std::sync::MutexGuard;
 
 use crate::{
+    context::registered_context,
     defines::OptInt,
     globals,
     grid::{ComposedGridSpace, VimSAttrT, lock_grid_store},
@@ -23,14 +24,9 @@ unsafe extern "C" {
     fn ui_get_message_separator_attr() -> VimSAttrT;
 }
 
-static COMPOSITOR_DEBUG_HIGHLIGHTS: Mutex<CompositorDebugHighlights> =
-    Mutex::new(CompositorDebugHighlights::empty());
-
 /// Acquires exclusive access to compositor debug-highlight identities.
 fn lock_compositor_debug_highlights() -> MutexGuard<'static, CompositorDebugHighlights> {
-    COMPOSITOR_DEBUG_HIGHLIGHTS
-        .try_lock()
-        .expect("compositor debug highlights are already borrowed")
+    registered_context().compositor().lock_debug_highlights()
 }
 
 /// Resolves one redraw-debug highlight group through Neovim's syntax API.

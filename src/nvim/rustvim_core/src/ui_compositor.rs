@@ -6,6 +6,7 @@ use std::{
 };
 
 use crate::{
+    context::registered_context,
     generated::enums::RdbFlags,
     grid::{
         ComposedGridSpace, ComposedPosition, ComposedRegion, GridCell, GridDelta, GridId,
@@ -714,7 +715,7 @@ impl LayerState {
     }
 }
 
-/// Safe process-global state of the UI compositor.
+/// Safe UI compositor state owned by the runtime context.
 ///
 /// Grid storage and reentrant line-buffer storage remain outside this state so
 /// their borrows can be released before synchronous UI callbacks.
@@ -3111,27 +3112,63 @@ impl CellBuffer {
     }
 }
 
-static COMPOSITOR: Mutex<Compositor> = Mutex::new(Compositor::new());
-
-/// Acquires exclusive access to the safe process-global compositor state.
-fn lock_compositor() -> MutexGuard<'static, Compositor> {
-    COMPOSITOR
-        .try_lock()
-        .expect("compositor state is already borrowed")
+/// State owned by the compositor subsystem for the lifetime of the editor.
+pub(crate) struct CompositorContext {
+    state: Mutex<Compositor>,
+    buffer_pool: Mutex<CellBufferPool>,
+    debug_highlights: Mutex<CompositorDebugHighlights>,
 }
 
-static COMPOSITOR_BUFFER_POOL: Mutex<CellBufferPool> = Mutex::new(CellBufferPool::new());
+impl CompositorContext {
+    /// Constructs compositor state before subsystem initialization.
+    pub(crate) const fn new() -> Self {
+        Self {
+            state: Mutex::new(Compositor::new()),
+            buffer_pool: Mutex::new(CellBufferPool::new()),
+            debug_highlights: Mutex::new(CompositorDebugHighlights::empty()),
+        }
+    }
 
-/// Acquires exclusive access to the process-global compositor buffer pool.
+    /// Acquires the safe compositor state.
+    fn lock_state(&self) -> MutexGuard<'_, Compositor> {
+        self.state
+            .try_lock()
+            .expect("compositor state is already borrowed")
+    }
+
+    /// Acquires the compositor buffer pool.
+    fn lock_buffer_pool(&self) -> MutexGuard<'_, CellBufferPool> {
+        self.buffer_pool
+            .try_lock()
+            .expect("compositor buffer pool is already borrowed")
+    }
+
+    /// Checks out compositor storage without retaining the pool mutex.
+    fn acquire_buffer(&self) -> CellBufferLease<'_> {
+        CellBufferLease::acquire(&self.buffer_pool)
+    }
+
+    /// Acquires compositor debug-highlight identities.
+    fn lock_debug_highlights(&self) -> MutexGuard<'_, CompositorDebugHighlights> {
+        self.debug_highlights
+            .try_lock()
+            .expect("compositor debug highlights are already borrowed")
+    }
+}
+
+/// Acquires exclusive access to the context-owned compositor state.
+fn lock_compositor() -> MutexGuard<'static, Compositor> {
+    registered_context().compositor().lock_state()
+}
+
+/// Acquires exclusive access to the context-owned compositor buffer pool.
 fn lock_compositor_buffer_pool() -> MutexGuard<'static, CellBufferPool> {
-    COMPOSITOR_BUFFER_POOL
-        .try_lock()
-        .expect("compositor buffer pool is already borrowed")
+    registered_context().compositor().lock_buffer_pool()
 }
 
 /// Checks out compositor storage without retaining the pool mutex.
 fn acquire_compositor_buffer() -> CellBufferLease<'static> {
-    CellBufferLease::acquire(&COMPOSITOR_BUFFER_POOL)
+    registered_context().compositor().acquire_buffer()
 }
 
 /// Emits one clear raw-line event used for compositor visualization.
