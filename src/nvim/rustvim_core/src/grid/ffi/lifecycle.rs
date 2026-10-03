@@ -86,31 +86,6 @@ pub extern "C" fn grid_configure_default(rows: libc::c_int, columns: libc::c_int
     grid.configure_as_default(size, &mut line_buffer) == GridLifecycleChange::Resized
 }
 
-/// Applies the complete resize or invalidation transition for the popup-menu
-/// grid.
-///
-/// Returns whether storage was allocated or resized.
-///
-/// Missing grid identities are rejected.
-#[unsafe(no_mangle)]
-pub extern "C" fn grid_configure_for_popup_menu(
-    grid_handle: VimHandleT,
-    rows: libc::c_int,
-    columns: libc::c_int,
-    contents_invalid: bool,
-) -> bool {
-    let Some(size) = GridSize::try_new(rows, columns) else {
-        return false;
-    };
-
-    let mut line_buffer = LineBufferGuard::acquire();
-    let Ok(mut grid) = StoredGridGuard::acquire(GridId::new(grid_handle)) else {
-        return false;
-    };
-    let change = grid.configure_for_popup_menu(size, contents_invalid, &mut line_buffer);
-    change == GridLifecycleChange::Resized
-}
-
 /// Releases popup-menu cell storage while retaining its permanent identity.
 ///
 /// The popup menu reuses its grid handle when it is displayed again. Final

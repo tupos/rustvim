@@ -6,8 +6,10 @@ mod fold_column;
 mod line_buffer;
 mod line_submission;
 mod message_surface;
+mod popup_surface;
 mod row;
 mod store;
+mod surface;
 mod tabstops;
 mod virtual_text;
 
@@ -46,9 +48,12 @@ use line_buffer::{LineTextRenderOptions, LineTextVirtualColumns};
 use line_submission::{LineSubmission, SmoothScrollMarker};
 use message_surface::{MessagePositionPolicy, MessagePositionRequest};
 pub(crate) use message_surface::{MessageSurface, MessageSurfaceOutput};
+pub(crate) use popup_surface::PopupMenuSurface;
+use popup_surface::PopupMenuSurfaceRequest;
 pub(crate) use row::{GridRow, GridRowSegment};
 use store::StoredGridGuard;
 pub(crate) use store::{GridStore, lock_grid_store};
+pub(crate) use surface::GridSurfaceOutput;
 use tabstops::TabStops;
 use virtual_text::{VirtualText, VirtualTextChunk, VirtualTextRenderOptions};
 
@@ -3619,8 +3624,8 @@ impl<'a> ArabicShaper<'a> {
 #[cfg(test)]
 mod tests {
     use super::ffi::lifecycle::{
-        grid_configure_for_popup_menu, grid_configure_for_window, grid_free, grid_is_allocated,
-        grid_release_popup_menu, grid_require_full_redraw, grid_requires_compositor_invalidation,
+        grid_configure_for_window, grid_free, grid_is_allocated, grid_release_popup_menu,
+        grid_require_full_redraw, grid_requires_compositor_invalidation,
         grid_revalidate_for_redraw,
     };
     use super::ffi::message::{grid_prepare_for_messages, grid_release_message};
@@ -3642,6 +3647,19 @@ mod tests {
             .iter()
             .map(|cell| cell.attribute)
             .collect()
+    }
+
+    fn configure_stored_popup_grid(
+        grid_handle: i32,
+        rows: i32,
+        columns: i32,
+        contents_invalid: bool,
+    ) -> bool {
+        let size = GridSize::try_new(rows, columns).unwrap();
+        let mut line_buffer = LineBufferGuard::acquire();
+        let mut grid = StoredGridGuard::acquire(GridId::new(grid_handle)).unwrap();
+        grid.configure_for_popup_menu(size, contents_invalid, &mut line_buffer)
+            == GridLifecycleChange::Resized
     }
 
     fn virtual_columns(line_buffer: &LineBuffer) -> Vec<VimColNrT> {
@@ -3999,7 +4017,7 @@ mod tests {
     fn popup_grid_ffi_operations_resolve_permanent_identity() {
         let grid_handle = grid_assign_handle();
 
-        assert!(grid_configure_for_popup_menu(grid_handle, 2, 3, false));
+        assert!(configure_stored_popup_grid(grid_handle, 2, 3, false));
         {
             let grid = StoredGridGuard::acquire(GridId::new(grid_handle)).unwrap();
             assert_eq!(grid.size(), GridSize::try_new(2, 3).unwrap());
@@ -4935,7 +4953,7 @@ mod tests {
     #[test]
     fn cell_inspection_reads_a_permanently_stored_window_grid() {
         let grid_handle = grid_assign_handle();
-        assert!(grid_configure_for_popup_menu(grid_handle, 1, 1, false));
+        assert!(configure_stored_popup_grid(grid_handle, 1, 1, false));
         {
             let mut grid = StoredGridGuard::acquire(GridId::new(grid_handle)).unwrap();
             grid.chars[0] = schar_from_ascii('x');
@@ -5009,7 +5027,7 @@ mod tests {
         let grid_handle = grid_assign_handle();
 
         assert!(!grid_is_allocated(grid_handle));
-        assert!(grid_configure_for_popup_menu(grid_handle, 1, 1, false));
+        assert!(configure_stored_popup_grid(grid_handle, 1, 1, false));
         assert!(grid_is_allocated(grid_handle));
         assert!(grid_requires_compositor_invalidation(grid_handle, false));
         grid_revalidate_for_redraw(grid_handle);

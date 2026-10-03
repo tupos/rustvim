@@ -117,6 +117,18 @@ typedef struct {
   bool redraw_cmdline;
 } MessageSurfaceUpdate;
 
+typedef struct {
+  handle_T grid_handle;
+  int row;
+  int column;
+  int rows;
+  int columns;
+  int z_index;
+  bool blending;
+  bool contents_invalid;
+  handle_T current_window_grid_handle;
+} PopupMenuSurfaceRequest;
+
 typedef void (*MessageGridPositionEmitter)(
   handle_T grid_handle, int row, bool scrolled,
   schar_T separator_character, int z_index, int compositor_index);
@@ -137,8 +149,7 @@ extern bool grid_configure_default(int rows, int columns);
 extern WindowGridUpdate grid_configure_for_window(
   handle_T grid_handle, int rows, int columns, bool use_dedicated_grid,
   int row_offset, int col_offset);
-extern bool grid_configure_for_popup_menu(handle_T grid_handle, int rows, int columns,
-                                          bool contents_invalid);
+extern handle_T grid_update_popup_menu_surface(PopupMenuSurfaceRequest request);
 extern void grid_release_popup_menu(handle_T grid_handle);
 extern MessageGridTransition grid_prepare_for_messages(handle_T grid_handle, int rows, int columns,
                                                        bool should_allocate,

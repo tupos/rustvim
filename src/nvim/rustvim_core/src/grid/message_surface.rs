@@ -3,7 +3,7 @@
 use crate::{
     ui::{
         GridOutputTarget,
-        output::{OwnedRawLineCommand, UiCommand, UiOutput},
+        output::{OwnedRawLineCommand, UiCommand},
     },
     ui_compositor::{
         CompositorContext, CompositorGridPlacement, CompositorGridPlacementRequest,
@@ -13,10 +13,11 @@ use crate::{
 };
 
 use super::{
-    CMessageSurfaceRequest, CMessageSurfaceScrollRequest, CMessageSurfaceUpdate, ComposedGridSpace,
-    GridContext, GridId, GridSize, GridViewDescriptor, LineGrid, LocalGridSpace, MessageGridMode,
-    MessageGridPositionUpdate, MessageGridScrollFlushPlan, MessageGridScrollFlushRequest,
-    MessageGridScrollUp, MessageGridScrollUpAction, MessageGridTransition, VimSAttrT, VimSCharT,
+    CMessageSurfaceRequest, CMessageSurfaceScrollRequest, CMessageSurfaceUpdate, GridContext,
+    GridId, GridSize, GridSurfaceOutput, GridViewDescriptor, LineGrid, LocalGridSpace,
+    MessageGridMode, MessageGridPositionUpdate, MessageGridScrollFlushPlan,
+    MessageGridScrollFlushRequest, MessageGridScrollUp, MessageGridScrollUpAction,
+    MessageGridTransition, VimSAttrT, VimSCharT,
 };
 
 /// Appearance and stacking policy of the message surface.
@@ -191,7 +192,7 @@ impl From<MessageSurfaceUpdate> for CMessageSurfaceUpdate {
 }
 
 /// Receives owned UI effects after Rust subsystem borrows are released.
-pub(crate) trait MessageSurfaceOutput: UiOutput<ComposedGridSpace> {
+pub(crate) trait MessageSurfaceOutput: GridSurfaceOutput {
     /// Publishes one message-grid position to uncomposed UI clients.
     fn emit_message_position(
         &mut self,
@@ -202,12 +203,6 @@ pub(crate) trait MessageSurfaceOutput: UiOutput<ComposedGridSpace> {
         z_index: i32,
         compositor_index: usize,
     );
-
-    /// Publishes the allocated message-grid dimensions.
-    fn emit_grid_resize(&mut self, grid_id: GridId, size: GridSize);
-
-    /// Publishes final destruction of the message grid's current storage.
-    fn emit_grid_destroy(&mut self, grid_id: GridId);
 
     /// Publishes one message-grid command after storage borrows are released.
     fn emit_grid_command(&mut self, target: GridOutputTarget, command: UiCommand<LocalGridSpace>);

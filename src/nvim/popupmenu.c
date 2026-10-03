@@ -655,26 +655,27 @@ void pum_redraw(void)
     }
   }
   bool blending = p_pb > 0 || fconfig.shadow;
-  if (pum_grid_handle == 0) {
-    pum_grid_handle = grid_assign_handle();
-  }
 
   pum_left_col = pum_col - col_off;
   pum_right_col = pum_left_col + grid_width;
-  bool moved = ui_comp_put_grid(pum_grid_handle, pum_row, pum_left_col,
-                                pum_height + border_width, grid_width + border_width, pum_zindex,
-                                blending, false, true, true,
-                                curwin ? curwin->w_grid_handle : 0);
-  bool invalid_grid = moved || pum_invalid;
+  bool contents_invalid = pum_invalid;
   pum_invalid = false;
   must_redraw_pum = false;
 
   int grid_height = pum_height + border_width;
   int grid_columns = grid_width + border_width;
-  if (grid_configure_for_popup_menu(
-        pum_grid_handle, grid_height, grid_columns, invalid_grid)) {
-    ui_call_grid_resize(pum_grid_handle, grid_columns, grid_height);
-  }
+  pum_grid_handle = grid_update_popup_menu_surface(
+    (PopupMenuSurfaceRequest){
+      .grid_handle = pum_grid_handle,
+      .row = pum_row,
+      .column = pum_left_col,
+      .rows = grid_height,
+      .columns = grid_columns,
+      .z_index = pum_zindex,
+      .blending = blending,
+      .contents_invalid = contents_invalid,
+      .current_window_grid_handle = curwin ? curwin->w_grid_handle : 0,
+    });
   if (ui_has(kUIMultigrid)) {
     pum_pos_ui_flush(true);
   }

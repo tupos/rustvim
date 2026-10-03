@@ -2,41 +2,47 @@
 
 use crate::{
     context::registered_context,
-    defines::Integer,
     ui::{
         GridOutputTarget,
         output::{OwnedRawLineCommand, RawLineCells, RawLineCommand, UiCommand, UiOutput},
     },
-    ui_compositor::{NvimComposedOutput, compositor_runtime_snapshot},
+    ui_compositor::compositor_runtime_snapshot,
 };
 
 use super::super::{
     CMessageGridPositionConfig, CMessageGridPositionEmitter, CMessageGridScrollFlushRequest,
     CMessageGridTransition, CMessageSurfaceRequest, CMessageSurfaceScrollRequest,
-    CMessageSurfaceUpdate, ComposedGridSpace, GridId, GridSize, LineBufferGuard, LocalGridSpace,
-    MessageGridMode, MessageGridScrollFlushRequest, MessageGridTransition, MessagePositionPolicy,
-    MessagePositionRequest, MessageSurfaceOutput, StoredGridGuard, VimHandleT, VimSCharT,
-    lock_grid_store, lock_message_grid_state,
+    CMessageSurfaceUpdate, ComposedGridSpace, GridId, GridSize, GridSurfaceOutput, LineBufferGuard,
+    LocalGridSpace, MessageGridMode, MessageGridScrollFlushRequest, MessageGridTransition,
+    MessagePositionPolicy, MessagePositionRequest, MessageSurfaceOutput, StoredGridGuard,
+    VimHandleT, VimSCharT, lock_grid_store, lock_message_grid_state,
 };
 
-unsafe extern "C" {
-    fn ui_uncomposed_call_grid_resize(grid: Integer, width: Integer, height: Integer);
-    fn ui_call_grid_destroy(grid: Integer);
-}
+use super::surface::NvimGridSurfaceOutput;
 
 /// Final C UI adapter for one complete message-surface transition.
 struct NvimMessageSurfaceOutput {
-    composed: NvimComposedOutput,
+    surface: NvimGridSurfaceOutput,
     emit_position: CMessageGridPositionEmitter,
 }
 
 impl UiOutput<ComposedGridSpace> for NvimMessageSurfaceOutput {
     fn emit(&mut self, command: UiCommand<ComposedGridSpace>) {
-        self.composed.emit(command);
+        self.surface.emit(command);
     }
 
     fn emit_raw_line<Cells: RawLineCells>(&mut self, command: RawLineCommand<Cells>) {
-        self.composed.emit_raw_line(command);
+        self.surface.emit_raw_line(command);
+    }
+}
+
+impl GridSurfaceOutput for NvimMessageSurfaceOutput {
+    fn emit_grid_resize(&mut self, grid_id: GridId, size: GridSize) {
+        self.surface.emit_grid_resize(grid_id, size);
+    }
+
+    fn emit_grid_destroy(&mut self, grid_id: GridId) {
+        self.surface.emit_grid_destroy(grid_id);
     }
 }
 
@@ -66,26 +72,6 @@ impl MessageSurfaceOutput for NvimMessageSurfaceOutput {
         }
     }
 
-    fn emit_grid_resize(&mut self, grid_id: GridId, size: GridSize) {
-        // SAFETY: The identity and dimensions were validated by safe Rust, and
-        // the generated callback is synchronous.
-        unsafe {
-            ui_uncomposed_call_grid_resize(
-                Integer::from(grid_id.as_native_handle()),
-                Integer::from(size.width),
-                Integer::from(size.height),
-            );
-        }
-    }
-
-    fn emit_grid_destroy(&mut self, grid_id: GridId) {
-        // SAFETY: The stable identity is delivered synchronously at the final
-        // C UI boundary.
-        unsafe {
-            ui_call_grid_destroy(Integer::from(grid_id.as_native_handle()));
-        }
-    }
-
     fn emit_grid_command(&mut self, target: GridOutputTarget, command: UiCommand<LocalGridSpace>) {
         target.emit(command);
     }
@@ -110,7 +96,7 @@ pub unsafe extern "C" fn grid_update_message_surface(
         .expect("message-surface request must contain valid editor state");
     let runtime = compositor_runtime_snapshot().expect("compositor runtime must be valid");
     let mut output = NvimMessageSurfaceOutput {
-        composed: NvimComposedOutput,
+        surface: NvimGridSurfaceOutput::new(),
         emit_position,
     };
 
@@ -144,7 +130,7 @@ unsafe fn update_message_grid_position(
         MessagePositionPolicy::new(config.separator_character, config.z_index),
     );
     let mut output = NvimMessageSurfaceOutput {
-        composed: NvimComposedOutput,
+        surface: NvimGridSurfaceOutput::new(),
         emit_position,
     };
     registered_context()
@@ -176,7 +162,7 @@ pub(super) unsafe fn publish_message_grid_position(
         MessagePositionPolicy::new(config.separator_character, config.z_index),
     );
     let mut output = NvimMessageSurfaceOutput {
-        composed: NvimComposedOutput,
+        surface: NvimGridSurfaceOutput::new(),
         emit_position,
     };
     registered_context()
@@ -291,7 +277,7 @@ pub unsafe extern "C" fn grid_scroll_message_surface_up(
         .expect("message scroll request must contain valid editor state");
     let runtime = compositor_runtime_snapshot().expect("compositor runtime must be valid");
     let mut output = NvimMessageSurfaceOutput {
-        composed: NvimComposedOutput,
+        surface: NvimGridSurfaceOutput::new(),
         emit_position,
     };
     registered_context()
@@ -395,7 +381,7 @@ pub unsafe extern "C" fn grid_flush_message_scroll(
     let runtime = compositor_runtime_snapshot().expect("compositor runtime must be valid");
     let position = MessagePositionPolicy::new(config.separator_character, config.z_index);
     let mut output = NvimMessageSurfaceOutput {
-        composed: NvimComposedOutput,
+        surface: NvimGridSurfaceOutput::new(),
         emit_position,
     };
     registered_context()

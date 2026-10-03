@@ -337,6 +337,11 @@ impl CompositorGridPlacement {
         })
     }
 
+    /// Returns the requested grid dimensions.
+    pub(crate) const fn size(self) -> GridSize {
+        self.size
+    }
+
     /// Returns the exclusive bottom edge of the requested area.
     fn bottom_edge(self) -> CompositorResult<i32> {
         self.origin
