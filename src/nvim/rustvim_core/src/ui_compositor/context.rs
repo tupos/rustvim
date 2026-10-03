@@ -228,6 +228,46 @@ impl CompositorContext {
         Ok(())
     }
 
+    /// Takes a registered grid's current layer-index publication.
+    ///
+    /// When `pending_only` is true, an unchanged layer returns `None`.
+    pub(crate) fn take_registered_grid_publication(
+        &self,
+        grid_id: GridId,
+        pending_only: bool,
+    ) -> CompositorResult<Option<usize>> {
+        let mut compositor = self.lock_state();
+        if pending_only && !compositor.grid_publication_pending(grid_id)? {
+            return Ok(None);
+        }
+
+        let publication = compositor
+            .take_grid_publication(grid_id)?
+            .ok_or(CompositorError::InvalidLayerState)?;
+        Ok(Some(publication.layer_index))
+    }
+
+    /// Recomposes the complete area occupied by one registered grid.
+    pub(crate) fn recompose_registered_grid(
+        &self,
+        grids: &GridContext,
+        grid_id: GridId,
+        message_grid_id: Option<GridId>,
+        runtime: CompositorRuntime,
+        output: &mut impl UiOutput<ComposedGridSpace>,
+    ) -> CompositorResult<()> {
+        let area = {
+            let grid_store = grids.lock_store();
+            let compositor = self.lock_state();
+            if !compositor.should_draw() {
+                return Ok(());
+            }
+            compositor.recompose_area_for_grid(&grid_store, grid_id)?
+        };
+
+        self.recompose_registered_area(grids, message_grid_id, area, runtime, output)
+    }
+
     /// Places a new or existing grid in the compositor layer stack.
     ///
     /// An existing grid is restored to its requested placement even if

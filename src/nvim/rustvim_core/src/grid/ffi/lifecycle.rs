@@ -86,19 +86,6 @@ pub extern "C" fn grid_configure_default(rows: libc::c_int, columns: libc::c_int
     grid.configure_as_default(size, &mut line_buffer) == GridLifecycleChange::Resized
 }
 
-/// Releases popup-menu cell storage while retaining its permanent identity.
-///
-/// The popup menu reuses its grid handle when it is displayed again. Final
-/// removal from `GridStore` therefore occurs only during editor shutdown.
-///
-/// Missing grid identities are ignored.
-#[unsafe(no_mangle)]
-pub extern "C" fn grid_release_popup_menu(grid_handle: VimHandleT) {
-    if let Ok(mut grid) = StoredGridGuard::acquire(GridId::new(grid_handle)) {
-        grid.release_storage();
-    }
-}
-
 /// Applies the complete allocation, validity, and view transition for one
 /// window grid.
 ///

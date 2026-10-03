@@ -158,33 +158,6 @@ pub unsafe extern "C" fn ui_comp_msg_set_pos(
         .expect("message-grid position update must preserve compositor invariants");
 }
 
-/// Returns the screen area occupied by one registered grid.
-pub(in crate::ui_compositor) fn recompose_area_for_registered_grid(
-    grid_id: GridId,
-) -> CompositorResult<CompositorRecomposeArea> {
-    let grid_store = lock_grid_store();
-    lock_compositor().recompose_area_for_grid(&grid_store, grid_id)
-}
-
-/// Recomposes the screen area occupied by one grid when drawing is enabled.
-#[unsafe(no_mangle)]
-pub extern "C" fn ui_comp_compose_grid(grid_handle: Integer) {
-    let grid_handle =
-        i32::try_from(grid_handle).expect("grid handle must fit the compositor grid identity");
-    let grid_id = GridId::new(grid_handle);
-
-    if !lock_compositor().should_draw() {
-        return;
-    }
-    let runtime = compositor_runtime_snapshot().expect("compositor runtime must be valid");
-    let area =
-        recompose_area_for_registered_grid(grid_id).expect("grid to recompose must be registered");
-    let mut output = NvimComposedOutput;
-
-    recompose_area_from_registered_grids(current_message_grid_id(), area, runtime, &mut output)
-        .expect("grid recomposition must preserve compositor invariants");
-}
-
 /// Places a new or existing regular grid in the compositor layer stack.
 ///
 /// Rust determines whether the identity is already registered and performs

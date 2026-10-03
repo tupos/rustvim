@@ -1305,12 +1305,7 @@ void pum_check_clear(void)
     if (pum_external) {
       ui_call_popupmenu_hide();
     } else {
-      ui_comp_remove_grid(pum_grid_handle);
-      if (ui_has(kUIMultigrid)) {
-        ui_call_win_close(pum_grid_handle);
-        ui_call_grid_destroy(pum_grid_handle);
-      }
-      grid_release_popup_menu(pum_grid_handle);
+      grid_hide_popup_menu_surface(pum_grid_handle, ui_has(kUIMultigrid));
     }
     pum_is_drawn = false;
     pum_external = false;
@@ -1345,7 +1340,7 @@ void pum_invalidate(void)
 
 void pum_recompose(void)
 {
-  ui_comp_compose_grid(pum_grid_handle);
+  grid_recompose_popup_menu_surface(pum_grid_handle);
 }
 
 void pum_ext_select_item(int item, bool insert, bool finish)
@@ -1673,15 +1668,20 @@ void pum_make_popup(const char *path_name, int use_mouse_pos)
 
 void pum_pos_ui_flush(bool force)
 {
-  if (force || (ui_has(kUIMultigrid) && pum_is_drawn && !pum_external
-                && pum_grid_handle != 0
-                && ui_comp_grid_publication_pending(pum_grid_handle))) {
-    int compositor_index = ui_comp_take_grid_publication(pum_grid_handle);
-    assert(compositor_index > 0);
-    const char *anchor = pum_above ? "SW" : "NW";
-    int row_off = pum_above ? -pum_height : 0;
-    ui_call_win_float_pos(pum_grid_handle, -1, cstr_as_string(anchor), pum_anchor_grid,
-                          pum_row - row_off - pum_win_row_offset, pum_left_col - pum_win_col_offset,
-                          false, pum_zindex, compositor_index, pum_row, pum_left_col);
-  }
+  grid_publish_popup_menu_surface_position(
+    (PopupMenuSurfacePositionRequest){
+      .grid_handle = pum_grid_handle,
+      .force = force,
+      .multigrid_enabled = ui_has(kUIMultigrid),
+      .drawn = pum_is_drawn,
+      .external = pum_external,
+      .above = pum_above,
+      .height = pum_height,
+      .anchor_grid_handle = pum_anchor_grid,
+      .row = pum_row,
+      .column = pum_left_col,
+      .window_row_offset = pum_win_row_offset,
+      .window_column_offset = pum_win_col_offset,
+      .z_index = pum_zindex,
+    });
 }

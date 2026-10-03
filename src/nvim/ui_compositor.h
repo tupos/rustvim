@@ -27,7 +27,6 @@ extern bool ui_comp_put_grid(
   bool accepts_mouse_input,
   Integer current_window_grid_handle);
 extern void ui_comp_remove_grid(Integer grid_handle);
-extern void ui_comp_compose_grid(Integer grid_handle);
 
 extern bool ui_comp_set_screen_valid(bool valid);
 

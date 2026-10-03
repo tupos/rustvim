@@ -129,6 +129,22 @@ typedef struct {
   handle_T current_window_grid_handle;
 } PopupMenuSurfaceRequest;
 
+typedef struct {
+  handle_T grid_handle;
+  bool force;
+  bool multigrid_enabled;
+  bool drawn;
+  bool external;
+  bool above;
+  int height;
+  int anchor_grid_handle;
+  int row;
+  int column;
+  int window_row_offset;
+  int window_column_offset;
+  int z_index;
+} PopupMenuSurfacePositionRequest;
+
 typedef void (*MessageGridPositionEmitter)(
   handle_T grid_handle, int row, bool scrolled,
   schar_T separator_character, int z_index, int compositor_index);
@@ -150,7 +166,10 @@ extern WindowGridUpdate grid_configure_for_window(
   handle_T grid_handle, int rows, int columns, bool use_dedicated_grid,
   int row_offset, int col_offset);
 extern handle_T grid_update_popup_menu_surface(PopupMenuSurfaceRequest request);
-extern void grid_release_popup_menu(handle_T grid_handle);
+extern void grid_hide_popup_menu_surface(handle_T grid_handle, bool publish_ui_events);
+extern void grid_recompose_popup_menu_surface(handle_T grid_handle);
+extern void grid_publish_popup_menu_surface_position(
+  PopupMenuSurfacePositionRequest request);
 extern MessageGridTransition grid_prepare_for_messages(handle_T grid_handle, int rows, int columns,
                                                        bool should_allocate,
                                                        int scrolled_lines);

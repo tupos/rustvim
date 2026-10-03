@@ -49,7 +49,11 @@ use line_submission::{LineSubmission, SmoothScrollMarker};
 use message_surface::{MessagePositionPolicy, MessagePositionRequest};
 pub(crate) use message_surface::{MessageSurface, MessageSurfaceOutput};
 pub(crate) use popup_surface::PopupMenuSurface;
-use popup_surface::PopupMenuSurfaceRequest;
+use popup_surface::{
+    PopupMenuAnchor, PopupMenuAnchorGrid, PopupMenuHideRequest, PopupMenuPositionEvent,
+    PopupMenuPositionGeometry, PopupMenuPositionRequest, PopupMenuPublicationPolicy,
+    PopupMenuSurfaceOutput, PopupMenuSurfaceRequest,
+};
 pub(crate) use row::{GridRow, GridRowSegment};
 use store::StoredGridGuard;
 pub(crate) use store::{GridStore, lock_grid_store};
@@ -3624,9 +3628,8 @@ impl<'a> ArabicShaper<'a> {
 #[cfg(test)]
 mod tests {
     use super::ffi::lifecycle::{
-        grid_configure_for_window, grid_free, grid_is_allocated, grid_release_popup_menu,
-        grid_require_full_redraw, grid_requires_compositor_invalidation,
-        grid_revalidate_for_redraw,
+        grid_configure_for_window, grid_free, grid_is_allocated, grid_require_full_redraw,
+        grid_requires_compositor_invalidation, grid_revalidate_for_redraw,
     };
     use super::ffi::message::{grid_prepare_for_messages, grid_release_message};
     use super::ffi::operations::{grid_assign_handle, grid_inspect_cell, grid_invalidate};
@@ -4014,7 +4017,7 @@ mod tests {
     }
 
     #[test]
-    fn popup_grid_ffi_operations_resolve_permanent_identity() {
+    fn popup_grid_storage_release_retains_permanent_identity() {
         let grid_handle = grid_assign_handle();
 
         assert!(configure_stored_popup_grid(grid_handle, 2, 3, false));
@@ -4024,7 +4027,9 @@ mod tests {
             assert!(grid.is_allocated());
         }
 
-        grid_release_popup_menu(grid_handle);
+        StoredGridGuard::acquire(GridId::new(grid_handle))
+            .unwrap()
+            .release_storage();
         assert!(!grid_is_allocated(grid_handle));
 
         release_permanent_grid(GridId::new(grid_handle));

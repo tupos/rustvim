@@ -3,11 +3,13 @@
 #![forbid(unsafe_code)]
 
 use crate::ui_compositor::{
-    CompositorContext, CompositorGridPlacement, CompositorGridPlacementRequest, CompositorResult,
-    CompositorRuntime, RegisteredGridPlacement,
+    CompositorContext, CompositorError, CompositorGridPlacement, CompositorGridPlacementRequest,
+    CompositorResult, CompositorRuntime, RegisteredGridPlacement,
 };
 
-use super::{GridContext, GridId, GridLifecycleChange, GridSurfaceOutput};
+use super::{
+    ComposedPosition, GridContext, GridId, GridLifecycleChange, GridPosition, GridSurfaceOutput,
+};
 
 /// Validated input for one complete popup-menu surface update.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -18,6 +20,88 @@ pub(super) struct PopupMenuSurfaceRequest {
     blending: bool,
     contents_invalid: bool,
     current_window_grid_id: Option<GridId>,
+}
+
+/// Policy controlling whether popup-menu position must be published.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct PopupMenuPublicationPolicy {
+    pub(super) force: bool,
+    pub(super) multigrid_enabled: bool,
+    pub(super) drawn: bool,
+    pub(super) external: bool,
+}
+
+/// Target used to interpret the popup-menu anchor coordinates.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum PopupMenuAnchorGrid {
+    Global,
+    Grid(GridId),
+}
+
+impl PopupMenuAnchorGrid {
+    /// Returns the native UI-protocol grid handle.
+    pub(super) const fn native_handle(self) -> i32 {
+        match self {
+            Self::Global => -1,
+            Self::Grid(grid_id) => grid_id.as_native_handle(),
+        }
+    }
+}
+
+/// Editor geometry needed to construct a popup-menu position event.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct PopupMenuPositionGeometry {
+    pub(super) above: bool,
+    pub(super) height: i32,
+    pub(super) anchor_grid: Option<PopupMenuAnchorGrid>,
+    pub(super) origin: ComposedPosition,
+    pub(super) window_offset: GridPosition,
+}
+
+/// Validated request to publish the popup-menu position.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct PopupMenuPositionRequest {
+    pub(super) grid_id: Option<GridId>,
+    pub(super) publication: PopupMenuPublicationPolicy,
+    pub(super) geometry: PopupMenuPositionGeometry,
+    pub(super) z_index: i32,
+}
+
+/// Complete request for hiding a popup-menu surface.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct PopupMenuHideRequest {
+    pub(super) grid_id: GridId,
+    pub(super) message_grid_id: Option<GridId>,
+    pub(super) publish_ui_events: bool,
+    pub(super) runtime: CompositorRuntime,
+}
+
+/// Popup-menu corner used by the final window-position event.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum PopupMenuAnchor {
+    NorthWest,
+    SouthWest,
+}
+
+/// Owned popup-menu position event produced by safe Rust.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct PopupMenuPositionEvent {
+    pub(super) grid_id: GridId,
+    pub(super) anchor: PopupMenuAnchor,
+    pub(super) anchor_grid: PopupMenuAnchorGrid,
+    pub(super) anchor_position: GridPosition,
+    pub(super) screen_position: ComposedPosition,
+    pub(super) z_index: i32,
+    pub(super) compositor_index: usize,
+}
+
+/// Receives popup-menu-specific lifecycle events.
+pub(super) trait PopupMenuSurfaceOutput: GridSurfaceOutput {
+    /// Publishes that the popup-menu window closed.
+    fn emit_window_close(&mut self, grid_id: GridId);
+
+    /// Publishes the popup-menu's current position and layer index.
+    fn emit_position(&mut self, event: PopupMenuPositionEvent);
 }
 
 impl PopupMenuSurfaceRequest {
@@ -98,6 +182,116 @@ impl<'context> PopupMenuSurface<'context> {
         }
 
         Ok(grid_id)
+    }
+
+    /// Removes the popup-menu layer and releases its cell storage.
+    pub(super) fn hide(
+        &self,
+        request: PopupMenuHideRequest,
+        output: &mut impl PopupMenuSurfaceOutput,
+    ) -> CompositorResult<()> {
+        self.compositor.remove_registered_grid(
+            self.grids,
+            request.grid_id,
+            request.message_grid_id,
+            request.runtime,
+            output,
+        )?;
+
+        if request.publish_ui_events {
+            output.emit_window_close(request.grid_id);
+            output.emit_grid_destroy(request.grid_id);
+        }
+
+        self.grids
+            .lock_store()
+            .grid_mut(request.grid_id)
+            .expect("popup-menu grid must remain permanently registered")
+            .release_storage();
+        Ok(())
+    }
+
+    /// Publishes the popup-menu position when its layer index changed.
+    pub(super) fn publish_position(
+        &self,
+        request: PopupMenuPositionRequest,
+        output: &mut impl PopupMenuSurfaceOutput,
+    ) -> CompositorResult<()> {
+        if !request.publication.force
+            && (!request.publication.multigrid_enabled
+                || !request.publication.drawn
+                || request.publication.external
+                || request.grid_id.is_none())
+        {
+            return Ok(());
+        }
+
+        let grid_id = request.grid_id.ok_or(CompositorError::InvalidLayerState)?;
+        let Some(compositor_index) = self
+            .compositor
+            .take_registered_grid_publication(grid_id, !request.publication.force)?
+        else {
+            return Ok(());
+        };
+        let anchor_grid = request
+            .geometry
+            .anchor_grid
+            .ok_or(CompositorError::InvalidLayerState)?;
+
+        let row_offset = if request.geometry.above {
+            request
+                .geometry
+                .height
+                .checked_neg()
+                .ok_or(CompositorError::InvalidGeometry)?
+        } else {
+            0
+        };
+        let anchor_row = request
+            .geometry
+            .origin
+            .row
+            .checked_sub(row_offset)
+            .and_then(|row| row.checked_sub(request.geometry.window_offset.row))
+            .ok_or(CompositorError::InvalidGeometry)?;
+        let anchor_column = request
+            .geometry
+            .origin
+            .column
+            .checked_sub(request.geometry.window_offset.column)
+            .ok_or(CompositorError::InvalidGeometry)?;
+
+        output.emit_position(PopupMenuPositionEvent {
+            grid_id,
+            anchor: if request.geometry.above {
+                PopupMenuAnchor::SouthWest
+            } else {
+                PopupMenuAnchor::NorthWest
+            },
+            anchor_grid,
+            anchor_position: GridPosition::new(anchor_row, anchor_column),
+            screen_position: request.geometry.origin,
+            z_index: request.z_index,
+            compositor_index,
+        });
+        Ok(())
+    }
+
+    /// Recomposes the screen area occupied by the popup-menu layer.
+    pub(super) fn recompose(
+        &self,
+        grid_id: GridId,
+        message_grid_id: Option<GridId>,
+        runtime: CompositorRuntime,
+        output: &mut impl GridSurfaceOutput,
+    ) -> CompositorResult<()> {
+        self.compositor.recompose_registered_grid(
+            self.grids,
+            grid_id,
+            message_grid_id,
+            runtime,
+            output,
+        )
     }
 
     /// Allocates and registers the popup-menu identity on first use.
