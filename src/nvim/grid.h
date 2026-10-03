@@ -84,6 +84,27 @@ typedef struct {
   int z_index;
 } MessageGridPositionConfig;
 
+typedef struct {
+  handle_T grid_handle;
+  int screen_rows;
+  int screen_columns;
+  bool should_allocate;
+  int scrolled_lines;
+  bool pager_active;
+  int command_height;
+  int current_position;
+  MessageGridPositionConfig position;
+  bool blending;
+  handle_T current_window_grid_handle;
+  sattr_T clear_attribute;
+} MessageSurfaceRequest;
+
+typedef struct {
+  handle_T grid_handle;
+  int position;
+  bool redraw_cmdline;
+} MessageSurfaceUpdate;
+
 typedef void (*MessageGridPositionEmitter)(
   handle_T grid_handle, int row, bool scrolled,
   schar_T separator_character, int z_index, int compositor_index);
@@ -113,6 +134,9 @@ extern MessageGridTransition grid_prepare_for_messages(handle_T grid_handle, int
 extern void grid_release_message(handle_T grid_handle);
 extern void grid_activate_message_view(handle_T grid_handle);
 extern void grid_reset_message_view(void);
+extern MessageSurfaceUpdate grid_update_message_surface(
+  MessageSurfaceRequest request,
+  MessageGridPositionEmitter emit_position);
 extern void grid_set_message_position(handle_T grid_handle, int row, bool scrolled,
                                       MessageGridPositionConfig config,
                                       MessageGridPositionEmitter emit_position);

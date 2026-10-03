@@ -263,14 +263,14 @@ enum CompositorCursorUpdate {
 
 /// Requested position and size of one compositor grid.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct CompositorGridPlacement {
+pub(crate) struct CompositorGridPlacement {
     origin: ComposedPosition,
     size: GridSize,
 }
 
 /// Validated native inputs for placing one compositor grid.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct CompositorGridPlacementRequest {
+pub(crate) struct CompositorGridPlacementRequest {
     placement: CompositorGridPlacement,
     z_index: i32,
     blending: bool,
@@ -281,7 +281,7 @@ struct CompositorGridPlacementRequest {
 
 impl CompositorGridPlacementRequest {
     /// Constructs a request from validated placement geometry.
-    const fn new(
+    pub(crate) const fn new(
         placement: CompositorGridPlacement,
         z_index: i32,
         blending: bool,
@@ -301,7 +301,7 @@ impl CompositorGridPlacementRequest {
 }
 
 /// Complete inputs for placing one registered compositor grid.
-pub(in crate::ui_compositor) struct RegisteredGridPlacement {
+pub(crate) struct RegisteredGridPlacement {
     grid_id: GridId,
     current_window_grid_id: Option<GridId>,
     message_grid_id: Option<GridId>,
@@ -311,7 +311,7 @@ pub(in crate::ui_compositor) struct RegisteredGridPlacement {
 
 impl RegisteredGridPlacement {
     /// Combines grid identities, placement policy, and one runtime snapshot.
-    pub(in crate::ui_compositor) const fn new(
+    pub(crate) const fn new(
         grid_id: GridId,
         current_window_grid_id: Option<GridId>,
         message_grid_id: Option<GridId>,
@@ -330,7 +330,7 @@ impl RegisteredGridPlacement {
 
 impl CompositorGridPlacement {
     /// Constructs a placement with nonnegative dimensions.
-    fn try_new(row: i32, column: i32, height: i32, width: i32) -> Option<Self> {
+    pub(crate) fn try_new(row: i32, column: i32, height: i32, width: i32) -> Option<Self> {
         Some(Self {
             origin: ComposedPosition::new(row, column),
             size: GridSize::try_new(height, width)?,

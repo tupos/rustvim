@@ -2,6 +2,11 @@
 
 use crate::{
     context::registered_context,
+    defines::Integer,
+    ui::{
+        GridOutputTarget,
+        output::{OwnedRawLineCommand, RawLineCells, RawLineCommand, UiCommand, UiOutput},
+    },
     ui_compositor::{
         CompositorMessagePositionRequest, NvimComposedOutput, compositor_runtime_snapshot,
     },
@@ -9,11 +14,110 @@ use crate::{
 
 use super::super::{
     CMessageGridPositionConfig, CMessageGridPositionEmitter, CMessageGridScrollFlushRequest,
-    CMessageGridTransition, GridId, GridSize, LineBufferGuard, MessageGridMode,
-    MessageGridScrollFlushPlan, MessageGridScrollFlushRequest, MessageGridScrollUp,
-    MessageGridScrollUpAction, MessageGridTransition, StoredGridGuard, VimHandleT, lock_grid_store,
-    lock_message_grid_state,
+    CMessageGridTransition, CMessageSurfaceRequest, CMessageSurfaceUpdate, ComposedGridSpace,
+    GridId, GridSize, LineBufferGuard, MessageGridMode, MessageGridScrollFlushPlan,
+    MessageGridScrollFlushRequest, MessageGridScrollUp, MessageGridScrollUpAction,
+    MessageGridTransition, MessageSurfaceOutput, StoredGridGuard, VimHandleT, VimSCharT,
+    lock_grid_store, lock_message_grid_state,
 };
+
+unsafe extern "C" {
+    fn ui_uncomposed_call_grid_resize(grid: Integer, width: Integer, height: Integer);
+    fn ui_call_grid_destroy(grid: Integer);
+}
+
+/// Final C UI adapter for one complete message-surface transition.
+struct NvimMessageSurfaceOutput {
+    composed: NvimComposedOutput,
+    emit_position: CMessageGridPositionEmitter,
+}
+
+impl UiOutput<ComposedGridSpace> for NvimMessageSurfaceOutput {
+    fn emit(&mut self, command: UiCommand<ComposedGridSpace>) {
+        self.composed.emit(command);
+    }
+
+    fn emit_raw_line<Cells: RawLineCells>(&mut self, command: RawLineCommand<Cells>) {
+        self.composed.emit_raw_line(command);
+    }
+}
+
+impl MessageSurfaceOutput for NvimMessageSurfaceOutput {
+    fn emit_message_position(
+        &mut self,
+        grid_id: GridId,
+        row: i32,
+        scrolled: bool,
+        separator_character: VimSCharT,
+        z_index: i32,
+        compositor_index: usize,
+    ) {
+        let compositor_index = i32::try_from(compositor_index)
+            .expect("compositor layer index must fit the C UI event representation");
+        // SAFETY: The FFI caller guarantees the callback remains valid for the
+        // complete synchronous lifecycle operation.
+        unsafe {
+            (self.emit_position)(
+                grid_id.as_native_handle(),
+                row,
+                scrolled,
+                separator_character,
+                z_index,
+                compositor_index,
+            );
+        }
+    }
+
+    fn emit_grid_resize(&mut self, grid_id: GridId, size: GridSize) {
+        // SAFETY: The identity and dimensions were validated by safe Rust, and
+        // the generated callback is synchronous.
+        unsafe {
+            ui_uncomposed_call_grid_resize(
+                Integer::from(grid_id.as_native_handle()),
+                Integer::from(size.width),
+                Integer::from(size.height),
+            );
+        }
+    }
+
+    fn emit_grid_destroy(&mut self, grid_id: GridId) {
+        // SAFETY: The stable identity is delivered synchronously at the final
+        // C UI boundary.
+        unsafe {
+            ui_call_grid_destroy(Integer::from(grid_id.as_native_handle()));
+        }
+    }
+
+    fn emit_grid_lines(&mut self, target: GridOutputTarget, lines: Vec<OwnedRawLineCommand>) {
+        target.emit_lines(lines);
+    }
+}
+
+/// Applies one complete message-surface lifecycle transition.
+///
+/// # Safety
+///
+/// `emit_position` must remain callable for the duration of this operation.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn grid_update_message_surface(
+    request: CMessageSurfaceRequest,
+    emit_position: CMessageGridPositionEmitter,
+) -> CMessageSurfaceUpdate {
+    let request = request
+        .try_into_native()
+        .expect("message-surface request must contain valid editor state");
+    let runtime = compositor_runtime_snapshot().expect("compositor runtime must be valid");
+    let mut output = NvimMessageSurfaceOutput {
+        composed: NvimComposedOutput,
+        emit_position,
+    };
+
+    registered_context()
+        .message_surface()
+        .update(request, runtime, &mut output)
+        .expect("message-surface update must preserve rendering invariants")
+        .into()
+}
 
 /// Processes and publishes one message-grid position.
 ///

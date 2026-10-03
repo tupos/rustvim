@@ -163,7 +163,7 @@ impl CompositorContext {
     ///
     /// Grid and compositor borrows are released before recomposition emits
     /// output.
-    pub(in crate::ui_compositor) fn place_registered_grid(
+    pub(crate) fn place_registered_grid(
         &self,
         grids: &GridContext,
         placement: RegisteredGridPlacement,
@@ -208,7 +208,7 @@ impl CompositorContext {
     /// Removes one identified grid and recomposes the area it exposed.
     ///
     /// An unregistered grid is an expected successful no-op.
-    pub(in crate::ui_compositor) fn remove_registered_grid(
+    pub(crate) fn remove_registered_grid(
         &self,
         grids: &GridContext,
         grid_id: GridId,

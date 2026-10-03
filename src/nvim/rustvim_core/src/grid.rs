@@ -5,6 +5,7 @@ mod ffi;
 mod fold_column;
 mod line_buffer;
 mod line_submission;
+mod message_surface;
 mod row;
 mod store;
 mod tabstops;
@@ -43,6 +44,7 @@ use fold_column::{FoldColumn, FoldColumnInfo, FoldColumnSymbols};
 pub use line_buffer::LineBuffer;
 use line_buffer::{LineTextRenderOptions, LineTextVirtualColumns};
 use line_submission::{LineSubmission, SmoothScrollMarker};
+pub(crate) use message_surface::{MessageSurface, MessageSurfaceOutput};
 pub(crate) use row::{GridRow, GridRowSegment};
 use store::StoredGridGuard;
 pub(crate) use store::{GridStore, lock_grid_store};
@@ -2165,6 +2167,18 @@ impl<'grid> LineGrid<'grid> {
         self.state.put_text(col, text, attr, line_buf)
     }
 
+    /// Schedules a half-open range to be cleared when the line is committed.
+    fn set_clear_range(
+        &mut self,
+        start_col: i32,
+        end_col: i32,
+        background_attribute: VimSAttrT,
+        clear_attribute: VimSAttrT,
+    ) {
+        self.state
+            .set_clear_range(start_col, end_col, background_attribute, clear_attribute);
+    }
+
     /// Ends the current line operation and returns its UI output.
     fn flush(&mut self, line_buf: &mut LineBuffer) -> Vec<OwnedRawLineCommand> {
         if self.state.finish() {
@@ -2172,6 +2186,21 @@ impl<'grid> LineGrid<'grid> {
         } else {
             Vec::new()
         }
+    }
+
+    /// Returns the final usable column of the active line.
+    fn max_col(&self) -> i32 {
+        self.state.max_col
+    }
+
+    /// Reports whether the active row reaches or exceeds the borrowed grid.
+    fn row_reaches_grid_end(&self) -> bool {
+        self.state.row >= self.grid.size.height
+    }
+
+    /// Discards the active operation without writing buffered cells.
+    fn cancel(&mut self) {
+        self.state.active = false;
     }
 }
 
@@ -2513,6 +2542,33 @@ pub struct CWindowGridUpdate {
 pub struct CMessageGridPositionConfig {
     separator_character: VimSCharT,
     z_index: libc::c_int,
+}
+
+/// C representation of one complete message-surface lifecycle request.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct CMessageSurfaceRequest {
+    grid_handle: VimHandleT,
+    screen_rows: libc::c_int,
+    screen_columns: libc::c_int,
+    should_allocate: bool,
+    scrolled_lines: libc::c_int,
+    pager_active: bool,
+    command_height: libc::c_int,
+    current_position: libc::c_int,
+    position: CMessageGridPositionConfig,
+    blending: bool,
+    current_window_grid_handle: VimHandleT,
+    clear_attribute: VimSAttrT,
+}
+
+/// C representation of editor-owned state following a message-surface update.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct CMessageSurfaceUpdate {
+    grid_handle: VimHandleT,
+    position: libc::c_int,
+    redraw_cmdline: bool,
 }
 
 /// C representation of the inputs needed to flush message-grid output.

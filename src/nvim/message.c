@@ -197,38 +197,29 @@ bool msg_use_grid(void)
 
 void msg_grid_validate(void)
 {
-  if (msg_grid_handle == 0) {
-    msg_grid_handle = grid_assign_handle();
-  }
   bool should_alloc = msg_use_grid();
-  int max_rows = Rows - (int)p_ch;
-  MessageGridTransition transition = grid_prepare_for_messages(
-    msg_grid_handle, Rows, Columns, should_alloc, msg_scrolled);
-  if (transition == kMessageGridResized) {
-    // TODO(bfredl): eventually should be set to "invalid". I e all callers
-    // will use the grid including clear to EOS if necessary.
-    // Tricky: allow resize while pager or ex mode is active
-    int pos = (State & MODE_ASKMORE) ? 0 : MAX(max_rows - msg_scrolled, 0);
-    msg_grid_set_pos(pos, msg_scrolled);
-    bool blending = syn_attr2entry(highlight_attr[HLF_MSG]).hl_blend > -1;
-    ui_comp_put_grid(msg_grid_handle, pos, 0, Rows, Columns,
-                     kZIndexMessages, blending, false, true, false,
-                     curwin ? curwin->w_grid_handle : 0);
-    ui_call_grid_resize(msg_grid_handle, Columns, Rows);
+  MessageSurfaceUpdate update = grid_update_message_surface(
+    (MessageSurfaceRequest){
+      .grid_handle = msg_grid_handle,
+      .screen_rows = Rows,
+      .screen_columns = Columns,
+      .should_allocate = should_alloc,
+      .scrolled_lines = msg_scrolled,
+      .pager_active = (State & MODE_ASKMORE) != 0,
+      .command_height = (int)p_ch,
+      .current_position = msg_grid_pos,
+      .position = message_grid_position_config(),
+      .blending = should_alloc
+                  && syn_attr2entry(highlight_attr[HLF_MSG]).hl_blend > -1,
+      .current_window_grid_handle = curwin ? curwin->w_grid_handle : 0,
+      .clear_attribute = HL_ATTR(HLF_MSG),
+    },
+    ui_ext_msg_set_pos);
 
-    grid_activate_message_view(msg_grid_handle);
-  } else if (transition == kMessageGridReleaseRequired) {
-    ui_comp_remove_grid(msg_grid_handle);
-    grid_release_message(msg_grid_handle);
-    ui_call_grid_destroy(msg_grid_handle);
-    grid_reset_message_view();
+  msg_grid_handle = update.grid_handle;
+  msg_grid_pos = update.position;
+  if (update.redraw_cmdline) {
     redraw_cmdline = true;
-  } else if (should_alloc && !msg_scrolled && msg_grid_pos != max_rows) {
-    int diff = msg_grid_pos - max_rows;
-    msg_grid_set_pos(max_rows, false);
-    if (diff > 0) {
-      grid_message_view_clear(Rows - diff, Rows, 0, Columns, HL_ATTR(HLF_MSG));
-    }
   }
 
   if (should_alloc && !msg_scrolled && cmdline_row < msg_grid_pos) {

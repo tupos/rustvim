@@ -1,55 +1,12 @@
 //! C boundary adapters for grid clearing and border rendering.
 
+use crate::context::registered_context;
+
 use super::super::{
     Border, BorderCanvas, CGridBorderConfig, GridId, GridOutputTarget, GridPosition,
     GridViewDescriptor, Highlight, LineBufferGuard, LineGrid, StoredGridGuard, VimHandleT,
-    VimSAttrT, lock_glyph_mapping, lock_message_grid_state, with_line_grid,
+    lock_glyph_mapping, lock_message_grid_state,
 };
-
-/// Clears a rectangular region through a persistent view descriptor.
-fn clear_grid_view(
-    descriptor: GridViewDescriptor,
-    start_row: i32,
-    end_row: i32,
-    start_col: i32,
-    mut end_col: i32,
-    attr: VimSAttrT,
-) {
-    let start_row = start_row
-        .checked_add(descriptor.offset.row)
-        .expect("grid clear start-row translation overflowed");
-    let end_row = end_row
-        .checked_add(descriptor.offset.row)
-        .expect("grid clear end-row translation overflowed");
-
-    let output = {
-        let mut line_buffer = LineBufferGuard::acquire();
-        with_line_grid(|line_grid| {
-            let mut output = Vec::new();
-            for row in start_row..end_row {
-                line_grid.begin(
-                    descriptor.target,
-                    row,
-                    descriptor.offset.column,
-                    &mut line_buffer,
-                );
-                end_col = std::cmp::min(end_col, line_grid.max_col());
-                if line_grid.row_reaches_grid_end() || start_col >= end_col {
-                    line_grid.cancel();
-                    break;
-                }
-                line_grid.set_clear_range(start_col, end_col, attr, 0);
-                if let Some(update) = line_grid.flush(&mut line_buffer) {
-                    output.push(update);
-                }
-            }
-            output
-        })
-    };
-    for (target, commands) in output {
-        target.emit_lines(commands);
-    }
-}
 
 /// Clears a rectangular region of an identified grid.
 #[unsafe(no_mangle)]
@@ -62,7 +19,10 @@ pub extern "C" fn grid_clear_region(
     attr: libc::c_int,
 ) {
     let descriptor = GridViewDescriptor::new(GridId::new(grid_handle), GridPosition::new(0, 0));
-    clear_grid_view(descriptor, start_row, end_row, start_col, end_col, attr);
+    let (target, lines) = registered_context()
+        .grid()
+        .clear_view(descriptor, start_row, end_row, start_col, end_col, attr);
+    target.emit_lines(lines);
 }
 
 /// Clears a rectangular region through the adjusted message view.
@@ -75,7 +35,10 @@ pub extern "C" fn grid_message_view_clear(
     attr: libc::c_int,
 ) {
     let descriptor = lock_message_grid_state().view();
-    clear_grid_view(descriptor, start_row, end_row, start_col, end_col, attr);
+    let (target, lines) = registered_context()
+        .grid()
+        .clear_view(descriptor, start_row, end_row, start_col, end_col, attr);
+    target.emit_lines(lines);
 }
 
 /// Draws a floating-window border from a stable subset of `WinConfig`.

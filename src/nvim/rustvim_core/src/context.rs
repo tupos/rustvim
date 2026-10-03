@@ -2,7 +2,11 @@
 
 use std::sync::OnceLock;
 
-use crate::{grid::GridContext, ui::UiContext, ui_compositor::CompositorContext};
+use crate::{
+    grid::{GridContext, MessageSurface},
+    ui::UiContext,
+    ui_compositor::CompositorContext,
+};
 
 /// Root of all Rust-owned runtime state.
 ///
@@ -37,6 +41,11 @@ impl RustVimContext {
     /// Returns the UI subsystem context.
     pub(crate) const fn ui(&self) -> &UiContext {
         &self.ui
+    }
+
+    /// Borrows the complete message rendering surface.
+    pub(crate) const fn message_surface(&self) -> MessageSurface<'_> {
+        MessageSurface::new(&self.grid, &self.compositor)
     }
 }
 
