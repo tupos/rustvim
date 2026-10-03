@@ -2,7 +2,7 @@
 
 use std::sync::OnceLock;
 
-use crate::{grid::GridContext, ui_compositor::CompositorContext};
+use crate::{grid::GridContext, ui::UiContext, ui_compositor::CompositorContext};
 
 /// Root of all Rust-owned runtime state.
 ///
@@ -11,6 +11,7 @@ use crate::{grid::GridContext, ui_compositor::CompositorContext};
 pub(crate) struct RustVimContext {
     grid: GridContext,
     compositor: CompositorContext,
+    ui: UiContext,
 }
 
 impl RustVimContext {
@@ -19,6 +20,7 @@ impl RustVimContext {
         Self {
             grid: GridContext::new(),
             compositor: CompositorContext::new(),
+            ui: UiContext::new(),
         }
     }
 
@@ -30,6 +32,11 @@ impl RustVimContext {
     /// Returns the compositor subsystem context.
     pub(crate) const fn compositor(&self) -> &CompositorContext {
         &self.compositor
+    }
+
+    /// Returns the UI subsystem context.
+    pub(crate) const fn ui(&self) -> &UiContext {
+        &self.ui
     }
 }
 

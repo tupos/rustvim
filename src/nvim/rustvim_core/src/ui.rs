@@ -1,8 +1,15 @@
 pub(crate) mod output;
 
-use std::{ffi::CString, sync::Mutex};
+use std::{
+    ffi::CString,
+    sync::{
+        Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 use crate::{
+    context::registered_context,
     defines::{Integer, OptInt},
     generated::enums::RdbFlags,
     grid::{GridId, GridRow, LocalGridSpace, ScreenGrid, VimHandleT, VimSAttrT, VimSCharT},
@@ -12,10 +19,39 @@ use output::{
     CellBufferPool, OwnedRawLineCommand, RawLineCells, RawLineCommand, UiCommand, UiOutput,
 };
 
-static GRID_OUTPUT_BUFFER_POOL: Mutex<CellBufferPool> = Mutex::new(CellBufferPool::new());
-
 // TODO: move to highlight
 pub type RgbValue = i32;
+
+/// State owned by the UI output subsystem for the lifetime of the editor.
+pub(crate) struct UiContext {
+    grid_output_buffer_pool: Mutex<CellBufferPool>,
+    pending_default_colors: AtomicBool,
+}
+
+impl UiContext {
+    /// Constructs empty UI output state.
+    pub(crate) const fn new() -> Self {
+        Self {
+            grid_output_buffer_pool: Mutex::new(CellBufferPool::new()),
+            pending_default_colors: AtomicBool::new(false),
+        }
+    }
+
+    /// Returns the reusable grid-output buffer pool.
+    fn grid_output_buffer_pool(&self) -> &Mutex<CellBufferPool> {
+        &self.grid_output_buffer_pool
+    }
+
+    /// Records that current default colors must be published.
+    fn schedule_default_colors(&self) {
+        self.pending_default_colors.store(true, Ordering::Relaxed);
+    }
+
+    /// Takes the pending default-color publication.
+    fn take_pending_default_colors(&self) -> bool {
+        self.pending_default_colors.swap(false, Ordering::Relaxed)
+    }
+}
 
 unsafe extern "C" {
     static mut p_wd: OptInt;
@@ -229,24 +265,24 @@ impl LineFlags {
     }
 }
 
-static mut PENDING_DEFAULT_COLORS: bool = false;
-
 #[unsafe(no_mangle)]
 pub extern "C" fn ui_default_colors_set() {
-    unsafe {
-        // Throttle setting of default colors at startup, so it only happens once
-        // if the user sets the colorscheme in startup.
-        PENDING_DEFAULT_COLORS = true;
-        if starting == 0 {
-            ui_may_set_default_colors();
-        }
+    // Throttle setting of default colors at startup, so it only happens once
+    // if the user sets the colorscheme in startup.
+    registered_context().ui().schedule_default_colors();
+
+    // SAFETY: UI events and startup-state transitions run on Neovim's main
+    // thread.
+    if unsafe { starting == 0 } {
+        ui_may_set_default_colors();
     }
 }
 
 fn ui_may_set_default_colors() {
-    unsafe {
-        if PENDING_DEFAULT_COLORS {
-            PENDING_DEFAULT_COLORS = false;
+    if registered_context().ui().take_pending_default_colors() {
+        // SAFETY: UI output runs on Neovim's main thread. The color globals
+        // are copied by value into this synchronous UI event.
+        unsafe {
             ui_call_default_colors_set(
                 normal_fg as Integer,
                 normal_bg as Integer,
@@ -295,7 +331,7 @@ pub(crate) fn ui_line_r(
         flags,
         segment.characters(),
         segment.attributes(),
-        &GRID_OUTPUT_BUFFER_POOL,
+        registered_context().ui().grid_output_buffer_pool(),
     )
     .expect("valid grid line output")
 }
