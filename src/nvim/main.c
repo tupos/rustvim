@@ -99,6 +99,7 @@
 #include "nvim/register.h"
 #include "nvim/runtime.h"
 #include "nvim/runtime_defs.h"
+#include "nvim/rustvim.h"
 #include "nvim/shada.h"
 #include "nvim/statusline.h"
 #include "nvim/strings.h"
@@ -253,6 +254,11 @@ int nvim_main(int argc, char **argv)
 int main(int argc, char **argv)
 #endif
 {
+  if (!rustvim_context_register()) {
+    fprintf(stderr, "RustVim context was already registered.\n");
+    abort();
+  }
+
   argv0 = argv[0];
   TO_SLASH(argv0);
 

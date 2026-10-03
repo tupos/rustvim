@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 #![allow(static_mut_refs)]
+mod context;
 pub mod defines;
 pub mod eval;
 pub mod generated;
