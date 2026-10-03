@@ -414,7 +414,7 @@ impl GridContext {
     }
 
     /// Acquires permanent screen-grid storage.
-    fn lock_store(&self) -> MutexGuard<'_, GridStore> {
+    pub(crate) fn lock_store(&self) -> MutexGuard<'_, GridStore> {
         self.store
             .try_lock()
             .expect("permanent grid store is already borrowed")

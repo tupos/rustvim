@@ -3,11 +3,13 @@
 use std::{ptr::NonNull, slice};
 
 use crate::{
+    context::registered_context,
     defines::{CVimString, Integer},
     grid::{
         CGridCell, DEFAULT_GRID_ID, GridId, VimHandleT, VimSAttrT, VimSCharT, lock_grid_store,
         schar_from_buf,
     },
+    ui::output::BorrowedRawLineCommand,
 };
 
 use super::super::*;
@@ -111,17 +113,12 @@ pub extern "C" fn ui_comp_grid_resize(grid: Integer, width: Integer, height: Int
     };
     let size =
         GridSize::try_new(height, width).expect("grid-resize dimensions must be nonnegative");
-    if GridId::new(grid) != DEFAULT_GRID_ID {
-        return;
-    }
-    let plan = lock_compositor()
-        .resize(size)
-        .expect("validated screen width must fit compositor storage");
-
     let mut output = NvimOutput;
-    output.emit(UiCommand::GridResize(plan.size));
 
-    lock_compositor_buffer_pool().resize(plan.buffer_width);
+    registered_context()
+        .compositor()
+        .process_grid_resize(GridId::new(grid), size, &mut output)
+        .expect("grid-resize processing must preserve compositor invariants");
 }
 
 /// Updates message-grid state and executes its scrolling and recomposition.
@@ -730,51 +727,10 @@ fn compose_line_from_registered_grids(
     request: CompositorLineInput,
     output: &mut impl UiOutput<ComposedGridSpace>,
 ) -> CompositorResult<()> {
-    let separator_active = lock_compositor()
-        .message_separator_character_at(request.row)
-        .is_some();
-    let mut line_buffer = acquire_compositor_buffer();
-    let submission = {
-        let grid_store = lock_grid_store();
-        let message_grid = if separator_active {
-            let message_grid_id = message_grid_id.ok_or(CompositorError::InvalidLayerState)?;
-            Some(
-                grid_store
-                    .grid(message_grid_id)
-                    .ok_or(CompositorError::InvalidLayerState)?,
-            )
-        } else {
-            None
-        };
-        let compositor = lock_compositor();
-        compositor.compose_line(&mut line_buffer, &grid_store, message_grid, &request)
-    }?;
-
-    let output_range = submission.start_col..submission.end_col;
-    let characters = line_buffer
-        .characters
-        .get(output_range.clone())
-        .ok_or(CompositorError::InvalidLineState)?;
-    let attributes = line_buffer
-        .attributes
-        .get(output_range)
-        .ok_or(CompositorError::InvalidLineState)?;
-    let start_column =
-        i32::try_from(submission.start_col).map_err(|_| CompositorError::InvalidGeometry)?;
-    let end_column =
-        i32::try_from(submission.end_col).map_err(|_| CompositorError::InvalidGeometry)?;
-    let command = BorrowedRawLineCommand::try_new(
-        request.row,
-        start_column..end_column,
-        end_column,
-        0,
-        submission.flags,
-        characters,
-        attributes,
-    )
-    .ok_or(CompositorError::InvalidLineState)?;
-    output.emit_raw_line(command);
-    Ok(())
+    let context = registered_context();
+    context
+        .compositor()
+        .compose_registered_line(context.grid(), message_grid_id, request, output)
 }
 
 /// Composes and submits a clipped screen area from registered compositor grids.
@@ -813,134 +769,6 @@ fn recompose_area_from_registered_grids(
     )
 }
 
-/// Processes one complete raw-line event against registered compositor grids.
-///
-/// # Safety
-///
-/// When the forwarded character count is nonzero, `characters` and
-/// `attributes` must point to readable arrays containing at least that many
-/// initialized elements.
-///
-/// A disabled compositor or a grid handle absent from the registered layers
-/// produces a successful no-op.
-unsafe fn process_raw_line(
-    message_grid_id: Option<GridId>,
-    grid_id: GridId,
-    request: CompositorRawLineRequest,
-    clear_attribute: VimSAttrT,
-    characters: *const VimSCharT,
-    attributes: *const VimSAttrT,
-    output: &mut impl UiOutput<ComposedGridSpace>,
-) -> CompositorResult<()> {
-    let operation = {
-        let grid_store = lock_grid_store();
-        let compositor = lock_compositor();
-        let message_layer_index = message_grid_id
-            .map(|grid_id| compositor.layer_index(grid_id))
-            .transpose()?
-            .flatten();
-        compositor.process_raw_line(&grid_store, grid_id, message_layer_index, request)?
-    };
-    let CompositorRawLineOperation::Process(plan) = operation else {
-        return Ok(());
-    };
-    let runtime = compositor_runtime_snapshot().ok_or(CompositorError::InvalidGeometry)?;
-
-    if plan.clear_column != plan.requested_clear_column {
-        log_raw_line_diagnostic(
-            RawLineDiagnostic::ClippedColumns(plan.requested_clear_column),
-            grid_id,
-            output,
-        );
-    }
-
-    match plan.action {
-        CompositorRawLineAction::DiscardRow => {
-            log_raw_line_diagnostic(RawLineDiagnostic::InvalidRow(plan.row), grid_id, output);
-            Ok(())
-        }
-        CompositorRawLineAction::DiscardColumns => Ok(()),
-        CompositorRawLineAction::Recompose => {
-            runtime.visualize(
-                &CompositorRecomposeArea {
-                    rows: plan.row..plan.row + 1,
-                    columns: plan.columns.start..plan.clear_column,
-                },
-                runtime.debug_highlights.composed,
-                true,
-                output,
-            );
-            compose_line_from_registered_grids(
-                message_grid_id,
-                CompositorLineInput {
-                    row: plan.row,
-                    columns: plan.columns.start..plan.clear_column,
-                    flags: plan.flags,
-                    settings: runtime.line_settings,
-                },
-                output,
-            )
-        }
-        CompositorRawLineAction::Forward => {
-            let payload_len = plan
-                .columns
-                .end
-                .checked_sub(plan.columns.start)
-                .and_then(|length| usize::try_from(length).ok())
-                .ok_or(CompositorError::InvalidGeometry)?;
-            if payload_len != 0 && (characters.is_null() || attributes.is_null()) {
-                return Err(CompositorError::InvalidLineState);
-            }
-
-            let (characters, attributes): (&[VimSCharT], &[VimSAttrT]) = if payload_len == 0 {
-                (&[], &[])
-            } else {
-                // SAFETY: The caller guarantees two readable arrays with
-                // at least the forwarded number of initialized elements.
-                unsafe {
-                    (
-                        slice::from_raw_parts(characters, payload_len),
-                        slice::from_raw_parts(attributes, payload_len),
-                    )
-                }
-            };
-
-            runtime.visualize(
-                &CompositorRecomposeArea {
-                    rows: plan.row..plan.row + 1,
-                    columns: plan.columns.clone(),
-                },
-                runtime.debug_highlights.normal,
-                plan.columns.end >= plan.clear_column,
-                output,
-            );
-            runtime.visualize(
-                &CompositorRecomposeArea {
-                    rows: plan.row..plan.row + 1,
-                    columns: plan.columns.end..plan.clear_column,
-                },
-                runtime.debug_highlights.clear,
-                true,
-                output,
-            );
-            debug_assert!(attributes.iter().all(|attribute| *attribute >= 0));
-
-            let command = BorrowedRawLineCommand::try_new(
-                plan.row,
-                plan.columns,
-                plan.clear_column,
-                clear_attribute,
-                plan.flags,
-                characters,
-                attributes,
-            )
-            .ok_or(CompositorError::InvalidLineState)?;
-            output.emit_raw_line(command);
-            Ok(())
-        }
-    }
-}
-
 /// Handles one generated raw-line event.
 ///
 /// # Safety
@@ -969,86 +797,52 @@ pub unsafe extern "C" fn ui_comp_raw_line(
     ) else {
         panic!("raw-line arguments must fit native compositor coordinates");
     };
-    let request = CompositorRawLineRequest::try_new(
+    let payload_len = end_col
+        .checked_sub(start_col)
+        .and_then(|length| usize::try_from(length).ok())
+        .expect("raw-line columns must be ordered");
+    let (characters, attributes): (&[VimSCharT], &[VimSAttrT]) = if payload_len == 0 {
+        (&[], &[])
+    } else {
+        assert!(
+            !characters.is_null() && !attributes.is_null(),
+            "raw-line payload pointers must be non-null"
+        );
+        // SAFETY: The caller guarantees that both pointers reference
+        // `payload_len` initialized elements. The nonzero-length pointers
+        // were checked for null above.
+        unsafe {
+            (
+                slice::from_raw_parts(characters, payload_len),
+                slice::from_raw_parts(attributes, payload_len),
+            )
+        }
+    };
+    let line = BorrowedRawLineCommand::try_new(
         row,
-        start_col,
-        end_col,
+        start_col..end_col,
         clear_col,
+        clear_attr,
         LineFlags::from_raw(flags),
+        characters,
+        attributes,
     )
-    .expect("raw-line columns must be ordered");
+    .expect("raw-line command must contain matching ordered cell data");
+    let context = registered_context();
+    let runtime = compositor_runtime_snapshot().expect("compositor runtime must be valid");
     let mut output = NvimOutput;
 
-    // SAFETY: The generated caller supplies the documented cell arrays.
-    unsafe {
-        process_raw_line(
+    context
+        .compositor()
+        .process_grid_raw_line(
+            context.grid(),
             current_message_grid_id(),
             GridId::new(grid),
-            request,
-            clear_attr,
-            characters,
-            attributes,
+            &line,
+            runtime,
             &mut output,
         )
-    }
-    .expect("raw-line processing must preserve compositor invariants");
-}
-
-/// Processes one complete grid scroll against registered compositor grids.
-///
-/// A disabled compositor or a grid handle absent from the registered layers
-/// produces a successful no-op.
-fn process_scroll(
-    message_grid_id: Option<GridId>,
-    grid_id: GridId,
-    request: CompositorScrollRequest,
-    output: &mut impl UiOutput<ComposedGridSpace>,
-) -> CompositorResult<()> {
-    let operation = {
-        let grid_store = lock_grid_store();
-        let compositor = lock_compositor();
-        let message_layer_index = message_grid_id
-            .map(|grid_id| compositor.layer_index(grid_id))
-            .transpose()?
-            .flatten();
-        compositor.scroll(&grid_store, grid_id, message_layer_index, request)?
-    };
-
-    match operation {
-        CompositorScrollOperation::Ignore => return Ok(()),
-        CompositorScrollOperation::Forward { region, delta } => {
-            let runtime = compositor_runtime_snapshot().ok_or(CompositorError::InvalidGeometry)?;
-            output.emit(UiCommand::GridScroll { region, delta });
-            if runtime.debug_enabled {
-                runtime.delay(2, output);
-            }
-        }
-        CompositorScrollOperation::Recompose { region, rows } => {
-            let runtime = compositor_runtime_snapshot().ok_or(CompositorError::InvalidGeometry)?;
-            runtime.visualize(
-                &CompositorRecomposeArea {
-                    rows: region.rows.clone(),
-                    columns: region.columns.clone(),
-                },
-                runtime.debug_highlights.recomposed,
-                true,
-                output,
-            );
-            for row in rows {
-                compose_line_from_registered_grids(
-                    message_grid_id,
-                    CompositorLineInput {
-                        row,
-                        columns: region.columns.clone(),
-                        flags: LineFlags::default(),
-                        settings: runtime.line_settings,
-                    },
-                    output,
-                )?;
-            }
-        }
-    }
-    Ok(())
+        .expect("raw-line processing must preserve compositor invariants");
 }
 
 /// Handles one generated grid-scroll event.
@@ -1073,15 +867,23 @@ pub extern "C" fn ui_comp_grid_scroll(
     ) else {
         panic!("grid-scroll arguments must fit native compositor coordinates");
     };
-    let request = CompositorScrollRequest::try_new(top, bottom, left, right, rows, columns)
-        .expect("grid-scroll region must be ordered");
+    let region =
+        GridRegion::try_new(top..bottom, left..right).expect("grid-scroll region must be ordered");
+    let delta = GridDelta::new(rows, columns);
+    let request = CompositorScrollRequest::new(region, delta);
+    let context = registered_context();
+    let runtime = compositor_runtime_snapshot().expect("compositor runtime must be valid");
     let mut output = NvimOutput;
 
-    process_scroll(
-        current_message_grid_id(),
-        GridId::new(grid),
-        request,
-        &mut output,
-    )
-    .expect("grid-scroll processing must preserve compositor invariants");
+    context
+        .compositor()
+        .process_grid_scroll(
+            context.grid(),
+            current_message_grid_id(),
+            GridId::new(grid),
+            request,
+            runtime,
+            &mut output,
+        )
+        .expect("grid-scroll processing must preserve compositor invariants");
 }

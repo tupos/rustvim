@@ -1,9 +1,9 @@
+mod context;
 mod ffi;
 
-use std::{
-    ops::Range,
-    sync::{Mutex, MutexGuard},
-};
+pub(crate) use context::CompositorContext;
+
+use std::{ops::Range, sync::MutexGuard};
 
 use crate::{
     context::registered_context,
@@ -15,10 +15,7 @@ use crate::{
     },
     ui::{
         LineFlags,
-        output::{
-            BorrowedRawLineCommand, CellBuffer, CellBufferLease, CellBufferPool, UiCommand,
-            UiOutput,
-        },
+        output::{BorrowedRawLineCommand, CellBuffer, CellBufferPool, UiCommand, UiOutput},
     },
 };
 #[cfg(test)]
@@ -1321,12 +1318,17 @@ impl Compositor {
 
 /// Validated grid-local inputs for planning one compositor scroll.
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct CompositorScrollRequest {
+pub(crate) struct CompositorScrollRequest {
     region: GridRegion,
     delta: GridDelta,
 }
 
 impl CompositorScrollRequest {
+    /// Combines an already validated region with its scroll delta.
+    pub(crate) const fn new(region: GridRegion, delta: GridDelta) -> Self {
+        Self { region, delta }
+    }
+
     /// Constructs a scroll request with an ordered grid-local region.
     fn try_new(
         top: i32,
@@ -1336,10 +1338,10 @@ impl CompositorScrollRequest {
         row_delta: i32,
         column_delta: i32,
     ) -> Option<Self> {
-        Some(Self {
-            region: GridRegion::try_new(top..bottom, left..right)?,
-            delta: GridDelta::new(row_delta, column_delta),
-        })
+        Some(Self::new(
+            GridRegion::try_new(top..bottom, left..right)?,
+            GridDelta::new(row_delta, column_delta),
+        ))
     }
 }
 
@@ -2705,7 +2707,7 @@ struct CompositorLineSettings {
 
 /// Owned runtime values used while processing one compositor event.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct CompositorRuntime {
+pub(crate) struct CompositorRuntime {
     screen_size: GridSize,
     line_settings: CompositorLineSettings,
     debug_highlights: CompositorDebugHighlights,
@@ -3112,50 +3114,6 @@ impl CellBuffer {
     }
 }
 
-/// State owned by the compositor subsystem for the lifetime of the editor.
-pub(crate) struct CompositorContext {
-    state: Mutex<Compositor>,
-    buffer_pool: Mutex<CellBufferPool>,
-    debug_highlights: Mutex<CompositorDebugHighlights>,
-}
-
-impl CompositorContext {
-    /// Constructs compositor state before subsystem initialization.
-    pub(crate) const fn new() -> Self {
-        Self {
-            state: Mutex::new(Compositor::new()),
-            buffer_pool: Mutex::new(CellBufferPool::new()),
-            debug_highlights: Mutex::new(CompositorDebugHighlights::empty()),
-        }
-    }
-
-    /// Acquires the safe compositor state.
-    fn lock_state(&self) -> MutexGuard<'_, Compositor> {
-        self.state
-            .try_lock()
-            .expect("compositor state is already borrowed")
-    }
-
-    /// Acquires the compositor buffer pool.
-    fn lock_buffer_pool(&self) -> MutexGuard<'_, CellBufferPool> {
-        self.buffer_pool
-            .try_lock()
-            .expect("compositor buffer pool is already borrowed")
-    }
-
-    /// Checks out compositor storage without retaining the pool mutex.
-    fn acquire_buffer(&self) -> CellBufferLease<'_> {
-        CellBufferLease::acquire(&self.buffer_pool)
-    }
-
-    /// Acquires compositor debug-highlight identities.
-    fn lock_debug_highlights(&self) -> MutexGuard<'_, CompositorDebugHighlights> {
-        self.debug_highlights
-            .try_lock()
-            .expect("compositor debug highlights are already borrowed")
-    }
-}
-
 /// Acquires exclusive access to the context-owned compositor state.
 fn lock_compositor() -> MutexGuard<'static, Compositor> {
     registered_context().compositor().lock_state()
@@ -3164,11 +3122,6 @@ fn lock_compositor() -> MutexGuard<'static, Compositor> {
 /// Acquires exclusive access to the context-owned compositor buffer pool.
 fn lock_compositor_buffer_pool() -> MutexGuard<'static, CellBufferPool> {
     registered_context().compositor().lock_buffer_pool()
-}
-
-/// Checks out compositor storage without retaining the pool mutex.
-fn acquire_compositor_buffer() -> CellBufferLease<'static> {
-    registered_context().compositor().acquire_buffer()
 }
 
 /// Emits one clear raw-line event used for compositor visualization.
@@ -3209,9 +3162,12 @@ fn is_negative_space(character: VimSCharT) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicI32, Ordering};
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicI32, Ordering},
+    };
 
-    use crate::grid::LineBuffer;
+    use crate::{grid::LineBuffer, ui::output::CellBufferLease};
 
     static NEXT_TEST_GRID_ID: AtomicI32 = AtomicI32::new(10_000);
 
