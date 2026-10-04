@@ -24,6 +24,7 @@
 #include "nvim/ex_cmds_defs.h"
 #include "nvim/ex_docmd.h"
 #include "nvim/globals.h"
+#include "nvim/grid.h"
 #include "nvim/highlight_group.h"
 #include "nvim/macros_defs.h"
 #include "nvim/mbyte.h"
@@ -37,7 +38,6 @@
 #include "nvim/syntax.h"
 #include "nvim/types_defs.h"
 #include "nvim/ui.h"
-#include "nvim/ui_compositor.h"
 #include "nvim/ui_defs.h"
 #include "nvim/vim_defs.h"
 #include "nvim/window.h"
@@ -709,7 +709,7 @@ restore_curwin:
     // Remove grid if present. More reliable than checking curtab, as tabpage_check_windows may not
     // run when temporarily switching tabpages, meaning grids may be stale from another tabpage!
     // (e.g: ctx_switch with kCtxNoDisplay)
-    ui_comp_remove_grid(win->w_grid_handle);
+    grid_hide_window_surface(win->w_grid_handle, false);
 
     // Redraw tabline, update window's hl attribs, etc. Set must_redraw here, as redraw_later might
     // not if w_redr_type >= UPD_NOT_VALID was set in the old tabpage.

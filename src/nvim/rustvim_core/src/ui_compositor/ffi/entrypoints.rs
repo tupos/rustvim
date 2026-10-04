@@ -272,31 +272,6 @@ pub extern "C" fn ui_comp_update_grid_layer(
     .expect("layer policy update must preserve compositor invariants");
 }
 
-/// Removes one grid from the registered layer stack and recomposes its area.
-///
-/// An unregistered grid is an expected successful no-op.
-#[unsafe(no_mangle)]
-pub extern "C" fn ui_comp_remove_grid(grid_handle: Integer) {
-    let grid_handle =
-        i32::try_from(grid_handle).expect("grid handle must fit the compositor grid identity");
-    assert_ne!(grid_handle, 1);
-    let grid_id = GridId::new(grid_handle);
-
-    let context = registered_context();
-    let runtime = compositor_runtime_snapshot().expect("compositor runtime must be valid");
-    let mut output = NvimComposedOutput;
-    context
-        .compositor()
-        .remove_registered_grid(
-            context.grid(),
-            grid_id,
-            current_message_grid_id(),
-            runtime,
-            &mut output,
-        )
-        .expect("registered layer removal must preserve compositor invariants");
-}
-
 /// Reads the cell from the topmost non-default compositor grid at one screen
 /// coordinate.
 ///

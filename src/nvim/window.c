@@ -4857,7 +4857,7 @@ static void tabpage_check_windows(tabpage_T *old_curtab)
         win_remove(wp, old_curtab);
         win_append(lastwin_nofloating(NULL), wp, NULL);
       } else {
-        ui_comp_remove_grid(wp->w_grid_handle);
+        grid_hide_window_surface(wp->w_grid_handle, false);
       }
     }
     wp->w_pos_changed = true;
