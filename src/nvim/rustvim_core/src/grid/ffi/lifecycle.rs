@@ -1,15 +1,41 @@
 //! C boundary adapters for screen-grid lifecycle operations.
 
-use crate::{context::registered_context, globals};
+use crate::{
+    context::registered_context,
+    defines::{CVimString, Integer},
+    globals,
+    ui::output::{RawLineCells, RawLineCommand, UiCommand, UiOutput},
+    ui_compositor::{
+        CompositorGridPlacement, compositor_runtime_snapshot, current_message_grid_id,
+    },
+};
 
 use super::super::{
-    DEFAULT_GRID_ID, GlyphMapping, GridId, GridLifecycleChange, GridPosition, GridSize,
-    LineBufferGuard, MessageGridState, StoredGridGuard, VimHandleT, WindowGridMode,
+    ComposedGridSpace, DEFAULT_GRID_ID, FloatAnchorPosition, GlyphMapping, GridId,
+    GridLifecycleChange, GridPosition, GridSize, GridSurfaceOutput, LineBufferGuard,
+    MessageGridState, StoredGridGuard, VimHandleT, WindowFloatAnchor, WindowFloatPlacementRequest,
+    WindowFloatPlacementUpdate, WindowFloatPositionEvent, WindowGridMode, WindowSurfaceOutput,
     WindowSurfaceRequest, WindowSurfaceUpdate, lock_glyph_mapping, lock_grid_store,
     lock_message_grid_state, register_empty_grid, release_permanent_grid,
 };
 
 use super::surface::NvimGridSurfaceOutput;
+
+unsafe extern "C" {
+    fn ui_call_win_float_pos(
+        grid: Integer,
+        window: Integer,
+        anchor: CVimString,
+        anchor_grid: Integer,
+        anchor_row: f64,
+        anchor_column: f64,
+        mouse_enabled: bool,
+        z_index: Integer,
+        compositor_index: Integer,
+        screen_row: Integer,
+        screen_column: Integer,
+    );
+}
 
 /// C representation of one complete window-grid configuration request.
 #[repr(C)]
@@ -76,6 +102,150 @@ impl From<WindowSurfaceUpdate> for CWindowSurfaceUpdate {
             row_offset_changed: update.row_offset_changed,
             redraw_border: update.redraw_border,
             republish_cursor: update.republish_cursor,
+        }
+    }
+}
+
+/// C representation of one complete visible floating-window placement.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct CWindowFloatPlacementRequest {
+    grid_handle: VimHandleT,
+    window_handle: VimHandleT,
+    row: libc::c_int,
+    column: libc::c_int,
+    rows: libc::c_int,
+    columns: libc::c_int,
+    z_index: libc::c_int,
+    blending: bool,
+    valid: bool,
+    accepts_mouse_input: bool,
+    current_window_grid_handle: VimHandleT,
+    anchor: libc::c_int,
+    anchor_grid_handle: VimHandleT,
+    anchor_row: f64,
+    anchor_column: f64,
+    multigrid_enabled: bool,
+}
+
+impl CWindowFloatPlacementRequest {
+    /// Converts C-owned floating-window state into a validated native request.
+    fn try_into_native(self) -> Option<WindowFloatPlacementRequest> {
+        if self.grid_handle <= 0 || self.window_handle <= 0 || self.anchor_grid_handle <= 0 {
+            return None;
+        }
+        let current_window_grid_id = match self.current_window_grid_handle {
+            0 => None,
+            handle if handle > 0 => Some(GridId::new(handle)),
+            _ => return None,
+        };
+        let anchor = match self.anchor {
+            0 => WindowFloatAnchor::NorthWest,
+            1 => WindowFloatAnchor::NorthEast,
+            2 => WindowFloatAnchor::SouthWest,
+            3 => WindowFloatAnchor::SouthEast,
+            _ => return None,
+        };
+
+        Some(WindowFloatPlacementRequest::new(
+            GridId::new(self.grid_handle),
+            self.window_handle,
+            CompositorGridPlacement::try_new(self.row, self.column, self.rows, self.columns)?,
+            self.z_index,
+            self.blending,
+            self.valid,
+            self.accepts_mouse_input,
+            current_window_grid_id,
+            anchor,
+            GridId::new(self.anchor_grid_handle),
+            FloatAnchorPosition::try_new(self.anchor_row, self.anchor_column)?,
+            self.multigrid_enabled,
+        ))
+    }
+}
+
+/// C representation of editor-owned actions after float placement.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct CWindowFloatPlacementUpdate {
+    republish_cursor: bool,
+    require_full_redraw: bool,
+}
+
+impl From<WindowFloatPlacementUpdate> for CWindowFloatPlacementUpdate {
+    fn from(update: WindowFloatPlacementUpdate) -> Self {
+        Self {
+            republish_cursor: update.republish_cursor,
+            require_full_redraw: update.require_full_redraw,
+        }
+    }
+}
+
+/// Final UI adapter for complete window-surface operations.
+struct NvimWindowSurfaceOutput {
+    surface: NvimGridSurfaceOutput,
+}
+
+impl NvimWindowSurfaceOutput {
+    /// Creates an output adapter for one synchronous window operation.
+    const fn new() -> Self {
+        Self {
+            surface: NvimGridSurfaceOutput::new(),
+        }
+    }
+}
+
+impl UiOutput<ComposedGridSpace> for NvimWindowSurfaceOutput {
+    fn emit(&mut self, command: UiCommand<ComposedGridSpace>) {
+        self.surface.emit(command);
+    }
+
+    fn emit_raw_line<Cells: RawLineCells>(&mut self, command: RawLineCommand<Cells>) {
+        self.surface.emit_raw_line(command);
+    }
+}
+
+impl GridSurfaceOutput for NvimWindowSurfaceOutput {
+    fn emit_grid_resize(&mut self, grid_id: GridId, size: GridSize) {
+        self.surface.emit_grid_resize(grid_id, size);
+    }
+
+    fn emit_grid_destroy(&mut self, grid_id: GridId) {
+        self.surface.emit_grid_destroy(grid_id);
+    }
+}
+
+impl WindowSurfaceOutput for NvimWindowSurfaceOutput {
+    fn emit_float_position(&mut self, event: WindowFloatPositionEvent) {
+        let anchor = match event.anchor {
+            WindowFloatAnchor::NorthWest => b"NW",
+            WindowFloatAnchor::NorthEast => b"NE",
+            WindowFloatAnchor::SouthWest => b"SW",
+            WindowFloatAnchor::SouthEast => b"SE",
+        };
+        let anchor = CVimString {
+            data: anchor.as_ptr().cast::<libc::c_char>().cast_mut(),
+            size: anchor.len(),
+        };
+        let compositor_index = Integer::try_from(event.compositor_index)
+            .expect("compositor layer index must fit the UI representation");
+
+        // SAFETY: The anchor bytes remain readable for the complete
+        // synchronous callback, and safe Rust validated all event fields.
+        unsafe {
+            ui_call_win_float_pos(
+                Integer::from(event.grid_id.as_native_handle()),
+                Integer::from(event.window_handle),
+                anchor,
+                Integer::from(event.anchor_grid_id.as_native_handle()),
+                event.anchor_position.row,
+                event.anchor_position.column,
+                event.accepts_mouse_input,
+                Integer::from(event.z_index),
+                compositor_index,
+                Integer::from(event.screen_position.row),
+                Integer::from(event.screen_position.column),
+            );
         }
     }
 }
@@ -172,6 +342,24 @@ pub extern "C" fn grid_configure_window_surface(
         .configure(request, &mut output)
         .map(CWindowSurfaceUpdate::from)
         .unwrap_or_else(|_| CWindowSurfaceUpdate::invalid())
+}
+
+/// Places one visible floating-window surface and publishes its position.
+#[unsafe(no_mangle)]
+pub extern "C" fn grid_place_window_float_surface(
+    request: CWindowFloatPlacementRequest,
+) -> CWindowFloatPlacementUpdate {
+    let request = request
+        .try_into_native()
+        .expect("floating-window placement must contain valid editor state");
+    let runtime = compositor_runtime_snapshot().expect("compositor runtime must be valid");
+    let mut output = NvimWindowSurfaceOutput::new();
+
+    registered_context()
+        .window_surface()
+        .place_float(request, current_message_grid_id(), runtime, &mut output)
+        .expect("floating-window placement must preserve rendering invariants")
+        .into()
 }
 
 /// Releases one permanently stored grid by its stable identity.

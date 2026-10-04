@@ -71,6 +71,30 @@ typedef struct {
 } WindowSurfaceUpdate;
 
 typedef struct {
+  handle_T grid_handle;
+  handle_T window_handle;
+  int row;
+  int column;
+  int rows;
+  int columns;
+  int z_index;
+  bool blending;
+  bool valid;
+  bool accepts_mouse_input;
+  handle_T current_window_grid_handle;
+  int anchor;
+  handle_T anchor_grid_handle;
+  double anchor_row;
+  double anchor_column;
+  bool multigrid_enabled;
+} WindowFloatPlacementRequest;
+
+typedef struct {
+  bool republish_cursor;
+  bool require_full_redraw;
+} WindowFloatPlacementUpdate;
+
+typedef struct {
   int end_col;
   colnr_T end_vcol;
   size_t color_cols_consumed;
@@ -176,6 +200,8 @@ extern void grid_initialize_default(void);
 extern bool grid_configure_default(int rows, int columns);
 extern WindowSurfaceUpdate grid_configure_window_surface(
   WindowSurfaceRequest request);
+extern WindowFloatPlacementUpdate grid_place_window_float_surface(
+  WindowFloatPlacementRequest request);
 extern handle_T grid_update_popup_menu_surface(PopupMenuSurfaceRequest request);
 extern void grid_hide_popup_menu_surface(handle_T grid_handle, bool publish_ui_events);
 extern void grid_recompose_popup_menu_surface(handle_T grid_handle);

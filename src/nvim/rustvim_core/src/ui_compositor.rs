@@ -337,6 +337,11 @@ impl CompositorGridPlacement {
         })
     }
 
+    /// Returns the requested origin in composed-screen coordinates.
+    pub(crate) const fn origin(self) -> ComposedPosition {
+        self.origin
+    }
+
     /// Returns the requested grid dimensions.
     pub(crate) const fn size(self) -> GridSize {
         self.size

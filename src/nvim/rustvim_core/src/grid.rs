@@ -62,7 +62,11 @@ pub(crate) use surface::GridSurfaceOutput;
 use tabstops::TabStops;
 use virtual_text::{VirtualText, VirtualTextChunk, VirtualTextRenderOptions};
 pub(crate) use window_surface::WindowSurface;
-use window_surface::{WindowSurfaceRequest, WindowSurfaceUpdate};
+use window_surface::{
+    FloatAnchorPosition, WindowFloatAnchor, WindowFloatPlacementRequest,
+    WindowFloatPlacementUpdate, WindowFloatPositionEvent, WindowSurfaceOutput,
+    WindowSurfaceRequest, WindowSurfaceUpdate,
+};
 
 /// if data[0] is 0xFF, then data[1..4] is a 24-bit index (in machine endianness)
 /// otherwise it must be a UTF-8 string of length maximum 4 (no NUL when n=4)

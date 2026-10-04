@@ -55,7 +55,7 @@ impl RustVimContext {
 
     /// Borrows the complete window rendering surface.
     pub(crate) const fn window_surface(&self) -> WindowSurface<'_> {
-        WindowSurface::new(&self.grid)
+        WindowSurface::new(&self.grid, &self.compositor)
     }
 }
 

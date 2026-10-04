@@ -952,22 +952,29 @@ void ui_ext_win_position(win_T *wp, bool validate)
     wp->w_wincol = comp_col;
 
     if (!c.hide) {
-      ui_comp_put_grid(wp->w_grid_handle, comp_row, comp_col,
-                       wp->w_height_outer, wp->w_width_outer, c.zindex,
-                       wp->w_p_winbl > 0 || c.shadow, valid, false, c.mouse,
-                       curwin ? curwin->w_grid_handle : 0);
-      if (ui_has(kUIMultigrid)) {
-        int compositor_index =
-          ui_comp_take_grid_publication(wp->w_grid_handle);
-        assert(compositor_index > 0);
-        String anchor = cstr_as_string(float_anchor_str[c.anchor]);
-        ui_call_win_float_pos(wp->w_grid_handle, wp->handle, anchor,
-                              anchor_grid_handle, row, col, c.mouse,
-                              c.zindex, compositor_index,
-                              wp->w_winrow, wp->w_wincol);
+      WindowFloatPlacementUpdate update = grid_place_window_float_surface(
+        (WindowFloatPlacementRequest){
+          .grid_handle = wp->w_grid_handle,
+          .window_handle = wp->handle,
+          .row = comp_row,
+          .column = comp_col,
+          .rows = wp->w_height_outer,
+          .columns = wp->w_width_outer,
+          .z_index = c.zindex,
+          .blending = wp->w_p_winbl > 0 || c.shadow,
+          .valid = valid,
+          .accepts_mouse_input = c.mouse,
+          .current_window_grid_handle = curwin ? curwin->w_grid_handle : 0,
+          .anchor = c.anchor,
+          .anchor_grid_handle = anchor_grid_handle,
+          .anchor_row = row,
+          .anchor_column = col,
+          .multigrid_enabled = ui_has(kUIMultigrid),
+        });
+      if (update.republish_cursor) {
+        ui_check_cursor_grid(wp->w_grid_handle);
       }
-      ui_check_cursor_grid(wp->w_grid_handle);
-      if (!valid) {
+      if (update.require_full_redraw) {
         grid_require_full_redraw(wp->w_grid_handle);
         redraw_later(wp, UPD_NOT_VALID);
       }
