@@ -1,4 +1,4 @@
-//! Safe coordination of window-grid storage, views, and resize publication.
+//! Safe coordination of window-grid storage, placement, and visibility.
 
 #![forbid(unsafe_code)]
 
@@ -107,10 +107,22 @@ pub(super) struct WindowFloatPlacementUpdate {
     pub(super) require_full_redraw: bool,
 }
 
+/// Complete native request for hiding one window surface.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct WindowSurfaceHideRequest {
+    pub(super) grid_id: GridId,
+    pub(super) message_grid_id: Option<GridId>,
+    pub(super) publish_hide: bool,
+    pub(super) runtime: CompositorRuntime,
+}
+
 /// Receives window-specific UI events.
 pub(super) trait WindowSurfaceOutput: GridSurfaceOutput {
     /// Publishes the current floating-window position.
     fn emit_float_position(&mut self, event: WindowFloatPositionEvent);
+
+    /// Publishes that a window surface is no longer visible.
+    fn emit_window_hide(&mut self, grid_id: GridId);
 }
 
 /// Validated input for one complete window-grid configuration.
@@ -256,5 +268,24 @@ impl<'context> WindowSurface<'context> {
             republish_cursor: true,
             require_full_redraw: !request.valid,
         })
+    }
+
+    /// Publishes window hiding and removes the surface from composition.
+    pub(super) fn hide(
+        &self,
+        request: WindowSurfaceHideRequest,
+        output: &mut impl WindowSurfaceOutput,
+    ) -> CompositorResult<()> {
+        if request.publish_hide {
+            output.emit_window_hide(request.grid_id);
+        }
+
+        self.compositor.remove_registered_grid(
+            self.grids,
+            request.grid_id,
+            request.message_grid_id,
+            request.runtime,
+            output,
+        )
     }
 }

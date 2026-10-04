@@ -14,9 +14,9 @@ use super::super::{
     ComposedGridSpace, DEFAULT_GRID_ID, FloatAnchorPosition, GlyphMapping, GridId,
     GridLifecycleChange, GridPosition, GridSize, GridSurfaceOutput, LineBufferGuard,
     MessageGridState, StoredGridGuard, VimHandleT, WindowFloatAnchor, WindowFloatPlacementRequest,
-    WindowFloatPlacementUpdate, WindowFloatPositionEvent, WindowGridMode, WindowSurfaceOutput,
-    WindowSurfaceRequest, WindowSurfaceUpdate, lock_glyph_mapping, lock_grid_store,
-    lock_message_grid_state, register_empty_grid, release_permanent_grid,
+    WindowFloatPlacementUpdate, WindowFloatPositionEvent, WindowGridMode, WindowSurfaceHideRequest,
+    WindowSurfaceOutput, WindowSurfaceRequest, WindowSurfaceUpdate, lock_glyph_mapping,
+    lock_grid_store, lock_message_grid_state, register_empty_grid, release_permanent_grid,
 };
 
 use super::surface::NvimGridSurfaceOutput;
@@ -35,6 +35,7 @@ unsafe extern "C" {
         screen_row: Integer,
         screen_column: Integer,
     );
+    fn ui_call_win_hide(grid: Integer);
 }
 
 /// C representation of one complete window-grid configuration request.
@@ -248,6 +249,14 @@ impl WindowSurfaceOutput for NvimWindowSurfaceOutput {
             );
         }
     }
+
+    fn emit_window_hide(&mut self, grid_id: GridId) {
+        // SAFETY: Safe Rust validated the identity, and the generated callback
+        // is synchronous.
+        unsafe {
+            ui_call_win_hide(Integer::from(grid_id.as_native_handle()));
+        }
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -360,6 +369,30 @@ pub extern "C" fn grid_place_window_float_surface(
         .place_float(request, current_message_grid_id(), runtime, &mut output)
         .expect("floating-window placement must preserve rendering invariants")
         .into()
+}
+
+/// Hides one window surface and removes it from the compositor.
+#[unsafe(no_mangle)]
+pub extern "C" fn grid_hide_window_surface(grid_handle: VimHandleT, publish_hide: bool) {
+    assert!(
+        grid_handle > 0,
+        "window surface must have a valid grid identity"
+    );
+    let runtime = compositor_runtime_snapshot().expect("compositor runtime must be valid");
+    let mut output = NvimWindowSurfaceOutput::new();
+
+    registered_context()
+        .window_surface()
+        .hide(
+            WindowSurfaceHideRequest {
+                grid_id: GridId::new(grid_handle),
+                message_grid_id: current_message_grid_id(),
+                publish_hide,
+                runtime,
+            },
+            &mut output,
+        )
+        .expect("window hiding must preserve rendering invariants");
 }
 
 /// Releases one permanently stored grid by its stable identity.

@@ -979,10 +979,8 @@ void ui_ext_win_position(win_T *wp, bool validate)
         redraw_later(wp, UPD_NOT_VALID);
       }
     } else {
-      if (ui_has(kUIMultigrid)) {
-        ui_call_win_hide(wp->w_grid_handle);
-      }
-      ui_comp_remove_grid(wp->w_grid_handle);
+      grid_hide_window_surface(wp->w_grid_handle,
+                               ui_has(kUIMultigrid));
     }
   } else {
     ui_call_win_external_pos(wp->w_grid_handle, wp->handle);

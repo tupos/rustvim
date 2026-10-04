@@ -202,6 +202,8 @@ extern WindowSurfaceUpdate grid_configure_window_surface(
   WindowSurfaceRequest request);
 extern WindowFloatPlacementUpdate grid_place_window_float_surface(
   WindowFloatPlacementRequest request);
+extern void grid_hide_window_surface(handle_T grid_handle,
+                                     bool publish_hide);
 extern handle_T grid_update_popup_menu_surface(PopupMenuSurfaceRequest request);
 extern void grid_hide_popup_menu_surface(handle_T grid_handle, bool publish_ui_events);
 extern void grid_recompose_popup_menu_surface(handle_T grid_handle);
