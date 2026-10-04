@@ -119,6 +119,16 @@ impl UiContext {
         }
     }
 
+    /// Releases all context-owned UI output resources during shutdown.
+    pub(crate) fn release(&self) {
+        self.grid_output_buffer_pool
+            .try_lock()
+            .expect("grid output buffer pool is already borrowed")
+            .release();
+        *self.lock_pending_grid_cursor() = PendingGridCursorState::new();
+        self.pending_default_colors.store(false, Ordering::Relaxed);
+    }
+
     /// Acquires the pending grid-cursor state.
     fn lock_pending_grid_cursor(&self) -> MutexGuard<'_, PendingGridCursorState> {
         self.pending_grid_cursor

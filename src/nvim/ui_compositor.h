@@ -14,8 +14,6 @@ typedef struct {
   int column;
 } CompositorGridHit;
 
-extern void ui_comp_init(void);
-extern void ui_comp_free_all_mem(void);
 extern void ui_comp_syn_init(void);
 extern void ui_comp_attach(void);
 extern void ui_comp_detach(void);

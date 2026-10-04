@@ -4,14 +4,12 @@ use super::super::ComposedGridSpace;
 use super::super::ComposedPosition;
 use super::super::DEFAULT_GRID_ID;
 use super::super::FloatAnchorPosition;
-use super::super::GlyphMapping;
 use super::super::GridId;
 use super::super::GridLifecycleChange;
 use super::super::GridPosition;
 use super::super::GridSize;
 use super::super::GridSurfaceOutput;
 use super::super::LineBufferGuard;
-use super::super::MessageGridState;
 use super::super::StoredGridGuard;
 use super::super::VimHandleT;
 use super::super::WindowFloatAnchor;
@@ -32,10 +30,6 @@ use super::super::WindowSurfaceHideRequest;
 use super::super::WindowSurfaceOutput;
 use super::super::WindowSurfaceRequest;
 use super::super::WindowSurfaceUpdate;
-use super::super::lock_glyph_mapping;
-use super::super::lock_grid_store;
-use super::super::lock_message_grid_state;
-use super::super::register_empty_grid;
 use super::surface::NvimGridSurfaceOutput;
 use crate::context::registered_context;
 use crate::defines::CVimString;
@@ -421,14 +415,6 @@ pub extern "C" fn grid_require_full_redraw(grid_handle: VimHandleT) {
     }
 }
 
-/// Assigns and permanently stores the default screen grid.
-#[unsafe(no_mangle)]
-pub extern "C" fn grid_initialize_default() {
-    register_empty_grid(DEFAULT_GRID_ID);
-
-    *lock_message_grid_state() = MessageGridState::new();
-}
-
 /// Resizes the default screen grid when its configured dimensions changed.
 ///
 /// Returns whether a resize was performed.
@@ -621,26 +607,6 @@ pub extern "C" fn grid_flush_window_surface_position(
         .expect("window-position flush must preserve compositor invariants");
 
     clear_position_changed
-}
-
-/// Releases all process-global grid resources during editor shutdown.
-#[unsafe(no_mangle)]
-pub extern "C" fn grid_free_all_mem() {
-    lock_grid_store().clear();
-
-    *lock_message_grid_state() = MessageGridState::new();
-
-    // The caller guarantees that no line-buffer user remains.
-    let mut line_buffer = LineBufferGuard::acquire();
-    line_buffer.release();
-    drop(line_buffer);
-
-    // Moving the mapping out of the mutex releases all of its allocations.
-    let glyph_mapping = {
-        let mut mapping = lock_glyph_mapping();
-        std::mem::replace(&mut *mapping, GlyphMapping::new())
-    };
-    drop(glyph_mapping);
 }
 
 /// Clears every allocated logical row.

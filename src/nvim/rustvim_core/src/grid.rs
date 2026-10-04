@@ -61,6 +61,8 @@ use popup_surface::PopupMenuSurfaceRequest;
 pub(crate) use row::GridRow;
 pub(crate) use row::GridRowSegment;
 pub(crate) use store::GridStore;
+pub(crate) use store::GridStoreError;
+use store::GridStoreResult;
 use store::StoredGridGuard;
 pub(crate) use store::lock_grid_store;
 pub(crate) use surface::GridSurfaceOutput;
@@ -466,6 +468,29 @@ impl GridContext {
             glyph_mapping: Mutex::new(GlyphMapping::new()),
             handle_allocator: GridHandleAllocator::new(DEFAULT_GRID_ID),
             line_buffer: Mutex::new(LineBuffer::empty()),
+        }
+    }
+
+    /// Initializes the default grid and message-grid state.
+    pub(crate) fn initialize(&self) -> GridStoreResult<()> {
+        self.lock_store().register_empty(DEFAULT_GRID_ID)?;
+        *self.lock_message_state() = MessageGridState::new();
+        Ok(())
+    }
+
+    /// Releases all context-owned grid resources during editor shutdown.
+    pub(crate) fn release(&self) {
+        self.lock_store().clear();
+        *self.lock_message_state() = MessageGridState::new();
+
+        {
+            let mut line_buffer = self.lock_line_buffer();
+            line_buffer.release();
+        }
+
+        {
+            let mut glyph_mapping = self.lock_glyph_mapping();
+            *glyph_mapping = GlyphMapping::new();
         }
     }
 

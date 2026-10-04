@@ -12,7 +12,6 @@ use crate::context::registered_context;
 use crate::defines::CVimString;
 use crate::defines::Integer;
 use crate::grid::CGridCell;
-use crate::grid::DEFAULT_GRID_ID;
 use crate::grid::GridId;
 use crate::grid::VimHandleT;
 use crate::grid::VimSAttrT;
@@ -38,30 +37,6 @@ impl From<CompositorGridHit> for CCompositorGridHit {
             column: hit.local_position.column,
         }
     }
-}
-
-/// Initializes the compositor with the process-global default grid.
-#[unsafe(no_mangle)]
-pub extern "C" fn ui_comp_init() {
-    {
-        let grids = lock_grid_store();
-        grids
-            .grid(DEFAULT_GRID_ID)
-            .expect("default grid must be registered before compositor initialization");
-    }
-
-    lock_compositor()
-        .initialize_layers(DEFAULT_GRID_ID)
-        .expect("compositor layers must initialize exactly once");
-}
-
-/// Releases all Rust-owned compositor state during process teardown.
-#[unsafe(no_mangle)]
-pub extern "C" fn ui_comp_free_all_mem() {
-    lock_compositor()
-        .clear_layers()
-        .expect("compositor layers must be initialized");
-    lock_compositor_buffer_pool().release();
 }
 
 /// Initializes compositor debug highlights.

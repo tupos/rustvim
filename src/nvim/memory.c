@@ -22,7 +22,6 @@
 #include "nvim/eval.h"
 #include "nvim/gettext_defs.h"
 #include "nvim/globals.h"
-#include "nvim/grid.h"
 #include "nvim/highlight.h"
 #include "nvim/highlight_group.h"
 #include "nvim/input_cmdatom.h"
@@ -37,13 +36,13 @@
 #include "nvim/message.h"
 #include "nvim/normal.h"
 #include "nvim/option_vars.h"
+#include "nvim/rustvim.h"
 #include "nvim/sign.h"
 #include "nvim/state_defs.h"
 #include "nvim/statusline.h"
 #include "nvim/types_defs.h"
 #include "nvim/ui.h"
 #include "nvim/ui_client.h"
-#include "nvim/ui_compositor.h"
 #include "nvim/usercmd.h"
 
 #ifdef UNIT_TESTING
@@ -993,8 +992,6 @@ void free_all_mem(void)
   map_destroy(int, &window_handles);
   map_destroy(int, &tabpage_handles);
 
-  // free screenlines (can't display anything now!)
-  grid_free_all_mem();
   stl_clear_click_defs(tab_page_click_defs, tab_page_click_defs_size);
   xfree(tab_page_click_defs);
 
@@ -1011,7 +1008,7 @@ void free_all_mem(void)
 
   remote_ui_free_all_mem();
   ui_free_all_mem();
-  ui_comp_free_all_mem();
+  rustvim_rendering_free_all_mem();
   nlua_free_all_mem();
   rpc_free_all_mem();
   autocmd_free_all_mem();

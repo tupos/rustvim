@@ -84,6 +84,22 @@ impl CompositorContext {
         }
     }
 
+    /// Initializes compositor layers after the default grid is registered.
+    pub(crate) fn initialize(&self, grids: &GridContext) -> CompositorResult<()> {
+        if grids.lock_store().grid(DEFAULT_GRID_ID).is_err() {
+            return Err(CompositorError::InvalidLayerState);
+        }
+
+        self.lock_state().initialize_layers(DEFAULT_GRID_ID)
+    }
+
+    /// Releases all context-owned compositor resources during shutdown.
+    pub(crate) fn release(&self) -> CompositorResult<()> {
+        self.lock_state().clear_layers()?;
+        self.lock_buffer_pool().release();
+        Ok(())
+    }
+
     /// Routes one grid-resize event to composed and uncomposed outputs.
     pub(crate) fn route_grid_resize<ComposedOutput, UncomposedOutput>(
         &self,

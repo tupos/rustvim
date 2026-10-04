@@ -210,7 +210,6 @@ extern bool grid_view_requires_redraw(handle_T window_grid_handle);
 extern bool grid_view_width_matches_target(handle_T window_grid_handle, int width);
 extern void grid_view_cursor_goto(handle_T window_grid_handle, int row, int col);
 extern void grid_message_view_cursor_goto(int row, int col);
-extern void grid_initialize_default(void);
 extern bool grid_configure_default(int rows, int columns);
 extern WindowSurfaceUpdate grid_configure_window_surface(
   WindowSurfaceRequest request);
@@ -263,7 +262,6 @@ extern void grid_flush_message_scroll(handle_T grid_handle,
 extern void grid_refresh_message_ui(handle_T grid_handle, int position, bool scrolled,
                                     MessageGridPositionConfig config,
                                     MessageGridPositionEmitter emit_position);
-extern void grid_free_all_mem(void);
 extern bool grid_clear_default(bool valid);
 extern void grid_clear_default_rows(int start_row, int end_row, bool valid);
 extern void grid_scroll_window_lines(handle_T window_grid_handle, int row, int line_count,
