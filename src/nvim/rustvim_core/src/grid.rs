@@ -64,9 +64,9 @@ use virtual_text::{VirtualText, VirtualTextChunk, VirtualTextRenderOptions};
 pub(crate) use window_surface::WindowSurface;
 use window_surface::{
     FloatAnchorPosition, WindowFloatAnchor, WindowFloatPlacementRequest,
-    WindowFloatPlacementUpdate, WindowFloatPositionEvent, WindowSurfaceCloseRequest,
-    WindowSurfaceDestroyRequest, WindowSurfaceHideRequest, WindowSurfaceOutput,
-    WindowSurfaceRequest, WindowSurfaceUpdate,
+    WindowFloatPlacementUpdate, WindowFloatPositionEvent, WindowPositionFlushRequest,
+    WindowPositionFlushUpdate, WindowSurfaceCloseRequest, WindowSurfaceDestroyRequest,
+    WindowSurfaceHideRequest, WindowSurfaceOutput, WindowSurfaceRequest, WindowSurfaceUpdate,
 };
 
 /// if data[0] is 0xFF, then data[1..4] is a 24-bit index (in machine endianness)

@@ -185,6 +185,8 @@ typedef void (*MessageGridPositionEmitter)(
   handle_T grid_handle, int row, bool scrolled,
   schar_T separator_character, int z_index, int compositor_index);
 
+typedef void (*WindowPositionEmitter)(handle_T grid_handle, bool validate);
+
 extern bool grid_is_allocated(handle_T grid_handle);
 extern bool grid_requires_compositor_invalidation(handle_T grid_handle,
                                                   bool clear_requested);
@@ -210,6 +212,10 @@ extern void grid_close_window_surface(handle_T grid_handle,
 extern handle_T grid_destroy_window_surface(handle_T grid_handle,
                                             bool publish_destroy,
                                             bool create_replacement);
+extern bool grid_flush_window_surface_position(
+  handle_T grid_handle, bool position_changed,
+  bool current_tab, bool validate,
+  WindowPositionEmitter emit_position);
 extern handle_T grid_update_popup_menu_surface(PopupMenuSurfaceRequest request);
 extern void grid_hide_popup_menu_surface(handle_T grid_handle, bool publish_ui_events);
 extern void grid_recompose_popup_menu_surface(handle_T grid_handle);

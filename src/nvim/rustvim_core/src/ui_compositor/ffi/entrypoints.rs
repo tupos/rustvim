@@ -480,27 +480,9 @@ pub extern "C" fn ui_comp_grid_publication_pending(grid_handle: Integer) -> bool
         return false;
     };
 
-    lock_compositor()
-        .grid_publication_pending(GridId::new(grid_handle))
-        .unwrap_or(false)
-}
-
-/// Takes one registered grid's current layer-index publication.
-///
-/// Returns zero when the grid is not registered. Taking a registered
-/// publication clears its pending state.
-#[unsafe(no_mangle)]
-pub extern "C" fn ui_comp_take_grid_publication(grid_handle: Integer) -> libc::c_int {
-    let Ok(grid_handle) = i32::try_from(grid_handle) else {
-        return 0;
-    };
-    let Ok(Some(publication)) = lock_compositor().take_grid_publication(GridId::new(grid_handle))
-    else {
-        return 0;
-    };
-
-    i32::try_from(publication.layer_index)
-        .expect("compositor layer index must fit the C UI event representation")
+    registered_context()
+        .compositor()
+        .registered_grid_publication_pending(GridId::new(grid_handle))
 }
 
 /// Checks cursor coverage while borrowing the permanent grid store.

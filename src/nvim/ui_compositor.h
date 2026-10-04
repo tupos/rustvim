@@ -57,7 +57,6 @@ extern bool ui_comp_grid_hit_at_coord(
 extern bool ui_comp_grid_origin(Integer grid_handle, int *row, int *column);
 
 extern bool ui_comp_grid_publication_pending(Integer grid_handle);
-extern int ui_comp_take_grid_publication(Integer grid_handle);
 
 extern bool ui_comp_cursor_is_covered_by_higher_layer(
   Integer current_grid_handle, int current_grid_z_index, int row, int column,

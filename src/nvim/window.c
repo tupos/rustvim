@@ -7959,23 +7959,20 @@ void win_get_tabwin(handle_T id, int *tabnr, int *winnr)
   }
 }
 
+static void ui_ext_win_position_by_grid(handle_T grid_handle, bool validate)
+{
+  win_T *wp = win_find_by_grid_handle(grid_handle);
+  assert(wp != NULL);
+  ui_ext_win_position(wp, validate);
+}
+
 void win_ui_flush(bool validate)
 {
   FOR_ALL_TAB_WINDOWS(tp, wp) {
-    if ((wp->w_pos_changed
-         || ui_comp_grid_publication_pending(wp->w_grid_handle))
-        && grid_is_allocated(wp->w_grid_handle)) {
-      if (tp == curtab) {
-        ui_ext_win_position(wp, validate);
-      } else {
-        ui_call_win_hide(wp->w_grid_handle);
-        wp->w_pos_changed = false;
-      }
-      if (ui_comp_grid_publication_pending(wp->w_grid_handle)) {
-        int compositor_index =
-          ui_comp_take_grid_publication(wp->w_grid_handle);
-        assert(compositor_index > 0);
-      }
+    if (grid_flush_window_surface_position(
+          wp->w_grid_handle, wp->w_pos_changed, tp == curtab, validate,
+          ui_ext_win_position_by_grid)) {
+      wp->w_pos_changed = false;
     }
     if (tp == curtab) {
       ui_ext_win_viewport(wp);

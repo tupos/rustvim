@@ -15,12 +15,15 @@ use super::super::{
     GridLifecycleChange, GridPosition, GridSize, GridSurfaceOutput, LineBufferGuard,
     MessageGridState, StoredGridGuard, VimHandleT, WindowFloatAnchor, WindowFloatPlacementRequest,
     WindowFloatPlacementUpdate, WindowFloatPositionEvent, WindowGridMode,
-    WindowSurfaceCloseRequest, WindowSurfaceDestroyRequest, WindowSurfaceHideRequest,
-    WindowSurfaceOutput, WindowSurfaceRequest, WindowSurfaceUpdate, lock_glyph_mapping,
-    lock_grid_store, lock_message_grid_state, register_empty_grid,
+    WindowPositionFlushRequest, WindowPositionFlushUpdate, WindowSurfaceCloseRequest,
+    WindowSurfaceDestroyRequest, WindowSurfaceHideRequest, WindowSurfaceOutput,
+    WindowSurfaceRequest, WindowSurfaceUpdate, lock_glyph_mapping, lock_grid_store,
+    lock_message_grid_state, register_empty_grid,
 };
 
 use super::surface::NvimGridSurfaceOutput;
+
+type CWindowPositionEmitter = unsafe extern "C" fn(VimHandleT, bool);
 
 unsafe extern "C" {
     fn ui_call_win_float_pos(
@@ -187,6 +190,8 @@ impl From<WindowFloatPlacementUpdate> for CWindowFloatPlacementUpdate {
 /// Final UI adapter for complete window-surface operations.
 struct NvimWindowSurfaceOutput {
     surface: NvimGridSurfaceOutput,
+    position_emitter: Option<CWindowPositionEmitter>,
+    validate_position: bool,
 }
 
 impl NvimWindowSurfaceOutput {
@@ -194,6 +199,20 @@ impl NvimWindowSurfaceOutput {
     const fn new() -> Self {
         Self {
             surface: NvimGridSurfaceOutput::new(),
+            position_emitter: None,
+            validate_position: false,
+        }
+    }
+
+    /// Creates an output adapter that can refresh one C-owned window.
+    const fn for_position_flush(
+        position_emitter: CWindowPositionEmitter,
+        validate_position: bool,
+    ) -> Self {
+        Self {
+            surface: NvimGridSurfaceOutput::new(),
+            position_emitter: Some(position_emitter),
+            validate_position,
         }
     }
 }
@@ -265,6 +284,18 @@ impl WindowSurfaceOutput for NvimWindowSurfaceOutput {
         // is synchronous.
         unsafe {
             ui_call_win_close(Integer::from(grid_id.as_native_handle()));
+        }
+    }
+
+    fn refresh_window_position(&mut self, grid_id: GridId) {
+        let position_emitter = self
+            .position_emitter
+            .expect("window-position output requires its C emitter");
+
+        // SAFETY: The FFI entrypoint validates the callback, and C resolves
+        // the stable grid identity synchronously without retaining it.
+        unsafe {
+            position_emitter(grid_id.as_native_handle(), self.validate_position);
         }
     }
 }
@@ -459,6 +490,40 @@ pub extern "C" fn grid_destroy_window_surface(
         )
         .expect("window destruction must preserve grid-store invariants")
         .map_or(0, GridId::as_native_handle)
+}
+
+/// Flushes one window's pending position and compositor publication.
+#[unsafe(no_mangle)]
+pub extern "C" fn grid_flush_window_surface_position(
+    grid_handle: VimHandleT,
+    position_changed: bool,
+    current_tab: bool,
+    validate: bool,
+    position_emitter: Option<CWindowPositionEmitter>,
+) -> bool {
+    assert!(
+        grid_handle > 0,
+        "window surface must have a valid grid identity"
+    );
+    let position_emitter =
+        position_emitter.expect("window-position flush requires a valid C emitter");
+    let mut output = NvimWindowSurfaceOutput::for_position_flush(position_emitter, validate);
+
+    let WindowPositionFlushUpdate {
+        clear_position_changed,
+    } = registered_context()
+        .window_surface()
+        .flush_position(
+            WindowPositionFlushRequest {
+                grid_id: GridId::new(grid_handle),
+                position_changed,
+                current_tab,
+            },
+            &mut output,
+        )
+        .expect("window-position flush must preserve compositor invariants");
+
+    clear_position_changed
 }
 
 /// Releases all process-global grid resources during editor shutdown.

@@ -125,6 +125,20 @@ pub(super) struct WindowSurfaceDestroyRequest {
     pub(super) create_replacement: bool,
 }
 
+/// Inputs controlling one window-position flush.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct WindowPositionFlushRequest {
+    pub(super) grid_id: GridId,
+    pub(super) position_changed: bool,
+    pub(super) current_tab: bool,
+}
+
+/// Editor-owned state update produced by a window-position flush.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct WindowPositionFlushUpdate {
+    pub(super) clear_position_changed: bool,
+}
+
 /// Complete native request for hiding one window surface.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct WindowSurfaceHideRequest {
@@ -144,6 +158,9 @@ pub(super) trait WindowSurfaceOutput: GridSurfaceOutput {
 
     /// Publishes that a window has closed.
     fn emit_window_close(&mut self, grid_id: GridId);
+
+    /// Requests refreshed position data from the C-owned window model.
+    fn refresh_window_position(&mut self, grid_id: GridId);
 }
 
 /// Validated input for one complete window-grid configuration.
@@ -352,5 +369,47 @@ impl<'context> WindowSurface<'context> {
             None
         };
         Ok(replacement_grid_id)
+    }
+
+    /// Flushes one window position and acknowledges its layer publication.
+    pub(super) fn flush_position(
+        &self,
+        request: WindowPositionFlushRequest,
+        output: &mut impl WindowSurfaceOutput,
+    ) -> CompositorResult<WindowPositionFlushUpdate> {
+        let allocated = self
+            .grids
+            .lock_store()
+            .grid(request.grid_id)
+            .is_ok_and(|grid| grid.is_allocated());
+        if !allocated
+            || (!request.position_changed
+                && !self
+                    .compositor
+                    .registered_grid_publication_pending(request.grid_id))
+        {
+            return Ok(WindowPositionFlushUpdate {
+                clear_position_changed: false,
+            });
+        }
+
+        if request.current_tab {
+            output.refresh_window_position(request.grid_id);
+        } else {
+            output.emit_window_hide(request.grid_id);
+        }
+
+        if self
+            .compositor
+            .registered_grid_publication_pending(request.grid_id)
+        {
+            self.compositor
+                .take_registered_grid_publication(request.grid_id, false)?
+                .ok_or(CompositorError::InvalidLayerState)?;
+        }
+
+        Ok(WindowPositionFlushUpdate {
+            clear_position_changed: !request.current_tab,
+        })
     }
 }

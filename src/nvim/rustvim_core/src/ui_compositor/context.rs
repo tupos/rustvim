@@ -228,6 +228,15 @@ impl CompositorContext {
         Ok(())
     }
 
+    /// Reports whether one registered grid has a pending layer publication.
+    ///
+    /// Missing layers and an uninitialized compositor have no publication.
+    pub(crate) fn registered_grid_publication_pending(&self, grid_id: GridId) -> bool {
+        self.lock_state()
+            .grid_publication_pending(grid_id)
+            .unwrap_or(false)
+    }
+
     /// Takes a registered grid's current layer-index publication.
     ///
     /// When `pending_only` is true, an unchanged layer returns `None`.
