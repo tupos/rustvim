@@ -1,13 +1,84 @@
 //! C boundary adapters for screen-grid lifecycle operations.
 
-use crate::globals;
+use crate::{context::registered_context, globals};
 
 use super::super::{
-    CWindowGridUpdate, DEFAULT_GRID_ID, GlyphMapping, GridId, GridLifecycleChange, GridPosition,
-    GridSize, LineBufferGuard, MessageGridState, StoredGridGuard, VimHandleT, WindowGridMode,
-    lock_glyph_mapping, lock_grid_store, lock_message_grid_state, register_empty_grid,
-    release_permanent_grid,
+    DEFAULT_GRID_ID, GlyphMapping, GridId, GridLifecycleChange, GridPosition, GridSize,
+    LineBufferGuard, MessageGridState, StoredGridGuard, VimHandleT, WindowGridMode,
+    WindowSurfaceRequest, WindowSurfaceUpdate, lock_glyph_mapping, lock_grid_store,
+    lock_message_grid_state, register_empty_grid, release_permanent_grid,
 };
+
+use super::surface::NvimGridSurfaceOutput;
+
+/// C representation of one complete window-grid configuration request.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct CWindowSurfaceRequest {
+    pub(crate) grid_handle: VimHandleT,
+    pub(crate) rows: libc::c_int,
+    pub(crate) columns: libc::c_int,
+    pub(crate) use_dedicated_grid: bool,
+    pub(crate) row_offset: libc::c_int,
+    pub(crate) column_offset: libc::c_int,
+    pub(crate) force_dimensions_publication: bool,
+    pub(crate) bordered_float: bool,
+}
+
+impl CWindowSurfaceRequest {
+    /// Converts C-owned window state into a validated native request.
+    fn try_into_native(self) -> Option<WindowSurfaceRequest> {
+        if self.grid_handle <= 0 {
+            return None;
+        }
+        let mode = if self.use_dedicated_grid {
+            WindowGridMode::Dedicated(GridSize::try_new(self.rows, self.columns)?)
+        } else {
+            WindowGridMode::Shared
+        };
+
+        Some(WindowSurfaceRequest::new(
+            GridId::new(self.grid_handle),
+            mode,
+            GridPosition::new(self.row_offset, self.column_offset),
+            self.force_dimensions_publication,
+            self.bordered_float,
+        ))
+    }
+}
+
+/// C representation of editor-owned actions after window configuration.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct CWindowSurfaceUpdate {
+    pub(crate) grid_handle: VimHandleT,
+    pub(crate) row_offset_changed: bool,
+    pub(crate) redraw_border: bool,
+    pub(crate) republish_cursor: bool,
+}
+
+impl CWindowSurfaceUpdate {
+    /// Returns the failure result expected by the existing C caller.
+    const fn invalid() -> Self {
+        Self {
+            grid_handle: 0,
+            row_offset_changed: false,
+            redraw_border: false,
+            republish_cursor: false,
+        }
+    }
+}
+
+impl From<WindowSurfaceUpdate> for CWindowSurfaceUpdate {
+    fn from(update: WindowSurfaceUpdate) -> Self {
+        Self {
+            grid_handle: update.grid_id.as_native_handle(),
+            row_offset_changed: update.row_offset_changed,
+            redraw_border: update.redraw_border,
+            republish_cursor: update.republish_cursor,
+        }
+    }
+}
 
 #[unsafe(no_mangle)]
 pub extern "C" fn alloc_initial_line_buffer() {
@@ -86,68 +157,21 @@ pub extern "C" fn grid_configure_default(rows: libc::c_int, columns: libc::c_int
     grid.configure_as_default(size, &mut line_buffer) == GridLifecycleChange::Resized
 }
 
-/// Applies the complete allocation, validity, and view transition for one
-/// window grid.
-///
-/// Returns the configured grid identity and whether dedicated storage was
-/// allocated or resized. The window subsystem uses that result for border
-/// redraw and UI resize notification.
-///
+/// Configures one complete window surface and applies its resize output.
 #[unsafe(no_mangle)]
-pub extern "C" fn grid_configure_for_window(
-    grid_handle: VimHandleT,
-    rows: libc::c_int,
-    columns: libc::c_int,
-    use_dedicated_grid: bool,
-    row_offset: libc::c_int,
-    col_offset: libc::c_int,
-) -> CWindowGridUpdate {
-    let mode = if use_dedicated_grid {
-        let Some(size) = GridSize::try_new(rows, columns) else {
-            return CWindowGridUpdate {
-                grid_handle: 0,
-                resized: false,
-                row_offset_changed: false,
-            };
-        };
-        WindowGridMode::Dedicated(size)
-    } else {
-        WindowGridMode::Shared
+pub extern "C" fn grid_configure_window_surface(
+    request: CWindowSurfaceRequest,
+) -> CWindowSurfaceUpdate {
+    let Some(request) = request.try_into_native() else {
+        return CWindowSurfaceUpdate::invalid();
     };
+    let mut output = NvimGridSurfaceOutput::new();
 
-    let (update, previous_row_offset) = {
-        let mut line_buffer = LineBufferGuard::acquire();
-        let mut store = lock_grid_store();
-        let grid_id = GridId::new(grid_handle);
-        let previous_row_offset = store
-            .window_view_descriptor(grid_id)
-            .map(|descriptor| descriptor.offset.row)
-            .unwrap_or(0);
-        let update = {
-            let Ok(rust_grid) = store.grid_mut(grid_id) else {
-                return CWindowGridUpdate {
-                    grid_handle: 0,
-                    resized: false,
-                    row_offset_changed: false,
-                };
-            };
-            rust_grid.configure_window_view(
-                mode,
-                GridPosition::new(row_offset, col_offset),
-                &mut line_buffer,
-            )
-        };
-        if store.set_window_view(grid_id, update.view).is_err() {
-            return CWindowGridUpdate {
-                grid_handle: 0,
-                resized: false,
-                row_offset_changed: false,
-            };
-        }
-        (update, previous_row_offset)
-    };
-
-    CWindowGridUpdate::from_update(update, previous_row_offset)
+    registered_context()
+        .window_surface()
+        .configure(request, &mut output)
+        .map(CWindowSurfaceUpdate::from)
+        .unwrap_or_else(|_| CWindowSurfaceUpdate::invalid())
 }
 
 /// Releases one permanently stored grid by its stable identity.

@@ -54,9 +54,21 @@ typedef struct {
 
 typedef struct {
   handle_T grid_handle;
-  bool resized;
+  int rows;
+  int columns;
+  bool use_dedicated_grid;
+  int row_offset;
+  int column_offset;
+  bool force_dimensions_publication;
+  bool bordered_float;
+} WindowSurfaceRequest;
+
+typedef struct {
+  handle_T grid_handle;
   bool row_offset_changed;
-} WindowGridUpdate;
+  bool redraw_border;
+  bool republish_cursor;
+} WindowSurfaceUpdate;
 
 typedef struct {
   int end_col;
@@ -162,9 +174,8 @@ extern void grid_view_cursor_goto(handle_T window_grid_handle, int row, int col)
 extern void grid_message_view_cursor_goto(int row, int col);
 extern void grid_initialize_default(void);
 extern bool grid_configure_default(int rows, int columns);
-extern WindowGridUpdate grid_configure_for_window(
-  handle_T grid_handle, int rows, int columns, bool use_dedicated_grid,
-  int row_offset, int col_offset);
+extern WindowSurfaceUpdate grid_configure_window_surface(
+  WindowSurfaceRequest request);
 extern handle_T grid_update_popup_menu_surface(PopupMenuSurfaceRequest request);
 extern void grid_hide_popup_menu_surface(handle_T grid_handle, bool publish_ui_events);
 extern void grid_recompose_popup_menu_surface(handle_T grid_handle);

@@ -3,7 +3,7 @@
 use std::sync::OnceLock;
 
 use crate::{
-    grid::{GridContext, MessageSurface, PopupMenuSurface},
+    grid::{GridContext, MessageSurface, PopupMenuSurface, WindowSurface},
     ui::UiContext,
     ui_compositor::CompositorContext,
 };
@@ -51,6 +51,11 @@ impl RustVimContext {
     /// Borrows the complete popup-menu rendering surface.
     pub(crate) const fn popup_menu_surface(&self) -> PopupMenuSurface<'_> {
         PopupMenuSurface::new(&self.grid, &self.compositor)
+    }
+
+    /// Borrows the complete window rendering surface.
+    pub(crate) const fn window_surface(&self) -> WindowSurface<'_> {
+        WindowSurface::new(&self.grid)
     }
 }
 

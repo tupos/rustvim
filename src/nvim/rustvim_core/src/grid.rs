@@ -12,6 +12,7 @@ mod store;
 mod surface;
 mod tabstops;
 mod virtual_text;
+mod window_surface;
 
 pub(crate) use ffi::screen_character::schar_from_buf;
 
@@ -60,6 +61,8 @@ pub(crate) use store::{GridStore, lock_grid_store};
 pub(crate) use surface::GridSurfaceOutput;
 use tabstops::TabStops;
 use virtual_text::{VirtualText, VirtualTextChunk, VirtualTextRenderOptions};
+pub(crate) use window_surface::WindowSurface;
+use window_surface::{WindowSurfaceRequest, WindowSurfaceUpdate};
 
 /// if data[0] is 0xFF, then data[1..4] is a 24-bit index (in machine endianness)
 /// otherwise it must be a UTF-8 string of length maximum 4 (no NUL when n=4)
@@ -2537,15 +2540,6 @@ pub enum CMessageGridTransition {
     ReleaseRequired = 2,
 }
 
-/// C representation of a completed window-grid configuration.
-#[repr(C)]
-#[derive(Clone, Copy, Debug)]
-pub struct CWindowGridUpdate {
-    grid_handle: VimHandleT,
-    resized: bool,
-    row_offset_changed: bool,
-}
-
 /// C representation of message-position UI policy.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -2613,17 +2607,6 @@ impl From<MessageGridTransition> for CMessageGridTransition {
             MessageGridTransition::Unchanged => Self::Unchanged,
             MessageGridTransition::Resized => Self::Resized,
             MessageGridTransition::ReleaseRequired => Self::ReleaseRequired,
-        }
-    }
-}
-
-impl CWindowGridUpdate {
-    /// Converts a completed update for the C window owner.
-    fn from_update(update: WindowGridUpdate, previous_row_offset: i32) -> Self {
-        Self {
-            grid_handle: update.grid_id.as_native_handle(),
-            resized: update.lifecycle == GridLifecycleChange::Resized,
-            row_offset_changed: previous_row_offset != update.view.offset.row,
         }
     }
 }
@@ -3628,8 +3611,9 @@ impl<'a> ArabicShaper<'a> {
 #[cfg(test)]
 mod tests {
     use super::ffi::lifecycle::{
-        grid_configure_for_window, grid_free, grid_is_allocated, grid_require_full_redraw,
-        grid_requires_compositor_invalidation, grid_revalidate_for_redraw,
+        CWindowSurfaceRequest, grid_configure_window_surface, grid_free, grid_is_allocated,
+        grid_require_full_redraw, grid_requires_compositor_invalidation,
+        grid_revalidate_for_redraw,
     };
     use super::ffi::message::{grid_prepare_for_messages, grid_release_message};
     use super::ffi::operations::{grid_assign_handle, grid_inspect_cell, grid_invalidate};
@@ -3864,12 +3848,22 @@ mod tests {
         }
         let assigned_handle = grid_assign_handle();
         let grid_id = GridId::new(assigned_handle);
-        let shared_update = grid_configure_for_window(assigned_handle, 0, 0, false, 3, 4);
+        let shared_update = grid_configure_window_surface(CWindowSurfaceRequest {
+            grid_handle: assigned_handle,
+            rows: 0,
+            columns: 0,
+            use_dedicated_grid: false,
+            row_offset: 3,
+            column_offset: 4,
+            force_dimensions_publication: false,
+            bordered_float: false,
+        });
 
         assert_eq!(grid_id, GridId::new(assigned_handle));
         assert_eq!(shared_update.grid_handle, assigned_handle);
-        assert!(!shared_update.resized);
         assert!(shared_update.row_offset_changed);
+        assert!(!shared_update.redraw_border);
+        assert!(!shared_update.republish_cursor);
         assert!(grid_view_has_target(assigned_handle));
         assert!(grid_view_targets_default(assigned_handle));
         assert_eq!(
@@ -3881,11 +3875,21 @@ mod tests {
             assert!(!grid.is_allocated());
         }
 
-        let dedicated_update = grid_configure_for_window(assigned_handle, 2, 3, true, 1, 2);
+        let dedicated_update = grid_configure_window_surface(CWindowSurfaceRequest {
+            grid_handle: assigned_handle,
+            rows: 2,
+            columns: 3,
+            use_dedicated_grid: true,
+            row_offset: 1,
+            column_offset: 2,
+            force_dimensions_publication: false,
+            bordered_float: true,
+        });
 
         assert_eq!(dedicated_update.grid_handle, assigned_handle);
-        assert!(dedicated_update.resized);
         assert!(dedicated_update.row_offset_changed);
+        assert!(dedicated_update.redraw_border);
+        assert!(dedicated_update.republish_cursor);
         assert!(!grid_view_targets_default(assigned_handle));
         assert_eq!(
             lock_grid_store().window_view_descriptor(grid_id).unwrap(),
@@ -3898,6 +3902,20 @@ mod tests {
             assert!(grid.is_allocated());
             grid.attrs.fill(7);
         }
+
+        let forced_update = grid_configure_window_surface(CWindowSurfaceRequest {
+            grid_handle: assigned_handle,
+            rows: 2,
+            columns: 3,
+            use_dedicated_grid: true,
+            row_offset: 1,
+            column_offset: 2,
+            force_dimensions_publication: true,
+            bordered_float: true,
+        });
+        assert!(!forced_update.row_offset_changed);
+        assert!(!forced_update.redraw_border);
+        assert!(forced_update.republish_cursor);
 
         grid_invalidate(assigned_handle);
         {

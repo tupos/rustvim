@@ -5734,22 +5734,27 @@ bool win_grid_alloc(win_T *wp)
     col_offset += wp->w_wincol;
   }
 
-  WindowGridUpdate update = grid_configure_for_window(
-    wp->w_grid_handle, total_rows, total_cols, use_dedicated_grid, row_offset, col_offset);
+  WindowSurfaceUpdate update = grid_configure_window_surface(
+    (WindowSurfaceRequest){
+      .grid_handle = wp->w_grid_handle,
+      .rows = total_rows,
+      .columns = total_cols,
+      .use_dedicated_grid = use_dedicated_grid,
+      .row_offset = row_offset,
+      .column_offset = col_offset,
+      .force_dimensions_publication = resizing_screen,
+      .bordered_float = wp->w_floating && wp->w_config.border,
+    });
   wp->w_grid_handle = update.grid_handle;
   if (wp->w_grid_handle == 0) {
     return update.row_offset_changed;
   }
 
-  if (update.resized && wp->w_floating && wp->w_config.border) {
+  if (update.redraw_border) {
     wp->w_redr_border = true;
   }
 
-  // Send a grid resize event if the grid was just resized, screen_resize()
-  // requires every grid size to be resent, or the UI requires multigrid
-  // events.
-  if ((resizing_screen || update.resized) && use_dedicated_grid) {
-    ui_call_grid_resize(wp->w_grid_handle, total_cols, total_rows);
+  if (update.republish_cursor) {
     ui_check_cursor_grid(wp->w_grid_handle);
   }
 
