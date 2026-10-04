@@ -9,7 +9,8 @@ use crate::ui_compositor::{
 
 use super::{
     ComposedPosition, GridContext, GridId, GridLifecycleChange, GridPosition, GridSurfaceOutput,
-    WindowGridMode, store::GridStoreResult,
+    WindowGridMode,
+    store::{GridStoreError, GridStoreResult},
 };
 
 /// Fractional anchor coordinates retained for a floating-window UI event.
@@ -106,6 +107,37 @@ pub(super) struct WindowFloatPlacementUpdate {
     pub(super) republish_cursor: bool,
     pub(super) require_full_redraw: bool,
 }
+
+/// Inputs controlling conversion of one floating window into a split.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct WindowFloatConversionRequest {
+    pub(super) grid_id: GridId,
+    pub(super) message_grid_id: Option<GridId>,
+    pub(super) multigrid_enabled: bool,
+    pub(super) runtime: CompositorRuntime,
+}
+
+/// Editor-owned state update produced by float-to-split conversion.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct WindowFloatToSplitUpdate {
+    pub(super) grid_id: GridId,
+    pub(super) republish_position: bool,
+}
+
+/// Failures produced while coordinating a complete window surface.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub(super) enum WindowSurfaceError {
+    /// The compositor could not remove or recompose the floating layer.
+    #[error(transparent)]
+    Compositor(#[from] CompositorError),
+
+    /// The permanent grid store could not retire or replace the grid.
+    #[error(transparent)]
+    GridStore(#[from] GridStoreError),
+}
+
+/// Result of coordinating a complete window-surface operation.
+type WindowSurfaceResult<T> = Result<T, WindowSurfaceError>;
 
 /// Complete native request for closing one window surface.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -305,6 +337,45 @@ impl<'context> WindowSurface<'context> {
         Ok(WindowFloatPlacementUpdate {
             republish_cursor: true,
             require_full_redraw: !request.valid,
+        })
+    }
+
+    /// Removes floating state and prepares the same window for split layout.
+    pub(super) fn convert_float_to_split(
+        &self,
+        request: WindowFloatConversionRequest,
+        output: &mut impl WindowSurfaceOutput,
+    ) -> WindowSurfaceResult<WindowFloatToSplitUpdate> {
+        self.compositor.remove_registered_grid(
+            self.grids,
+            request.grid_id,
+            request.message_grid_id,
+            request.runtime,
+            output,
+        )?;
+
+        if request.multigrid_enabled {
+            return Ok(WindowFloatToSplitUpdate {
+                grid_id: request.grid_id,
+                republish_position: true,
+            });
+        }
+
+        output.emit_window_hide(request.grid_id);
+        let grid_id = self
+            .destroy(
+                WindowSurfaceDestroyRequest {
+                    grid_id: request.grid_id,
+                    publish_destroy: false,
+                    create_replacement: true,
+                },
+                output,
+            )?
+            .expect("float-to-split conversion requests a replacement grid");
+
+        Ok(WindowFloatToSplitUpdate {
+            grid_id,
+            republish_position: false,
         })
     }
 

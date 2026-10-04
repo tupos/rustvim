@@ -13,12 +13,12 @@ use crate::{
 use super::super::{
     ComposedGridSpace, DEFAULT_GRID_ID, FloatAnchorPosition, GlyphMapping, GridId,
     GridLifecycleChange, GridPosition, GridSize, GridSurfaceOutput, LineBufferGuard,
-    MessageGridState, StoredGridGuard, VimHandleT, WindowFloatAnchor, WindowFloatPlacementRequest,
-    WindowFloatPlacementUpdate, WindowFloatPositionEvent, WindowGridMode,
-    WindowPositionFlushRequest, WindowPositionFlushUpdate, WindowSurfaceCloseRequest,
-    WindowSurfaceDestroyRequest, WindowSurfaceHideRequest, WindowSurfaceOutput,
-    WindowSurfaceRequest, WindowSurfaceUpdate, lock_glyph_mapping, lock_grid_store,
-    lock_message_grid_state, register_empty_grid,
+    MessageGridState, StoredGridGuard, VimHandleT, WindowFloatAnchor, WindowFloatConversionRequest,
+    WindowFloatPlacementRequest, WindowFloatPlacementUpdate, WindowFloatPositionEvent,
+    WindowFloatToSplitUpdate, WindowGridMode, WindowPositionFlushRequest,
+    WindowPositionFlushUpdate, WindowSurfaceCloseRequest, WindowSurfaceDestroyRequest,
+    WindowSurfaceHideRequest, WindowSurfaceOutput, WindowSurfaceRequest, WindowSurfaceUpdate,
+    lock_glyph_mapping, lock_grid_store, lock_message_grid_state, register_empty_grid,
 };
 
 use super::surface::NvimGridSurfaceOutput;
@@ -183,6 +183,23 @@ impl From<WindowFloatPlacementUpdate> for CWindowFloatPlacementUpdate {
         Self {
             republish_cursor: update.republish_cursor,
             require_full_redraw: update.require_full_redraw,
+        }
+    }
+}
+
+/// C representation of editor-owned state after float-to-split conversion.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct CWindowFloatToSplitUpdate {
+    grid_handle: VimHandleT,
+    republish_position: bool,
+}
+
+impl From<WindowFloatToSplitUpdate> for CWindowFloatToSplitUpdate {
+    fn from(update: WindowFloatToSplitUpdate) -> Self {
+        Self {
+            grid_handle: update.grid_id.as_native_handle(),
+            republish_position: update.republish_position,
         }
     }
 }
@@ -409,6 +426,34 @@ pub extern "C" fn grid_place_window_float_surface(
         .window_surface()
         .place_float(request, current_message_grid_id(), runtime, &mut output)
         .expect("floating-window placement must preserve rendering invariants")
+        .into()
+}
+
+/// Converts one floating-window surface into a split-window surface.
+#[unsafe(no_mangle)]
+pub extern "C" fn grid_convert_window_float_to_split(
+    grid_handle: VimHandleT,
+    multigrid_enabled: bool,
+) -> CWindowFloatToSplitUpdate {
+    assert!(
+        grid_handle > 0,
+        "window surface must have a valid grid identity"
+    );
+    let runtime = compositor_runtime_snapshot().expect("compositor runtime must be valid");
+    let mut output = NvimWindowSurfaceOutput::new();
+
+    registered_context()
+        .window_surface()
+        .convert_float_to_split(
+            WindowFloatConversionRequest {
+                grid_id: GridId::new(grid_handle),
+                message_grid_id: current_message_grid_id(),
+                multigrid_enabled,
+                runtime,
+            },
+            &mut output,
+        )
+        .expect("float-to-split conversion must preserve rendering invariants")
         .into()
 }
 

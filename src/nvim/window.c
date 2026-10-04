@@ -1376,13 +1376,11 @@ win_T *win_split_ins(int size, int flags, win_T *new_wp, int dir, frame_T *to_fl
     // make the contents of the new window the same as the current one
     win_init(wp, curwin, flags);
   } else if (wp->w_floating) {
-    ui_comp_remove_grid(wp->w_grid_handle);
-    if (ui_has(kUIMultigrid)) {
+    WindowFloatToSplitUpdate update =
+      grid_convert_window_float_to_split(wp->w_grid_handle, ui_has(kUIMultigrid));
+    wp->w_grid_handle = update.grid_handle;
+    if (update.republish_position) {
       wp->w_pos_changed = true;
-    } else {
-      // No longer a float, a non-multigrid UI shouldn't draw it as such
-      ui_call_win_hide(wp->w_grid_handle);
-      win_free_grid(wp, true);
     }
 
     // External windows are independent of tabpages, and may have been the curwin of others.

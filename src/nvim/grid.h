@@ -95,6 +95,11 @@ typedef struct {
 } WindowFloatPlacementUpdate;
 
 typedef struct {
+  handle_T grid_handle;
+  bool republish_position;
+} WindowFloatToSplitUpdate;
+
+typedef struct {
   int end_col;
   colnr_T end_vcol;
   size_t color_cols_consumed;
@@ -204,6 +209,9 @@ extern WindowSurfaceUpdate grid_configure_window_surface(
   WindowSurfaceRequest request);
 extern WindowFloatPlacementUpdate grid_place_window_float_surface(
   WindowFloatPlacementRequest request);
+extern WindowFloatToSplitUpdate grid_convert_window_float_to_split(
+  handle_T grid_handle,
+  bool multigrid_enabled);
 extern void grid_hide_window_surface(handle_T grid_handle,
                                      bool publish_hide);
 extern void grid_close_window_surface(handle_T grid_handle,
