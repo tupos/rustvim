@@ -107,6 +107,24 @@ pub(super) struct WindowFloatPlacementUpdate {
     pub(super) require_full_redraw: bool,
 }
 
+/// Complete native request for closing one window surface.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct WindowSurfaceCloseRequest {
+    pub(super) grid_id: GridId,
+    pub(super) message_grid_id: Option<GridId>,
+    pub(super) floating: bool,
+    pub(super) publish_close: bool,
+    pub(super) runtime: CompositorRuntime,
+}
+
+/// Complete native request for destroying one window surface.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct WindowSurfaceDestroyRequest {
+    pub(super) grid_id: GridId,
+    pub(super) publish_destroy: bool,
+    pub(super) create_replacement: bool,
+}
+
 /// Complete native request for hiding one window surface.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct WindowSurfaceHideRequest {
@@ -123,6 +141,9 @@ pub(super) trait WindowSurfaceOutput: GridSurfaceOutput {
 
     /// Publishes that a window surface is no longer visible.
     fn emit_window_hide(&mut self, grid_id: GridId);
+
+    /// Publishes that a window has closed.
+    fn emit_window_close(&mut self, grid_id: GridId);
 }
 
 /// Validated input for one complete window-grid configuration.
@@ -287,5 +308,49 @@ impl<'context> WindowSurface<'context> {
             request.runtime,
             output,
         )
+    }
+
+    /// Publishes window closure and removes its floating compositor layer.
+    pub(super) fn close(
+        &self,
+        request: WindowSurfaceCloseRequest,
+        output: &mut impl WindowSurfaceOutput,
+    ) -> CompositorResult<()> {
+        if request.publish_close {
+            output.emit_window_close(request.grid_id);
+        }
+
+        if request.floating {
+            self.compositor.remove_registered_grid(
+                self.grids,
+                request.grid_id,
+                request.message_grid_id,
+                request.runtime,
+                output,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Publishes destruction, retires the grid, and optionally replaces it.
+    pub(super) fn destroy(
+        &self,
+        request: WindowSurfaceDestroyRequest,
+        output: &mut impl WindowSurfaceOutput,
+    ) -> GridStoreResult<Option<GridId>> {
+        if request.publish_destroy {
+            output.emit_grid_destroy(request.grid_id);
+        }
+
+        let mut store = self.grids.lock_store();
+        store.remove(request.grid_id)?;
+        let replacement_grid_id = if request.create_replacement {
+            let grid_id = self.grids.allocate_grid_id();
+            store.register_empty(grid_id)?;
+            Some(grid_id)
+        } else {
+            None
+        };
+        Ok(replacement_grid_id)
     }
 }

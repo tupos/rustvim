@@ -64,8 +64,9 @@ use virtual_text::{VirtualText, VirtualTextChunk, VirtualTextRenderOptions};
 pub(crate) use window_surface::WindowSurface;
 use window_surface::{
     FloatAnchorPosition, WindowFloatAnchor, WindowFloatPlacementRequest,
-    WindowFloatPlacementUpdate, WindowFloatPositionEvent, WindowSurfaceHideRequest,
-    WindowSurfaceOutput, WindowSurfaceRequest, WindowSurfaceUpdate,
+    WindowFloatPlacementUpdate, WindowFloatPositionEvent, WindowSurfaceCloseRequest,
+    WindowSurfaceDestroyRequest, WindowSurfaceHideRequest, WindowSurfaceOutput,
+    WindowSurfaceRequest, WindowSurfaceUpdate,
 };
 
 /// if data[0] is 0xFF, then data[1..4] is a 24-bit index (in machine endianness)
@@ -1726,13 +1727,6 @@ fn register_empty_grid(grid_id: GridId) {
     lock_grid_store()
         .register_empty(grid_id)
         .expect("new grid identity must be valid and unique");
-}
-
-/// Removes one permanently stored grid and retires its stable identity.
-fn release_permanent_grid(grid_id: GridId) {
-    lock_grid_store()
-        .remove(grid_id)
-        .expect("permanent grid identity must resolve to its Rust grid");
 }
 
 /// The screen edge at which a line is truncated.
@@ -3615,8 +3609,8 @@ impl<'a> ArabicShaper<'a> {
 #[cfg(test)]
 mod tests {
     use super::ffi::lifecycle::{
-        CWindowSurfaceRequest, grid_configure_window_surface, grid_free, grid_is_allocated,
-        grid_require_full_redraw, grid_requires_compositor_invalidation,
+        CWindowSurfaceRequest, grid_configure_window_surface, grid_destroy_window_surface,
+        grid_is_allocated, grid_require_full_redraw, grid_requires_compositor_invalidation,
         grid_revalidate_for_redraw,
     };
     use super::ffi::message::{grid_prepare_for_messages, grid_release_message};
@@ -3927,7 +3921,8 @@ mod tests {
             assert!(grid.attrs.iter().all(|&attribute| attribute == -1));
         }
 
-        grid_free(assigned_handle);
+        let replacement = grid_destroy_window_surface(assigned_handle, false, false);
+        assert_eq!(replacement, 0);
         assert!(StoredGridGuard::acquire(grid_id).is_err());
         assert_eq!(
             lock_grid_store().window_view_descriptor(grid_id),
@@ -3938,7 +3933,7 @@ mod tests {
     #[test]
     fn retired_window_grid_identity_is_not_reused() {
         let first_handle = grid_assign_handle();
-        grid_free(first_handle);
+        grid_destroy_window_surface(first_handle, false, false);
 
         assert!(StoredGridGuard::acquire(GridId::new(first_handle)).is_err());
 
@@ -3947,7 +3942,7 @@ mod tests {
         assert_ne!(second_handle, first_handle);
         assert!(StoredGridGuard::acquire(GridId::new(second_handle)).is_ok());
 
-        grid_free(second_handle);
+        grid_destroy_window_surface(second_handle, false, false);
     }
 
     #[test]
@@ -4054,7 +4049,7 @@ mod tests {
             .release_storage();
         assert!(!grid_is_allocated(grid_handle));
 
-        release_permanent_grid(GridId::new(grid_handle));
+        grid_destroy_window_surface(grid_handle, false, false);
     }
 
     #[test]
@@ -5004,7 +4999,7 @@ mod tests {
             }
         );
 
-        grid_free(grid_handle);
+        grid_destroy_window_surface(grid_handle, false, false);
     }
 
     #[test]
@@ -5069,7 +5064,7 @@ mod tests {
         }
         assert!(!grid_is_allocated(grid_handle));
 
-        grid_free(grid_handle);
+        grid_destroy_window_surface(grid_handle, false, false);
         assert!(!grid_is_allocated(grid_handle));
         assert!(!grid_is_allocated(0));
         assert!(grid_requires_compositor_invalidation(grid_handle, false));
@@ -5112,7 +5107,7 @@ mod tests {
         assert!(StoredGridGuard::acquire(grid_id).is_ok());
         assert!(!grid_is_allocated(assigned_handle));
 
-        release_permanent_grid(grid_id);
+        grid_destroy_window_surface(assigned_handle, false, false);
     }
 
     #[test]

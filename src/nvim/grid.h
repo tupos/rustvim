@@ -204,6 +204,12 @@ extern WindowFloatPlacementUpdate grid_place_window_float_surface(
   WindowFloatPlacementRequest request);
 extern void grid_hide_window_surface(handle_T grid_handle,
                                      bool publish_hide);
+extern void grid_close_window_surface(handle_T grid_handle,
+                                      bool floating,
+                                      bool publish_close);
+extern handle_T grid_destroy_window_surface(handle_T grid_handle,
+                                            bool publish_destroy,
+                                            bool create_replacement);
 extern handle_T grid_update_popup_menu_surface(PopupMenuSurfaceRequest request);
 extern void grid_hide_popup_menu_surface(handle_T grid_handle, bool publish_ui_events);
 extern void grid_recompose_popup_menu_surface(handle_T grid_handle);
@@ -236,7 +242,6 @@ extern void grid_flush_message_scroll(handle_T grid_handle,
 extern void grid_refresh_message_ui(handle_T grid_handle, int position, bool scrolled,
                                     MessageGridPositionConfig config,
                                     MessageGridPositionEmitter emit_position);
-extern void grid_free(handle_T grid_handle);
 extern void grid_free_all_mem(void);
 extern bool grid_clear_default(bool valid);
 extern void grid_clear_default_rows(int start_row, int end_row, bool valid);

@@ -2976,12 +2976,9 @@ int win_close(win_T *win, bool free_buf, bool force)
   split_disallowed++;
 
   bool was_floating = win->w_floating;
-  if (ui_has(kUIMultigrid)) {
-    ui_call_win_close(win->w_grid_handle);
-  }
-
+  grid_close_window_surface(win->w_grid_handle, win->w_floating,
+                            ui_has(kUIMultigrid));
   if (win->w_floating) {
-    ui_comp_remove_grid(win->w_grid_handle);
     assert(first_tabpage != NULL);  // suppress clang "Dereference of NULL pointer"
     if (win->w_config.external) {
       FOR_ALL_TABS(tp) {
@@ -3290,12 +3287,8 @@ bool win_close_othertab(win_T *win, int free_buf, tabpage_T *tp, bool force)
     }
   }
 
-  if (ui_has(kUIMultigrid)) {
-    ui_call_win_close(win->w_grid_handle);
-  }
-  if (win->w_floating) {
-    ui_comp_remove_grid(win->w_grid_handle);
-  }
+  grid_close_window_surface(win->w_grid_handle, win->w_floating,
+                            ui_has(kUIMultigrid));
 
   // About to free the window. Remember its final buffer for terminal_check_size/TabClosed,
   // which may have changed since the last set_bufref. (e.g: close_buffer autocmds)
@@ -5702,15 +5695,10 @@ void win_free(win_T *wp, tabpage_T *tp)
 
 void win_free_grid(win_T *wp, bool reinit)
 {
-  if (wp->w_grid_handle != 0 && ui_has(kUIMultigrid)) {
-    ui_call_grid_destroy(wp->w_grid_handle);
-  }
-  grid_free(wp->w_grid_handle);
-  wp->w_grid_handle = 0;
-  if (reinit) {
-    // if a float is turned into a split, the grid data structure will be reused
-    wp->w_grid_handle = grid_assign_handle();
-  }
+  // If a float is turned into a split, a new grid identity is returned for
+  // the reused window structure.
+  wp->w_grid_handle = grid_destroy_window_surface(
+    wp->w_grid_handle, ui_has(kUIMultigrid), reinit);
 }
 
 /// (Re)allocates a window grid if its required storage changed.
