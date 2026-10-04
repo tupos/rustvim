@@ -73,26 +73,33 @@ typedef struct {
 typedef struct {
   handle_T grid_handle;
   handle_T window_handle;
-  int row;
-  int column;
+  double anchor_row;
+  double anchor_column;
   int rows;
   int columns;
+  int screen_rows;
+  int screen_columns;
+  int reserved_rows;
   int z_index;
   bool blending;
   bool valid;
   bool accepts_mouse_input;
   handle_T current_window_grid_handle;
   int anchor;
-  handle_T anchor_grid_handle;
-  double anchor_row;
-  double anchor_column;
+  handle_T anchor_window_grid_handle;
+  int anchor_window_row;
+  int anchor_window_column;
+  bool fixed;
+  bool hidden;
   bool multigrid_enabled;
-} WindowFloatPlacementRequest;
+} WindowFloatSurfaceRequest;
 
 typedef struct {
   bool republish_cursor;
   bool require_full_redraw;
-} WindowFloatPlacementUpdate;
+  int screen_row;
+  int screen_column;
+} WindowFloatSurfaceUpdate;
 
 typedef struct {
   handle_T grid_handle;
@@ -207,8 +214,8 @@ extern void grid_initialize_default(void);
 extern bool grid_configure_default(int rows, int columns);
 extern WindowSurfaceUpdate grid_configure_window_surface(
   WindowSurfaceRequest request);
-extern WindowFloatPlacementUpdate grid_place_window_float_surface(
-  WindowFloatPlacementRequest request);
+extern WindowFloatSurfaceUpdate grid_update_window_float_surface(
+  WindowFloatSurfaceRequest request);
 extern WindowFloatToSplitUpdate grid_convert_window_float_to_split(
   handle_T grid_handle,
   bool multigrid_enabled);

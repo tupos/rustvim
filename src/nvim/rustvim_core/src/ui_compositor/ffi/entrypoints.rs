@@ -417,37 +417,6 @@ pub unsafe extern "C" fn ui_comp_grid_hit_at_coord(
     true
 }
 
-/// Returns the composed-screen origin of one registered grid.
-///
-/// # Safety
-///
-/// `row` and `column` must point to writable integers.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn ui_comp_grid_origin(
-    grid_handle: Integer,
-    row: *mut libc::c_int,
-    column: *mut libc::c_int,
-) -> bool {
-    let (Ok(grid_handle), Some(mut row), Some(mut column)) = (
-        i32::try_from(grid_handle),
-        NonNull::new(row),
-        NonNull::new(column),
-    ) else {
-        return false;
-    };
-    let Ok(Some(origin)) = lock_compositor().grid_origin(GridId::new(grid_handle)) else {
-        return false;
-    };
-
-    // SAFETY: Both output pointers were checked for null above. The caller
-    // guarantees that they point to writable integers.
-    unsafe {
-        *row.as_mut() = origin.row;
-        *column.as_mut() = origin.column;
-    }
-    true
-}
-
 /// Reports whether one registered grid must publish its current layer index.
 #[unsafe(no_mangle)]
 pub extern "C" fn ui_comp_grid_publication_pending(grid_handle: Integer) -> bool {

@@ -6,8 +6,8 @@ use std::sync::{Mutex, MutexGuard};
 
 use crate::{
     grid::{
-        ComposedGridSpace, DEFAULT_GRID_ID, GridContext, GridId, GridPosition, GridSize, GridStore,
-        LocalGridSpace,
+        ComposedGridSpace, ComposedPosition, DEFAULT_GRID_ID, GridContext, GridId, GridPosition,
+        GridSize, GridStore, LocalGridSpace,
     },
     ui::{
         LineFlags,
@@ -235,6 +235,14 @@ impl CompositorContext {
         self.lock_state()
             .grid_publication_pending(grid_id)
             .unwrap_or(false)
+    }
+
+    /// Returns the composed-screen origin of one registered grid.
+    pub(crate) fn registered_grid_origin(
+        &self,
+        grid_id: GridId,
+    ) -> CompositorResult<Option<ComposedPosition>> {
+        self.lock_state().grid_origin(grid_id)
     }
 
     /// Takes a registered grid's current layer-index publication.

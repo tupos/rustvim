@@ -8,8 +8,8 @@ use crate::ui_compositor::{
 };
 
 use super::{
-    ComposedPosition, GridContext, GridId, GridLifecycleChange, GridPosition, GridSurfaceOutput,
-    WindowGridMode,
+    ComposedPosition, GridContext, GridId, GridLifecycleChange, GridPosition, GridSize,
+    GridSurfaceOutput, WindowGridMode,
     store::{GridStoreError, GridStoreResult},
 };
 
@@ -36,53 +36,180 @@ pub(super) enum WindowFloatAnchor {
     SouthEast,
 }
 
-/// Validated input for placing one visible floating-window surface.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(super) struct WindowFloatPlacementRequest {
+impl WindowFloatAnchor {
+    /// Reports whether the window extends left from its anchor column.
+    const fn is_east(self) -> bool {
+        matches!(self, Self::NorthEast | Self::SouthEast)
+    }
+
+    /// Reports whether the window extends up from its anchor row.
+    const fn is_south(self) -> bool {
+        matches!(self, Self::SouthWest | Self::SouthEast)
+    }
+}
+
+/// Window whose grid view supplies a floating window's anchor grid.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct WindowFloatAnchorWindow {
     grid_id: GridId,
-    window_handle: i32,
-    placement: CompositorGridPlacement,
+    fallback_origin: ComposedPosition,
+}
+
+impl WindowFloatAnchorWindow {
+    /// Describes the anchor window and its C-owned fallback screen origin.
+    pub(super) const fn new(grid_id: GridId, fallback_origin: ComposedPosition) -> Self {
+        Self {
+            grid_id,
+            fallback_origin,
+        }
+    }
+}
+
+/// Geometry needed to resolve one floating window into composed-screen space.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct WindowFloatGeometry {
+    anchor_position: FloatAnchorPosition,
+    size: GridSize,
+    screen_size: GridSize,
+    reserved_rows: i32,
+    fixed: bool,
+}
+
+impl WindowFloatGeometry {
+    /// Builds validated floating-window geometry.
+    pub(super) fn try_new(
+        anchor_position: FloatAnchorPosition,
+        size: GridSize,
+        screen_size: GridSize,
+        reserved_rows: i32,
+        fixed: bool,
+    ) -> Option<Self> {
+        (reserved_rows >= 0).then_some(Self {
+            anchor_position,
+            size,
+            screen_size,
+            reserved_rows,
+            fixed,
+        })
+    }
+
+    /// Resolves anchor-relative geometry and clips it to the composed screen.
+    fn resolve(
+        self,
+        anchor: WindowFloatAnchor,
+        anchor_grid_id: GridId,
+        view_offset: GridPosition,
+        anchor_grid_origin: ComposedPosition,
+    ) -> Option<ResolvedWindowFloatGeometry> {
+        let anchor_position = FloatAnchorPosition::try_new(
+            self.anchor_position.row + f64::from(view_offset.row),
+            self.anchor_position.column + f64::from(view_offset.column),
+        )?;
+        let mut row = (anchor_position.row as i32).saturating_add(anchor_grid_origin.row);
+        let mut column = (anchor_position.column as i32).saturating_add(anchor_grid_origin.column);
+
+        if anchor.is_south() {
+            row = row.saturating_sub(self.size.height);
+        }
+        if anchor.is_east() {
+            column = column.saturating_sub(self.size.width);
+        }
+
+        let maximum_row = self
+            .screen_size
+            .height
+            .saturating_sub(self.size.height)
+            .saturating_sub(self.reserved_rows);
+        row = row.min(maximum_row).max(0);
+        if !self.fixed || anchor.is_east() {
+            let maximum_column = self.screen_size.width.saturating_sub(self.size.width);
+            column = column.min(maximum_column).max(0);
+        }
+
+        Some(ResolvedWindowFloatGeometry {
+            placement: CompositorGridPlacement::try_new(
+                row,
+                column,
+                self.size.height,
+                self.size.width,
+            )?,
+            anchor_grid_id,
+            anchor_position,
+        })
+    }
+}
+
+/// Compositor policy attached to one floating-window layer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct WindowFloatLayerPolicy {
     z_index: i32,
     blending: bool,
     valid: bool,
     accepts_mouse_input: bool,
     current_window_grid_id: Option<GridId>,
-    anchor: WindowFloatAnchor,
-    anchor_grid_id: GridId,
-    anchor_position: FloatAnchorPosition,
+    hidden: bool,
     multigrid_enabled: bool,
 }
 
-impl WindowFloatPlacementRequest {
-    /// Builds one request from validated native Rust values.
-    #[allow(clippy::too_many_arguments)]
+impl WindowFloatLayerPolicy {
+    /// Groups validated layer policy independently from float geometry.
     pub(super) const fn new(
-        grid_id: GridId,
-        window_handle: i32,
-        placement: CompositorGridPlacement,
         z_index: i32,
         blending: bool,
         valid: bool,
         accepts_mouse_input: bool,
         current_window_grid_id: Option<GridId>,
-        anchor: WindowFloatAnchor,
-        anchor_grid_id: GridId,
-        anchor_position: FloatAnchorPosition,
+        hidden: bool,
         multigrid_enabled: bool,
     ) -> Self {
         Self {
-            grid_id,
-            window_handle,
-            placement,
             z_index,
             blending,
             valid,
             accepts_mouse_input,
             current_window_grid_id,
-            anchor,
-            anchor_grid_id,
-            anchor_position,
+            hidden,
             multigrid_enabled,
+        }
+    }
+}
+
+/// Geometry resolved against the anchor view and compositor layer stack.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct ResolvedWindowFloatGeometry {
+    placement: CompositorGridPlacement,
+    anchor_grid_id: GridId,
+    anchor_position: FloatAnchorPosition,
+}
+
+/// Validated input for updating one floating-window surface.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct WindowFloatSurfaceRequest {
+    grid_id: GridId,
+    window_handle: i32,
+    anchor: WindowFloatAnchor,
+    anchor_window: Option<WindowFloatAnchorWindow>,
+    geometry: WindowFloatGeometry,
+    layer_policy: WindowFloatLayerPolicy,
+}
+
+impl WindowFloatSurfaceRequest {
+    /// Builds one request from validated native Rust values.
+    pub(super) const fn new(
+        grid_id: GridId,
+        window_handle: i32,
+        anchor: WindowFloatAnchor,
+        anchor_window: Option<WindowFloatAnchorWindow>,
+        geometry: WindowFloatGeometry,
+        layer_policy: WindowFloatLayerPolicy,
+    ) -> Self {
+        Self {
+            grid_id,
+            window_handle,
+            anchor,
+            anchor_window,
+            geometry,
+            layer_policy,
         }
     }
 }
@@ -101,11 +228,12 @@ pub(super) struct WindowFloatPositionEvent {
     pub(super) screen_position: ComposedPosition,
 }
 
-/// Editor-owned actions produced after floating-window placement.
+/// Editor-owned actions produced after updating a floating-window surface.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct WindowFloatPlacementUpdate {
+pub(super) struct WindowFloatSurfaceUpdate {
     pub(super) republish_cursor: bool,
     pub(super) require_full_redraw: bool,
+    pub(super) screen_position: ComposedPosition,
 }
 
 /// Inputs controlling conversion of one floating window into a split.
@@ -289,34 +417,53 @@ impl<'context> WindowSurface<'context> {
         })
     }
 
-    /// Places one visible floating window and publishes its multigrid event.
-    pub(super) fn place_float(
+    /// Resolves and updates one floating window, including hidden surfaces.
+    pub(super) fn update_float(
         &self,
-        request: WindowFloatPlacementRequest,
+        request: WindowFloatSurfaceRequest,
         message_grid_id: Option<GridId>,
         runtime: CompositorRuntime,
         output: &mut impl WindowSurfaceOutput,
-    ) -> CompositorResult<WindowFloatPlacementUpdate> {
+    ) -> WindowSurfaceResult<WindowFloatSurfaceUpdate> {
+        let resolved = self.resolve_float_geometry(request)?;
+
+        if request.layer_policy.hidden {
+            self.hide(
+                WindowSurfaceHideRequest {
+                    grid_id: request.grid_id,
+                    message_grid_id,
+                    publish_hide: request.layer_policy.multigrid_enabled,
+                    runtime,
+                },
+                output,
+            )?;
+            return Ok(WindowFloatSurfaceUpdate {
+                republish_cursor: false,
+                require_full_redraw: false,
+                screen_position: resolved.placement.origin(),
+            });
+        }
+
         self.compositor.place_registered_grid(
             self.grids,
             RegisteredGridPlacement::new(
                 request.grid_id,
-                request.current_window_grid_id,
+                request.layer_policy.current_window_grid_id,
                 message_grid_id,
                 CompositorGridPlacementRequest::new(
-                    request.placement,
-                    request.z_index,
-                    request.blending,
-                    request.valid,
+                    resolved.placement,
+                    request.layer_policy.z_index,
+                    request.layer_policy.blending,
+                    request.layer_policy.valid,
                     false,
-                    request.accepts_mouse_input,
+                    request.layer_policy.accepts_mouse_input,
                 ),
                 runtime,
             ),
             output,
         )?;
 
-        if request.multigrid_enabled {
+        if request.layer_policy.multigrid_enabled {
             let compositor_index = self
                 .compositor
                 .take_registered_grid_publication(request.grid_id, false)?
@@ -325,19 +472,60 @@ impl<'context> WindowSurface<'context> {
                 grid_id: request.grid_id,
                 window_handle: request.window_handle,
                 anchor: request.anchor,
-                anchor_grid_id: request.anchor_grid_id,
-                anchor_position: request.anchor_position,
-                accepts_mouse_input: request.accepts_mouse_input,
-                z_index: request.z_index,
+                anchor_grid_id: resolved.anchor_grid_id,
+                anchor_position: resolved.anchor_position,
+                accepts_mouse_input: request.layer_policy.accepts_mouse_input,
+                z_index: request.layer_policy.z_index,
                 compositor_index,
-                screen_position: request.placement.origin(),
+                screen_position: resolved.placement.origin(),
             });
         }
 
-        Ok(WindowFloatPlacementUpdate {
+        Ok(WindowFloatSurfaceUpdate {
             republish_cursor: true,
-            require_full_redraw: !request.valid,
+            require_full_redraw: !request.layer_policy.valid,
+            screen_position: resolved.placement.origin(),
         })
+    }
+
+    /// Resolves a float's anchor view, compositor origin, and screen bounds.
+    fn resolve_float_geometry(
+        &self,
+        request: WindowFloatSurfaceRequest,
+    ) -> WindowSurfaceResult<ResolvedWindowFloatGeometry> {
+        let (anchor_grid_id, view_offset, anchor_grid_origin) =
+            if let Some(anchor_window) = request.anchor_window {
+                let descriptor = self
+                    .grids
+                    .lock_store()
+                    .window_view_descriptor(anchor_window.grid_id)?;
+                let origin = if descriptor.target == super::DEFAULT_GRID_ID {
+                    ComposedPosition::new(0, 0)
+                } else {
+                    self.compositor
+                        .registered_grid_origin(descriptor.target)?
+                        .unwrap_or(anchor_window.fallback_origin)
+                };
+                (descriptor.target, descriptor.offset, origin)
+            } else {
+                (
+                    super::DEFAULT_GRID_ID,
+                    GridPosition::new(0, 0),
+                    ComposedPosition::new(0, 0),
+                )
+            };
+
+        request
+            .geometry
+            .resolve(
+                request.anchor,
+                anchor_grid_id,
+                view_offset,
+                anchor_grid_origin,
+            )
+            .ok_or(WindowSurfaceError::Compositor(
+                CompositorError::InvalidGeometry,
+            ))
     }
 
     /// Removes floating state and prepares the same window for split layout.

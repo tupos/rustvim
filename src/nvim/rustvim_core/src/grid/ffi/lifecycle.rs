@@ -5,16 +5,15 @@ use crate::{
     defines::{CVimString, Integer},
     globals,
     ui::output::{RawLineCells, RawLineCommand, UiCommand, UiOutput},
-    ui_compositor::{
-        CompositorGridPlacement, compositor_runtime_snapshot, current_message_grid_id,
-    },
+    ui_compositor::{compositor_runtime_snapshot, current_message_grid_id},
 };
 
 use super::super::{
-    ComposedGridSpace, DEFAULT_GRID_ID, FloatAnchorPosition, GlyphMapping, GridId,
-    GridLifecycleChange, GridPosition, GridSize, GridSurfaceOutput, LineBufferGuard,
-    MessageGridState, StoredGridGuard, VimHandleT, WindowFloatAnchor, WindowFloatConversionRequest,
-    WindowFloatPlacementRequest, WindowFloatPlacementUpdate, WindowFloatPositionEvent,
+    ComposedGridSpace, ComposedPosition, DEFAULT_GRID_ID, FloatAnchorPosition, GlyphMapping,
+    GridId, GridLifecycleChange, GridPosition, GridSize, GridSurfaceOutput, LineBufferGuard,
+    MessageGridState, StoredGridGuard, VimHandleT, WindowFloatAnchor, WindowFloatAnchorWindow,
+    WindowFloatConversionRequest, WindowFloatGeometry, WindowFloatLayerPolicy,
+    WindowFloatPositionEvent, WindowFloatSurfaceRequest, WindowFloatSurfaceUpdate,
     WindowFloatToSplitUpdate, WindowGridMode, WindowPositionFlushRequest,
     WindowPositionFlushUpdate, WindowSurfaceCloseRequest, WindowSurfaceDestroyRequest,
     WindowSurfaceHideRequest, WindowSurfaceOutput, WindowSurfaceRequest, WindowSurfaceUpdate,
@@ -112,32 +111,37 @@ impl From<WindowSurfaceUpdate> for CWindowSurfaceUpdate {
     }
 }
 
-/// C representation of one complete visible floating-window placement.
+/// C representation of one complete floating-window surface update.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
-pub struct CWindowFloatPlacementRequest {
+pub struct CWindowFloatSurfaceRequest {
     grid_handle: VimHandleT,
     window_handle: VimHandleT,
-    row: libc::c_int,
-    column: libc::c_int,
+    anchor_row: f64,
+    anchor_column: f64,
     rows: libc::c_int,
     columns: libc::c_int,
+    screen_rows: libc::c_int,
+    screen_columns: libc::c_int,
+    reserved_rows: libc::c_int,
     z_index: libc::c_int,
     blending: bool,
     valid: bool,
     accepts_mouse_input: bool,
     current_window_grid_handle: VimHandleT,
     anchor: libc::c_int,
-    anchor_grid_handle: VimHandleT,
-    anchor_row: f64,
-    anchor_column: f64,
+    anchor_window_grid_handle: VimHandleT,
+    anchor_window_row: libc::c_int,
+    anchor_window_column: libc::c_int,
+    fixed: bool,
+    hidden: bool,
     multigrid_enabled: bool,
 }
 
-impl CWindowFloatPlacementRequest {
+impl CWindowFloatSurfaceRequest {
     /// Converts C-owned floating-window state into a validated native request.
-    fn try_into_native(self) -> Option<WindowFloatPlacementRequest> {
-        if self.grid_handle <= 0 || self.window_handle <= 0 || self.anchor_grid_handle <= 0 {
+    fn try_into_native(self) -> Option<WindowFloatSurfaceRequest> {
+        if self.grid_handle <= 0 || self.window_handle <= 0 {
             return None;
         }
         let current_window_grid_id = match self.current_window_grid_handle {
@@ -152,37 +156,59 @@ impl CWindowFloatPlacementRequest {
             3 => WindowFloatAnchor::SouthEast,
             _ => return None,
         };
-
-        Some(WindowFloatPlacementRequest::new(
-            GridId::new(self.grid_handle),
-            self.window_handle,
-            CompositorGridPlacement::try_new(self.row, self.column, self.rows, self.columns)?,
+        let anchor_window = match self.anchor_window_grid_handle {
+            0 => None,
+            handle if handle > 0 => Some(WindowFloatAnchorWindow::new(
+                GridId::new(handle),
+                ComposedPosition::new(self.anchor_window_row, self.anchor_window_column),
+            )),
+            _ => return None,
+        };
+        let geometry = WindowFloatGeometry::try_new(
+            FloatAnchorPosition::try_new(self.anchor_row, self.anchor_column)?,
+            GridSize::try_new(self.rows, self.columns)?,
+            GridSize::try_new(self.screen_rows, self.screen_columns)?,
+            self.reserved_rows,
+            self.fixed,
+        )?;
+        let layer_policy = WindowFloatLayerPolicy::new(
             self.z_index,
             self.blending,
             self.valid,
             self.accepts_mouse_input,
             current_window_grid_id,
-            anchor,
-            GridId::new(self.anchor_grid_handle),
-            FloatAnchorPosition::try_new(self.anchor_row, self.anchor_column)?,
+            self.hidden,
             self.multigrid_enabled,
+        );
+
+        Some(WindowFloatSurfaceRequest::new(
+            GridId::new(self.grid_handle),
+            self.window_handle,
+            anchor,
+            anchor_window,
+            geometry,
+            layer_policy,
         ))
     }
 }
 
-/// C representation of editor-owned actions after float placement.
+/// C representation of editor-owned actions after a float-surface update.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
-pub struct CWindowFloatPlacementUpdate {
+pub struct CWindowFloatSurfaceUpdate {
     republish_cursor: bool,
     require_full_redraw: bool,
+    screen_row: libc::c_int,
+    screen_column: libc::c_int,
 }
 
-impl From<WindowFloatPlacementUpdate> for CWindowFloatPlacementUpdate {
-    fn from(update: WindowFloatPlacementUpdate) -> Self {
+impl From<WindowFloatSurfaceUpdate> for CWindowFloatSurfaceUpdate {
+    fn from(update: WindowFloatSurfaceUpdate) -> Self {
         Self {
             republish_cursor: update.republish_cursor,
             require_full_redraw: update.require_full_redraw,
+            screen_row: update.screen_position.row,
+            screen_column: update.screen_position.column,
         }
     }
 }
@@ -411,21 +437,21 @@ pub extern "C" fn grid_configure_window_surface(
         .unwrap_or_else(|_| CWindowSurfaceUpdate::invalid())
 }
 
-/// Places one visible floating-window surface and publishes its position.
+/// Resolves and updates one complete floating-window surface.
 #[unsafe(no_mangle)]
-pub extern "C" fn grid_place_window_float_surface(
-    request: CWindowFloatPlacementRequest,
-) -> CWindowFloatPlacementUpdate {
+pub extern "C" fn grid_update_window_float_surface(
+    request: CWindowFloatSurfaceRequest,
+) -> CWindowFloatSurfaceUpdate {
     let request = request
         .try_into_native()
-        .expect("floating-window placement must contain valid editor state");
+        .expect("floating-window update must contain valid editor state");
     let runtime = compositor_runtime_snapshot().expect("compositor runtime must be valid");
     let mut output = NvimWindowSurfaceOutput::new();
 
     registered_context()
         .window_surface()
-        .place_float(request, current_message_grid_id(), runtime, &mut output)
-        .expect("floating-window placement must preserve rendering invariants")
+        .update_float(request, current_message_grid_id(), runtime, &mut output)
+        .expect("floating-window update must preserve rendering invariants")
         .into()
 }
 

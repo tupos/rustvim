@@ -75,7 +75,6 @@
 #include "nvim/terminal.h"
 #include "nvim/types_defs.h"
 #include "nvim/ui.h"
-#include "nvim/ui_compositor.h"
 #include "nvim/ui_defs.h"
 #include "nvim/undo.h"
 #include "nvim/vim_defs.h"
@@ -884,11 +883,11 @@ void ui_ext_win_position(win_T *wp, bool validate)
 
   WinConfig c = wp->w_config;
   if (!c.external) {
-    handle_T anchor_grid_handle = DEFAULT_GRID_HANDLE;
+    handle_T anchor_window_grid_handle = 0;
     Float row = c.row;
     Float col = c.col;
-    int anchor_grid_row = 0;
-    int anchor_grid_col = 0;
+    int anchor_window_row = 0;
+    int anchor_window_col = 0;
     if (c.relative == kFloatRelativeWindow) {
       Error dummy = ERROR_INIT;
       win_T *win = find_window_by_handle(c.window, &dummy);
@@ -900,18 +899,10 @@ void ui_ext_win_position(win_T *wp, bool validate)
             && win_valid(win)) {
           ui_ext_win_position(win, validate);
         }
-        int row_off = 0;
-        int col_off = 0;
         win_grid_alloc(win);
-        anchor_grid_handle = grid_view_translate(win->w_grid_handle, &row_off, &col_off);
-        row += row_off;
-        col += col_off;
-        if (anchor_grid_handle != DEFAULT_GRID_HANDLE) {
-          if (!ui_comp_grid_origin(anchor_grid_handle, &anchor_grid_row, &anchor_grid_col)) {
-            anchor_grid_row = win->w_winrow;
-            anchor_grid_col = win->w_wincol;
-          }
-        }
+        anchor_window_grid_handle = win->w_grid_handle;
+        anchor_window_row = win->w_winrow;
+        anchor_window_col = win->w_wincol;
         if (c.bufpos.lnum >= 0) {
           int lnum = MIN(c.bufpos.lnum + 1, win->w_buffer->b_ml.ml_line_count);
           pos_T pos = { lnum, c.bufpos.col, 0 };
@@ -936,51 +927,38 @@ void ui_ext_win_position(win_T *wp, bool validate)
 
     // TODO(bfredl): ideally, compositor should work like any multigrid UI
     // and use standard win_pos events.
-    bool east = c.anchor & kFloatAnchorEast;
-    bool south = c.anchor & kFloatAnchorSouth;
-
-    int comp_row = (int)row - (south ? wp->w_height_outer : 0);
-    int comp_col = (int)col - (east ? wp->w_width_outer : 0);
-    int above_ch = wp->w_config.zindex < kZIndexMessages ? (int)p_ch : 0;
-    comp_row += anchor_grid_row;
-    comp_col += anchor_grid_col;
-    comp_row = MAX(MIN(comp_row, Rows - wp->w_height_outer - above_ch), 0);
-    if (!c.fixed || east) {
-      comp_col = MAX(MIN(comp_col, Columns - wp->w_width_outer), 0);
+    WindowFloatSurfaceUpdate update = grid_update_window_float_surface(
+      (WindowFloatSurfaceRequest){
+        .grid_handle = wp->w_grid_handle,
+        .window_handle = wp->handle,
+        .anchor_row = row,
+        .anchor_column = col,
+        .rows = wp->w_height_outer,
+        .columns = wp->w_width_outer,
+        .screen_rows = Rows,
+        .screen_columns = Columns,
+        .reserved_rows = c.zindex < kZIndexMessages ? (int)p_ch : 0,
+        .z_index = c.zindex,
+        .blending = wp->w_p_winbl > 0 || c.shadow,
+        .valid = valid,
+        .accepts_mouse_input = c.mouse,
+        .current_window_grid_handle = curwin ? curwin->w_grid_handle : 0,
+        .anchor = c.anchor,
+        .anchor_window_grid_handle = anchor_window_grid_handle,
+        .anchor_window_row = anchor_window_row,
+        .anchor_window_column = anchor_window_col,
+        .fixed = c.fixed,
+        .hidden = c.hide,
+        .multigrid_enabled = ui_has(kUIMultigrid),
+      });
+    wp->w_winrow = update.screen_row;
+    wp->w_wincol = update.screen_column;
+    if (update.republish_cursor) {
+      ui_check_cursor_grid(wp->w_grid_handle);
     }
-    wp->w_winrow = comp_row;
-    wp->w_wincol = comp_col;
-
-    if (!c.hide) {
-      WindowFloatPlacementUpdate update = grid_place_window_float_surface(
-        (WindowFloatPlacementRequest){
-          .grid_handle = wp->w_grid_handle,
-          .window_handle = wp->handle,
-          .row = comp_row,
-          .column = comp_col,
-          .rows = wp->w_height_outer,
-          .columns = wp->w_width_outer,
-          .z_index = c.zindex,
-          .blending = wp->w_p_winbl > 0 || c.shadow,
-          .valid = valid,
-          .accepts_mouse_input = c.mouse,
-          .current_window_grid_handle = curwin ? curwin->w_grid_handle : 0,
-          .anchor = c.anchor,
-          .anchor_grid_handle = anchor_grid_handle,
-          .anchor_row = row,
-          .anchor_column = col,
-          .multigrid_enabled = ui_has(kUIMultigrid),
-        });
-      if (update.republish_cursor) {
-        ui_check_cursor_grid(wp->w_grid_handle);
-      }
-      if (update.require_full_redraw) {
-        grid_require_full_redraw(wp->w_grid_handle);
-        redraw_later(wp, UPD_NOT_VALID);
-      }
-    } else {
-      grid_hide_window_surface(wp->w_grid_handle,
-                               ui_has(kUIMultigrid));
+    if (update.require_full_redraw) {
+      grid_require_full_redraw(wp->w_grid_handle);
+      redraw_later(wp, UPD_NOT_VALID);
     }
   } else {
     ui_call_win_external_pos(wp->w_grid_handle, wp->handle);
