@@ -1,13 +1,20 @@
 //! C boundary adapters for persistent grid views.
 
-use crate::ui::GridOutputTarget;
-
-use super::super::{
-    CGridCell, CMessageGridPositionConfig, CMessageGridPositionEmitter, DEFAULT_GRID_ID, GridId,
-    GridPosition, GridSize, GridViewDescriptor, StoredGridGuard, VimHandleT,
-    WindowLineScrollRequest, lock_grid_store, lock_message_grid_state,
-};
+use super::super::CGridCell;
+use super::super::CMessageGridPositionConfig;
+use super::super::CMessageGridPositionEmitter;
+use super::super::DEFAULT_GRID_ID;
+use super::super::GridId;
+use super::super::GridPosition;
+use super::super::GridSize;
+use super::super::GridViewDescriptor;
+use super::super::StoredGridGuard;
+use super::super::VimHandleT;
+use super::super::WindowLineScrollRequest;
+use super::super::lock_grid_store;
+use super::super::lock_message_grid_state;
 use super::message::publish_message_grid_position;
+use crate::ui::GridOutputTarget;
 
 /// Reports whether a window grid owns a registered view.
 #[unsafe(no_mangle)]

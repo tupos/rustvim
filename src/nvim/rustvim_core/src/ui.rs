@@ -1,30 +1,36 @@
 pub(crate) mod output;
 
-use std::{
-    ffi::CString,
-    sync::{
-        Mutex, MutexGuard,
-        atomic::{AtomicBool, Ordering},
-    },
-};
+use std::ffi::CString;
+use std::sync::Mutex;
+use std::sync::MutexGuard;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 
-use crate::{
-    context::registered_context,
-    defines::{Integer, OptInt},
-    generated::enums::RdbFlags,
-    grid::{
-        DEFAULT_GRID_ID, GridId, GridPosition, GridRow, LocalGridSpace, ScreenGrid, VimHandleT,
-        VimSAttrT, VimSCharT,
-    },
-    ui_compositor::{
-        CompositorEventOutputs, CompositorScrollRequest, NvimComposedOutput,
-        compositor_runtime_snapshot, current_message_grid_id,
-    },
-};
+use output::CellBufferPool;
+use output::OwnedRawLineCommand;
+use output::RawLineCells;
+use output::RawLineCommand;
+use output::UiCommand;
+use output::UiOutput;
 
-use output::{
-    CellBufferPool, OwnedRawLineCommand, RawLineCells, RawLineCommand, UiCommand, UiOutput,
-};
+use crate::context::registered_context;
+use crate::defines::Integer;
+use crate::defines::OptInt;
+use crate::generated::enums::RdbFlags;
+use crate::grid::DEFAULT_GRID_ID;
+use crate::grid::GridId;
+use crate::grid::GridPosition;
+use crate::grid::GridRow;
+use crate::grid::LocalGridSpace;
+use crate::grid::ScreenGrid;
+use crate::grid::VimHandleT;
+use crate::grid::VimSAttrT;
+use crate::grid::VimSCharT;
+use crate::ui_compositor::CompositorEventOutputs;
+use crate::ui_compositor::CompositorScrollRequest;
+use crate::ui_compositor::NvimComposedOutput;
+use crate::ui_compositor::compositor_runtime_snapshot;
+use crate::ui_compositor::current_message_grid_id;
 
 // TODO: move to highlight
 pub type RgbValue = i32;

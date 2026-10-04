@@ -2,11 +2,12 @@
 
 use std::sync::OnceLock;
 
-use crate::{
-    grid::{GridContext, MessageSurface, PopupMenuSurface, WindowSurface},
-    ui::UiContext,
-    ui_compositor::CompositorContext,
-};
+use crate::grid::GridContext;
+use crate::grid::MessageSurface;
+use crate::grid::PopupMenuSurface;
+use crate::grid::WindowSurface;
+use crate::ui::UiContext;
+use crate::ui_compositor::CompositorContext;
 
 /// Root of all Rust-owned runtime state.
 ///

@@ -1,7 +1,12 @@
-use super::{
-    GlyphMapping, Highlight, LineBuffer, TextGlyph, TextGlyphContents, VimColNrT,
-    VirtualTextHighlightMode, mbyte, tabstops::TabStops,
-};
+use super::GlyphMapping;
+use super::Highlight;
+use super::LineBuffer;
+use super::TextGlyph;
+use super::TextGlyphContents;
+use super::VimColNrT;
+use super::VirtualTextHighlightMode;
+use super::mbyte;
+use super::tabstops::TabStops;
 
 /// One owned virtual-text chunk with its resolved highlight.
 #[derive(Debug, Eq, PartialEq)]

@@ -1,4 +1,6 @@
-use super::{VimColNrT, VimSAttrT, VimSCharT};
+use super::VimColNrT;
+use super::VimSAttrT;
+use super::VimSCharT;
 
 /// Complete contents of one rendered screen cell.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

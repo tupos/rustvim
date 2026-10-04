@@ -150,6 +150,16 @@ functionaltest-lua: | nvim
 	$(CMAKE) --build build --target functionaltest
 
 FORMAT=formatc formatlua formatquery format
+RUSTFMT_TOOLCHAIN ?= nightly-2026-08-18
+
+rustfmt-toolchain:
+	rustup toolchain install $(RUSTFMT_TOOLCHAIN) --profile minimal --component rustfmt
+
+formatrust:
+	rustup run $(RUSTFMT_TOOLCHAIN) cargo fmt --all
+
+format: formatrust
+
 LINT=lintlua lintsh lintc clang-analyzer lintcommit lintdoc lintdocurls lint emmylua-check lintquery linterrcodes
 TEST=functionaltest unittest rusttest
 generated-sources benchmark $(FORMAT) $(LINT) $(TEST) doc: | build/.ran-cmake
@@ -196,4 +206,4 @@ appimage:
 appimage-%:
 	bash scripts/genappimage.sh $*
 
-.PHONY: test clean distclean nvim libnvim rvim_libs cmake deps install appimage checkprefix benchmark $(FORMAT) $(LINT) $(TEST)
+.PHONY: test clean distclean nvim libnvim rvim_libs cmake deps install appimage checkprefix benchmark rustfmt-toolchain formatrust $(FORMAT) $(LINT) $(TEST)

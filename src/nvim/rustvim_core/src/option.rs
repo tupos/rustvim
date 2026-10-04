@@ -1,9 +1,7 @@
 use std::error::Error;
 
-use crate::{
-    defines::{self},
-    eval,
-};
+use crate::defines::{self};
+use crate::eval;
 
 pub struct OptFlags;
 

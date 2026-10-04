@@ -2,9 +2,10 @@
 
 #![forbid(unsafe_code)]
 
+use super::ComposedGridSpace;
+use super::GridId;
+use super::GridSize;
 use crate::ui::output::UiOutput;
-
-use super::{ComposedGridSpace, GridId, GridSize};
 
 /// Receives common UI effects produced by grid-surface lifecycles.
 pub(crate) trait GridSurfaceOutput: UiOutput<ComposedGridSpace> {

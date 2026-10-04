@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
-use std::{marker::PhantomData, ops::Range};
+use std::marker::PhantomData;
+use std::ops::Range;
 
 /// Marker for coordinates relative to an individual screen grid.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

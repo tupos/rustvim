@@ -1,24 +1,38 @@
 //! C boundary adapters for message-grid operations.
 
-use crate::{
-    context::registered_context,
-    ui::{
-        GridOutputTarget,
-        output::{OwnedRawLineCommand, RawLineCells, RawLineCommand, UiCommand, UiOutput},
-    },
-    ui_compositor::compositor_runtime_snapshot,
-};
-
-use super::super::{
-    CMessageGridPositionConfig, CMessageGridPositionEmitter, CMessageGridScrollFlushRequest,
-    CMessageGridTransition, CMessageSurfaceRequest, CMessageSurfaceScrollRequest,
-    CMessageSurfaceUpdate, ComposedGridSpace, GridId, GridSize, GridSurfaceOutput, LineBufferGuard,
-    LocalGridSpace, MessageGridMode, MessageGridScrollFlushRequest, MessageGridTransition,
-    MessagePositionPolicy, MessagePositionRequest, MessageSurfaceOutput, StoredGridGuard,
-    VimHandleT, VimSCharT, lock_grid_store, lock_message_grid_state,
-};
-
+use super::super::CMessageGridPositionConfig;
+use super::super::CMessageGridPositionEmitter;
+use super::super::CMessageGridScrollFlushRequest;
+use super::super::CMessageGridTransition;
+use super::super::CMessageSurfaceRequest;
+use super::super::CMessageSurfaceScrollRequest;
+use super::super::CMessageSurfaceUpdate;
+use super::super::ComposedGridSpace;
+use super::super::GridId;
+use super::super::GridSize;
+use super::super::GridSurfaceOutput;
+use super::super::LineBufferGuard;
+use super::super::LocalGridSpace;
+use super::super::MessageGridMode;
+use super::super::MessageGridScrollFlushRequest;
+use super::super::MessageGridTransition;
+use super::super::MessagePositionPolicy;
+use super::super::MessagePositionRequest;
+use super::super::MessageSurfaceOutput;
+use super::super::StoredGridGuard;
+use super::super::VimHandleT;
+use super::super::VimSCharT;
+use super::super::lock_grid_store;
+use super::super::lock_message_grid_state;
 use super::surface::NvimGridSurfaceOutput;
+use crate::context::registered_context;
+use crate::ui::GridOutputTarget;
+use crate::ui::output::OwnedRawLineCommand;
+use crate::ui::output::RawLineCells;
+use crate::ui::output::RawLineCommand;
+use crate::ui::output::UiCommand;
+use crate::ui::output::UiOutput;
+use crate::ui_compositor::compositor_runtime_snapshot;
 
 /// Final C UI adapter for one complete message-surface transition.
 struct NvimMessageSurfaceOutput {

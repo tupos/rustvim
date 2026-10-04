@@ -1,10 +1,13 @@
 use std::ffi::CString;
 
-use crate::{
-    defines::Integer,
-    grid::{ComposedGridSpace, VimSAttrT, VimSCharT},
-    ui::output::{RawLineCells, RawLineCommand, UiCommand, UiOutput},
-};
+use crate::defines::Integer;
+use crate::grid::ComposedGridSpace;
+use crate::grid::VimSAttrT;
+use crate::grid::VimSCharT;
+use crate::ui::output::RawLineCells;
+use crate::ui::output::RawLineCommand;
+use crate::ui::output::UiCommand;
+use crate::ui::output::UiOutput;
 
 unsafe extern "C" {
     fn log_debug_message(message: *const libc::c_char);

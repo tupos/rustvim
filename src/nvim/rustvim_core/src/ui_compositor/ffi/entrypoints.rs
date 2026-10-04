@@ -1,22 +1,25 @@
 //! C ABI entry points and raw-pointer orchestration for the compositor.
 
-use std::{ptr::NonNull, slice};
-
-use crate::{
-    context::registered_context,
-    defines::{CVimString, Integer},
-    grid::{
-        CGridCell, DEFAULT_GRID_ID, GridId, VimHandleT, VimSAttrT, VimSCharT, lock_grid_store,
-        schar_from_buf,
-    },
-    ui::output::BorrowedRawLineCommand,
-};
+use std::ptr::NonNull;
+use std::slice;
 
 use super::super::*;
-use super::{
-    NvimComposedOutput, compositor_runtime_snapshot, current_message_grid_id,
-    initialize_debug_highlights,
-};
+use super::NvimComposedOutput;
+use super::compositor_runtime_snapshot;
+use super::current_message_grid_id;
+use super::initialize_debug_highlights;
+use crate::context::registered_context;
+use crate::defines::CVimString;
+use crate::defines::Integer;
+use crate::grid::CGridCell;
+use crate::grid::DEFAULT_GRID_ID;
+use crate::grid::GridId;
+use crate::grid::VimHandleT;
+use crate::grid::VimSAttrT;
+use crate::grid::VimSCharT;
+use crate::grid::lock_grid_store;
+use crate::grid::schar_from_buf;
+use crate::ui::output::BorrowedRawLineCommand;
 
 /// C representation of a compositor grid hit.
 #[repr(C)]

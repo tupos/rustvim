@@ -2,16 +2,23 @@
 
 #![forbid(unsafe_code)]
 
-use crate::ui_compositor::{
-    CompositorContext, CompositorError, CompositorGridPlacement, CompositorGridPlacementRequest,
-    CompositorResult, CompositorRuntime, RegisteredGridPlacement,
-};
-
-use super::{
-    ComposedPosition, GridContext, GridId, GridLifecycleChange, GridPosition, GridSize,
-    GridSurfaceOutput, WindowGridMode,
-    store::{GridStoreError, GridStoreResult},
-};
+use super::ComposedPosition;
+use super::GridContext;
+use super::GridId;
+use super::GridLifecycleChange;
+use super::GridPosition;
+use super::GridSize;
+use super::GridSurfaceOutput;
+use super::WindowGridMode;
+use super::store::GridStoreError;
+use super::store::GridStoreResult;
+use crate::ui_compositor::CompositorContext;
+use crate::ui_compositor::CompositorError;
+use crate::ui_compositor::CompositorGridPlacement;
+use crate::ui_compositor::CompositorGridPlacementRequest;
+use crate::ui_compositor::CompositorResult;
+use crate::ui_compositor::CompositorRuntime;
+use crate::ui_compositor::RegisteredGridPlacement;
 
 /// Fractional anchor coordinates retained for a floating-window UI event.
 #[derive(Clone, Copy, Debug, PartialEq)]

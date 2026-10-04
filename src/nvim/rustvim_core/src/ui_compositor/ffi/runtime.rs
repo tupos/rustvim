@@ -2,18 +2,21 @@
 
 use std::sync::MutexGuard;
 
-use crate::{
-    context::registered_context,
-    defines::OptInt,
-    globals,
-    grid::{ComposedGridSpace, GridId, VimHandleT, VimSAttrT, lock_grid_store},
-    ui::output::{UiCommand, UiOutput},
-};
-
-use super::super::{
-    CompositorDebugHighlights, CompositorRecomposeArea, CompositorRuntime,
-    emit_compositor_debug_line, lock_compositor,
-};
+use super::super::CompositorDebugHighlights;
+use super::super::CompositorRecomposeArea;
+use super::super::CompositorRuntime;
+use super::super::emit_compositor_debug_line;
+use super::super::lock_compositor;
+use crate::context::registered_context;
+use crate::defines::OptInt;
+use crate::globals;
+use crate::grid::ComposedGridSpace;
+use crate::grid::GridId;
+use crate::grid::VimHandleT;
+use crate::grid::VimSAttrT;
+use crate::grid::lock_grid_store;
+use crate::ui::output::UiCommand;
+use crate::ui::output::UiOutput;
 
 unsafe extern "C" {
     static mut p_wd: OptInt;

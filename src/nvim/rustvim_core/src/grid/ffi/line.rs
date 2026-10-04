@@ -1,13 +1,38 @@
 //! C boundary adapters for buffered grid-line rendering.
 
-use super::super::{
-    CGridLineSubmissionConfig, CStr, CVirtText, FoldColumn, FoldColumnInfo, FoldColumnSymbols,
-    GridId, GridOutputTarget, GridViewDescriptor, Highlight, LineBufferGuard, LineSubmission,
-    LineTextRenderOptions, LineTextVirtualColumns, OptInt, Slf, SmoothScrollMarker,
-    StoredGridGuard, TabStops, TruncationSide, VimColNrT, VimHandleT, VimSAttrT, VimSCharT,
-    VirtualText, VirtualTextChunk, VirtualTextHighlightMode, VirtualTextRenderOptions,
-    lock_glyph_mapping, lock_grid_store, lock_message_grid_state, schar_from_ascii, with_line_grid,
-};
+use super::super::CGridLineSubmissionConfig;
+use super::super::CStr;
+use super::super::CVirtText;
+use super::super::FoldColumn;
+use super::super::FoldColumnInfo;
+use super::super::FoldColumnSymbols;
+use super::super::GridId;
+use super::super::GridOutputTarget;
+use super::super::GridViewDescriptor;
+use super::super::Highlight;
+use super::super::LineBufferGuard;
+use super::super::LineSubmission;
+use super::super::LineTextRenderOptions;
+use super::super::LineTextVirtualColumns;
+use super::super::OptInt;
+use super::super::Slf;
+use super::super::SmoothScrollMarker;
+use super::super::StoredGridGuard;
+use super::super::TabStops;
+use super::super::TruncationSide;
+use super::super::VimColNrT;
+use super::super::VimHandleT;
+use super::super::VimSAttrT;
+use super::super::VimSCharT;
+use super::super::VirtualText;
+use super::super::VirtualTextChunk;
+use super::super::VirtualTextHighlightMode;
+use super::super::VirtualTextRenderOptions;
+use super::super::lock_glyph_mapping;
+use super::super::lock_grid_store;
+use super::super::lock_message_grid_state;
+use super::super::schar_from_ascii;
+use super::super::with_line_grid;
 
 /// Begins a buffered line operation through a persistent view descriptor.
 fn begin_grid_view_line(descriptor: GridViewDescriptor, row: i32) {

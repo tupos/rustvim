@@ -2,14 +2,19 @@
 
 #![forbid(unsafe_code)]
 
-use crate::ui_compositor::{
-    CompositorContext, CompositorError, CompositorGridPlacement, CompositorGridPlacementRequest,
-    CompositorResult, CompositorRuntime, RegisteredGridPlacement,
-};
-
-use super::{
-    ComposedPosition, GridContext, GridId, GridLifecycleChange, GridPosition, GridSurfaceOutput,
-};
+use super::ComposedPosition;
+use super::GridContext;
+use super::GridId;
+use super::GridLifecycleChange;
+use super::GridPosition;
+use super::GridSurfaceOutput;
+use crate::ui_compositor::CompositorContext;
+use crate::ui_compositor::CompositorError;
+use crate::ui_compositor::CompositorGridPlacement;
+use crate::ui_compositor::CompositorGridPlacementRequest;
+use crate::ui_compositor::CompositorResult;
+use crate::ui_compositor::CompositorRuntime;
+use crate::ui_compositor::RegisteredGridPlacement;
 
 /// Validated input for one complete popup-menu surface update.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

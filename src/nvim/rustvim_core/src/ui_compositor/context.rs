@@ -2,31 +2,49 @@
 
 #![forbid(unsafe_code)]
 
-use std::sync::{Mutex, MutexGuard};
+use std::sync::Mutex;
+use std::sync::MutexGuard;
 
-use crate::{
-    grid::{
-        ComposedGridSpace, ComposedPosition, DEFAULT_GRID_ID, GridContext, GridId, GridPosition,
-        GridSize, GridStore, LocalGridSpace,
-    },
-    ui::{
-        LineFlags,
-        output::{
-            BorrowedRawLineCommand, CellBufferLease, CellBufferPool, RawLineCells, RawLineCommand,
-            UiCommand, UiOutput,
-        },
-    },
-};
-
-use super::{
-    Compositor, CompositorAreaRequest, CompositorCursorRequest, CompositorCursorUpdate,
-    CompositorDebugHighlights, CompositorError, CompositorGridPlacementOutcome,
-    CompositorGridPlacementRequest, CompositorGridPlacementTarget, CompositorLayerRemoval,
-    CompositorLineInput, CompositorMessagePositionRequest, CompositorRawLineAction,
-    CompositorRawLineOperation, CompositorRawLineRequest, CompositorRecomposeArea,
-    CompositorResult, CompositorRuntime, CompositorScrollOperation, CompositorScrollRequest,
-    RawLineDiagnostic, RegisteredGridPlacement, log_raw_line_diagnostic,
-};
+use super::Compositor;
+use super::CompositorAreaRequest;
+use super::CompositorCursorRequest;
+use super::CompositorCursorUpdate;
+use super::CompositorDebugHighlights;
+use super::CompositorError;
+use super::CompositorGridPlacementOutcome;
+use super::CompositorGridPlacementRequest;
+use super::CompositorGridPlacementTarget;
+use super::CompositorLayerRemoval;
+use super::CompositorLineInput;
+use super::CompositorMessagePositionRequest;
+use super::CompositorRawLineAction;
+use super::CompositorRawLineOperation;
+use super::CompositorRawLineRequest;
+use super::CompositorRecomposeArea;
+use super::CompositorResult;
+use super::CompositorRuntime;
+use super::CompositorScrollOperation;
+use super::CompositorScrollRequest;
+use super::RawLineDiagnostic;
+use super::RegisteredGridPlacement;
+use super::log_raw_line_diagnostic;
+use crate::grid::ComposedGridSpace;
+use crate::grid::ComposedPosition;
+use crate::grid::DEFAULT_GRID_ID;
+use crate::grid::GridContext;
+use crate::grid::GridId;
+use crate::grid::GridPosition;
+use crate::grid::GridSize;
+use crate::grid::GridStore;
+use crate::grid::LocalGridSpace;
+use crate::ui::LineFlags;
+use crate::ui::output::BorrowedRawLineCommand;
+use crate::ui::output::CellBufferLease;
+use crate::ui::output::CellBufferPool;
+use crate::ui::output::RawLineCells;
+use crate::ui::output::RawLineCommand;
+use crate::ui::output::UiCommand;
+use crate::ui::output::UiOutput;
 
 /// Output sinks for composed and original uncomposed event delivery.
 pub(crate) struct CompositorEventOutputs<'output, ComposedOutput, UncomposedOutput> {
@@ -769,14 +787,18 @@ impl CompositorContext {
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::RefCell, marker::PhantomData, rc::Rc};
-
-    use crate::{
-        grid::{GridDelta, GridRegion, LineBuffer, LocalGridSpace, ScreenGrid, schar_from_ascii},
-        ui::output::BorrowedRawLineCommand,
-    };
+    use std::cell::RefCell;
+    use std::marker::PhantomData;
+    use std::rc::Rc;
 
     use super::*;
+    use crate::grid::GridDelta;
+    use crate::grid::GridRegion;
+    use crate::grid::LineBuffer;
+    use crate::grid::LocalGridSpace;
+    use crate::grid::ScreenGrid;
+    use crate::grid::schar_from_ascii;
+    use crate::ui::output::BorrowedRawLineCommand;
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     enum OutputDestination {

@@ -1,6 +1,8 @@
 use std::ops::Range;
 
-use super::{ScreenGrid, VimSAttrT, VimSCharT};
+use super::ScreenGrid;
+use super::VimSAttrT;
+use super::VimSCharT;
 
 /// Borrowed character and attribute storage for one logical screen-grid row.
 ///
@@ -81,7 +83,8 @@ impl<'grid> GridRowSegment<'grid> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::grid::{LineBuffer, schar_from_ascii};
+    use crate::grid::LineBuffer;
+    use crate::grid::schar_from_ascii;
 
     fn grid_with_row(characters: &[VimSCharT], attributes: &[VimSAttrT]) -> ScreenGrid {
         assert_eq!(characters.len(), attributes.len());

@@ -1,4 +1,6 @@
-use super::{VimColNrT, VimSCharT, schar_from_ascii};
+use super::VimColNrT;
+use super::VimSCharT;
+use super::schar_from_ascii;
 
 const NO_VIRTUAL_COLUMN: VimColNrT = -1;
 const CLOSED_FOLD_VIRTUAL_COLUMN: VimColNrT = -2;

@@ -1,26 +1,52 @@
 //! C boundary adapters for screen-grid lifecycle operations.
 
-use crate::{
-    context::registered_context,
-    defines::{CVimString, Integer},
-    globals,
-    ui::output::{RawLineCells, RawLineCommand, UiCommand, UiOutput},
-    ui_compositor::{compositor_runtime_snapshot, current_message_grid_id},
-};
-
-use super::super::{
-    ComposedGridSpace, ComposedPosition, DEFAULT_GRID_ID, FloatAnchorPosition, GlyphMapping,
-    GridId, GridLifecycleChange, GridPosition, GridSize, GridSurfaceOutput, LineBufferGuard,
-    MessageGridState, StoredGridGuard, VimHandleT, WindowFloatAnchor, WindowFloatAnchorWindow,
-    WindowFloatConversionRequest, WindowFloatGeometry, WindowFloatLayerPolicy,
-    WindowFloatPositionEvent, WindowFloatSurfaceRequest, WindowFloatSurfaceUpdate,
-    WindowFloatToSplitUpdate, WindowGridMode, WindowPositionFlushRequest,
-    WindowPositionFlushUpdate, WindowSurfaceCloseRequest, WindowSurfaceDestroyRequest,
-    WindowSurfaceHideRequest, WindowSurfaceOutput, WindowSurfaceRequest, WindowSurfaceUpdate,
-    lock_glyph_mapping, lock_grid_store, lock_message_grid_state, register_empty_grid,
-};
-
+use super::super::ComposedGridSpace;
+use super::super::ComposedPosition;
+use super::super::DEFAULT_GRID_ID;
+use super::super::FloatAnchorPosition;
+use super::super::GlyphMapping;
+use super::super::GridId;
+use super::super::GridLifecycleChange;
+use super::super::GridPosition;
+use super::super::GridSize;
+use super::super::GridSurfaceOutput;
+use super::super::LineBufferGuard;
+use super::super::MessageGridState;
+use super::super::StoredGridGuard;
+use super::super::VimHandleT;
+use super::super::WindowFloatAnchor;
+use super::super::WindowFloatAnchorWindow;
+use super::super::WindowFloatConversionRequest;
+use super::super::WindowFloatGeometry;
+use super::super::WindowFloatLayerPolicy;
+use super::super::WindowFloatPositionEvent;
+use super::super::WindowFloatSurfaceRequest;
+use super::super::WindowFloatSurfaceUpdate;
+use super::super::WindowFloatToSplitUpdate;
+use super::super::WindowGridMode;
+use super::super::WindowPositionFlushRequest;
+use super::super::WindowPositionFlushUpdate;
+use super::super::WindowSurfaceCloseRequest;
+use super::super::WindowSurfaceDestroyRequest;
+use super::super::WindowSurfaceHideRequest;
+use super::super::WindowSurfaceOutput;
+use super::super::WindowSurfaceRequest;
+use super::super::WindowSurfaceUpdate;
+use super::super::lock_glyph_mapping;
+use super::super::lock_grid_store;
+use super::super::lock_message_grid_state;
+use super::super::register_empty_grid;
 use super::surface::NvimGridSurfaceOutput;
+use crate::context::registered_context;
+use crate::defines::CVimString;
+use crate::defines::Integer;
+use crate::globals;
+use crate::ui::output::RawLineCells;
+use crate::ui::output::RawLineCommand;
+use crate::ui::output::UiCommand;
+use crate::ui::output::UiOutput;
+use crate::ui_compositor::compositor_runtime_snapshot;
+use crate::ui_compositor::current_message_grid_id;
 
 type CWindowPositionEmitter = unsafe extern "C" fn(VimHandleT, bool);
 

@@ -1,11 +1,16 @@
 //! C boundary adapters for general screen-grid operations.
 
+use super::super::CGridCell;
+use super::super::CGridCellInspectionResult;
+use super::super::DEFAULT_GRID_HANDLE;
+use super::super::GridId;
+use super::super::GridInspectionTarget;
+use super::super::InvalidGridId;
+use super::super::StoredGridGuard;
+use super::super::VimHandleT;
+use super::super::allocate_grid_id;
+use super::super::register_empty_grid;
 use crate::ui::GridOutputTarget;
-
-use super::super::{
-    CGridCell, CGridCellInspectionResult, DEFAULT_GRID_HANDLE, GridId, GridInspectionTarget,
-    InvalidGridId, StoredGridGuard, VimHandleT, allocate_grid_id, register_empty_grid,
-};
 
 /// Invalidates every cell in a permanently stored grid.
 ///

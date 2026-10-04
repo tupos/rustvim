@@ -1,24 +1,41 @@
 mod context;
 mod ffi;
 
-pub(crate) use context::{CompositorContext, CompositorEventOutputs};
-pub(crate) use ffi::{NvimComposedOutput, compositor_runtime_snapshot, current_message_grid_id};
+use std::ops::Range;
+use std::sync::MutexGuard;
 
-use std::{ops::Range, sync::MutexGuard};
+pub(crate) use context::CompositorContext;
+pub(crate) use context::CompositorEventOutputs;
+pub(crate) use ffi::NvimComposedOutput;
+pub(crate) use ffi::compositor_runtime_snapshot;
+pub(crate) use ffi::current_message_grid_id;
 
-use crate::{
-    context::registered_context,
-    generated::enums::RdbFlags,
-    grid::{
-        ComposedGridSpace, ComposedPosition, ComposedRegion, GridCell, GridDelta, GridId,
-        GridPosition, GridRegion, GridRow, GridRowSegment, GridSize, GridStore, Highlight,
-        ScreenGrid, VimSAttrT, VimSCharT, schar_from_ascii, schar_from_char,
-    },
-    ui::{
-        LineFlags,
-        output::{BorrowedRawLineCommand, CellBuffer, CellBufferPool, UiCommand, UiOutput},
-    },
-};
+use crate::context::registered_context;
+use crate::generated::enums::RdbFlags;
+use crate::grid::ComposedGridSpace;
+use crate::grid::ComposedPosition;
+use crate::grid::ComposedRegion;
+use crate::grid::GridCell;
+use crate::grid::GridDelta;
+use crate::grid::GridId;
+use crate::grid::GridPosition;
+use crate::grid::GridRegion;
+use crate::grid::GridRow;
+use crate::grid::GridRowSegment;
+use crate::grid::GridSize;
+use crate::grid::GridStore;
+use crate::grid::Highlight;
+use crate::grid::ScreenGrid;
+use crate::grid::VimSAttrT;
+use crate::grid::VimSCharT;
+use crate::grid::schar_from_ascii;
+use crate::grid::schar_from_char;
+use crate::ui::LineFlags;
+use crate::ui::output::BorrowedRawLineCommand;
+use crate::ui::output::CellBuffer;
+use crate::ui::output::CellBufferPool;
+use crate::ui::output::UiCommand;
+use crate::ui::output::UiOutput;
 /// Result of composing one foreground segment over its background.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct SegmentComposition {
@@ -3200,14 +3217,14 @@ fn is_negative_space(character: VimSCharT) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+    use std::sync::atomic::AtomicI32;
+    use std::sync::atomic::Ordering;
+
     use super::ffi::update_registered_layer_policy;
     use super::*;
-    use std::sync::{
-        Mutex,
-        atomic::{AtomicI32, Ordering},
-    };
-
-    use crate::{grid::LineBuffer, ui::output::CellBufferLease};
+    use crate::grid::LineBuffer;
+    use crate::ui::output::CellBufferLease;
 
     static NEXT_TEST_GRID_ID: AtomicI32 = AtomicI32::new(10_000);
 

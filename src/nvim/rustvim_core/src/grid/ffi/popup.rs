@@ -1,23 +1,32 @@
 //! C boundary adapters for popup-menu surface operations.
 
-use crate::{
-    context::registered_context,
-    defines::{CVimString, Integer},
-    ui::output::{RawLineCells, RawLineCommand, UiCommand, UiOutput},
-    ui_compositor::{
-        CompositorGridPlacement, compositor_runtime_snapshot, current_message_grid_id,
-    },
-};
-
-use super::{
-    super::{
-        ComposedGridSpace, ComposedPosition, GridId, GridPosition, GridSize, GridSurfaceOutput,
-        PopupMenuAnchor, PopupMenuAnchorGrid, PopupMenuHideRequest, PopupMenuPositionEvent,
-        PopupMenuPositionGeometry, PopupMenuPositionRequest, PopupMenuPublicationPolicy,
-        PopupMenuSurfaceOutput, PopupMenuSurfaceRequest, VimHandleT,
-    },
-    surface::NvimGridSurfaceOutput,
-};
+use super::super::ComposedGridSpace;
+use super::super::ComposedPosition;
+use super::super::GridId;
+use super::super::GridPosition;
+use super::super::GridSize;
+use super::super::GridSurfaceOutput;
+use super::super::PopupMenuAnchor;
+use super::super::PopupMenuAnchorGrid;
+use super::super::PopupMenuHideRequest;
+use super::super::PopupMenuPositionEvent;
+use super::super::PopupMenuPositionGeometry;
+use super::super::PopupMenuPositionRequest;
+use super::super::PopupMenuPublicationPolicy;
+use super::super::PopupMenuSurfaceOutput;
+use super::super::PopupMenuSurfaceRequest;
+use super::super::VimHandleT;
+use super::surface::NvimGridSurfaceOutput;
+use crate::context::registered_context;
+use crate::defines::CVimString;
+use crate::defines::Integer;
+use crate::ui::output::RawLineCells;
+use crate::ui::output::RawLineCommand;
+use crate::ui::output::UiCommand;
+use crate::ui::output::UiOutput;
+use crate::ui_compositor::CompositorGridPlacement;
+use crate::ui_compositor::compositor_runtime_snapshot;
+use crate::ui_compositor::current_message_grid_id;
 
 unsafe extern "C" {
     fn ui_call_win_close(grid: Integer);

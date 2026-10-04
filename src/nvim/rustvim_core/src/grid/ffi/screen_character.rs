@@ -1,10 +1,17 @@
 //! C boundary adapters for screen-character operations.
 
-use super::super::{
-    GlyphMapping, MAX_SCHAR_SIZE, NULL_TERMINATOR, VimSCharT, check_chars_options,
-    decor_check_invalid_glyphs, lock_glyph_mapping, schar_cells_impl, schar_from_bytes,
-    schar_get_first_codepoint_impl, schar_len_impl, schar_to_ascii,
-};
+use super::super::GlyphMapping;
+use super::super::MAX_SCHAR_SIZE;
+use super::super::NULL_TERMINATOR;
+use super::super::VimSCharT;
+use super::super::check_chars_options;
+use super::super::decor_check_invalid_glyphs;
+use super::super::lock_glyph_mapping;
+use super::super::schar_cells_impl;
+use super::super::schar_from_bytes;
+use super::super::schar_get_first_codepoint_impl;
+use super::super::schar_len_impl;
+use super::super::schar_to_ascii;
 
 /// @param buf need not be NUL terminated, but may not contain embedded NULs.
 ///

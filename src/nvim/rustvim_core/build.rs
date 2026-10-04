@@ -1,10 +1,9 @@
-use std::{
-    env,
-    ffi::OsString,
-    fs,
-    path::{Path, PathBuf},
-    process::Command,
-};
+use std::env;
+use std::ffi::OsString;
+use std::fs;
+use std::path::Path;
+use std::path::PathBuf;
+use std::process::Command;
 
 fn workspace_dir(manifest_dir: &Path) -> PathBuf {
     manifest_dir

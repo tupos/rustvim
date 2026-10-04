@@ -1,4 +1,5 @@
-use super::{LineBuffer, VimSAttrT};
+use super::LineBuffer;
+use super::VimSAttrT;
 
 /// Appearance of the marker placed on the first smooth-scrolled line.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -93,7 +94,8 @@ impl LineSubmission {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::grid::{VimSCharT, schar_from_ascii};
+    use crate::grid::VimSCharT;
+    use crate::grid::schar_from_ascii;
 
     fn initialized_line_buffer(text: &str, width: usize) -> LineBuffer {
         let mut line_buffer = LineBuffer::new(width);

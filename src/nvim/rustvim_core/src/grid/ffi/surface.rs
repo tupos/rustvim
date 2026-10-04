@@ -1,12 +1,15 @@
 //! Final UI adapter shared by complete grid-surface operations.
 
-use crate::{
-    defines::Integer,
-    ui::output::{RawLineCells, RawLineCommand, UiCommand, UiOutput},
-    ui_compositor::NvimComposedOutput,
-};
-
-use super::super::{ComposedGridSpace, GridId, GridSize, GridSurfaceOutput};
+use super::super::ComposedGridSpace;
+use super::super::GridId;
+use super::super::GridSize;
+use super::super::GridSurfaceOutput;
+use crate::defines::Integer;
+use crate::ui::output::RawLineCells;
+use crate::ui::output::RawLineCommand;
+use crate::ui::output::UiCommand;
+use crate::ui::output::UiOutput;
+use crate::ui_compositor::NvimComposedOutput;
 
 unsafe extern "C" {
     fn ui_uncomposed_call_grid_resize(grid: Integer, width: Integer, height: Integer);

@@ -1,12 +1,20 @@
 //! C boundary adapters for grid clearing and border rendering.
 
+use super::super::Border;
+use super::super::BorderCanvas;
+use super::super::CGridBorderConfig;
+use super::super::GridId;
+use super::super::GridOutputTarget;
+use super::super::GridPosition;
+use super::super::GridViewDescriptor;
+use super::super::Highlight;
+use super::super::LineBufferGuard;
+use super::super::LineGrid;
+use super::super::StoredGridGuard;
+use super::super::VimHandleT;
+use super::super::lock_glyph_mapping;
+use super::super::lock_message_grid_state;
 use crate::context::registered_context;
-
-use super::super::{
-    Border, BorderCanvas, CGridBorderConfig, GridId, GridOutputTarget, GridPosition,
-    GridViewDescriptor, Highlight, LineBufferGuard, LineGrid, StoredGridGuard, VimHandleT,
-    lock_glyph_mapping, lock_message_grid_state,
-};
 
 /// Clears a rectangular region of an identified grid.
 #[unsafe(no_mangle)]

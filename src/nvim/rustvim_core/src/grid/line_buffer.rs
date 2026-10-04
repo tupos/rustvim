@@ -1,8 +1,19 @@
-use super::{
-    GlyphMapping, Highlight, TextGlyph, TextGlyphContents, TruncationSide, VimColNrT, VimSAttrT,
-    VimSCharT, VirtualColumns, VirtualTextHighlightMode, cell::GridCell, fold_column::FoldColumn,
-    schar_cells_impl, schar_from_ascii, schar_to_ascii, tabstops::TabStops,
-};
+use super::GlyphMapping;
+use super::Highlight;
+use super::TextGlyph;
+use super::TextGlyphContents;
+use super::TruncationSide;
+use super::VimColNrT;
+use super::VimSAttrT;
+use super::VimSCharT;
+use super::VirtualColumns;
+use super::VirtualTextHighlightMode;
+use super::cell::GridCell;
+use super::fold_column::FoldColumn;
+use super::schar_cells_impl;
+use super::schar_from_ascii;
+use super::schar_to_ascii;
+use super::tabstops::TabStops;
 
 /// Source of virtual-column metadata while rendering a text run.
 #[derive(Clone, Copy)]

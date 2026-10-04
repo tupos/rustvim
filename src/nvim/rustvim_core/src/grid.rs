@@ -14,62 +14,89 @@ mod tabstops;
 mod virtual_text;
 mod window_surface;
 
-pub(crate) use ffi::screen_character::schar_from_buf;
-
-use crate::{
-    context::registered_context,
-    defines::OptInt,
-    generated::enums::{RdbFlags, Slf},
-    mbyte,
-    ui::{
-        self, GridOutputTarget,
-        output::{OwnedRawLineCommand, UiCommand},
-    },
-};
-use std::{
-    borrow::Cow,
-    cell::RefCell,
-    collections::BTreeMap,
-    ffi::CStr,
-    ops::Range,
-    sync::{
-        Mutex, MutexGuard,
-        atomic::{AtomicI32, Ordering},
-    },
-};
+use std::borrow::Cow;
+use std::cell::RefCell;
+use std::collections::BTreeMap;
+use std::ffi::CStr;
+use std::ops::Range;
+use std::sync::Mutex;
+use std::sync::MutexGuard;
+use std::sync::atomic::AtomicI32;
+use std::sync::atomic::Ordering;
 
 pub(crate) use cell::GridCell;
-pub(crate) use coordinates::{
-    ComposedGridSpace, ComposedPosition, ComposedRegion, GridDelta, GridPosition, GridRegion,
-    GridSize, LocalGridSpace, Position, Region,
-};
-use fold_column::{FoldColumn, FoldColumnInfo, FoldColumnSymbols};
+pub(crate) use coordinates::ComposedGridSpace;
+pub(crate) use coordinates::ComposedPosition;
+pub(crate) use coordinates::ComposedRegion;
+pub(crate) use coordinates::GridDelta;
+pub(crate) use coordinates::GridPosition;
+pub(crate) use coordinates::GridRegion;
+pub(crate) use coordinates::GridSize;
+pub(crate) use coordinates::LocalGridSpace;
+pub(crate) use coordinates::Position;
+pub(crate) use coordinates::Region;
+pub(crate) use ffi::screen_character::schar_from_buf;
+use fold_column::FoldColumn;
+use fold_column::FoldColumnInfo;
+use fold_column::FoldColumnSymbols;
 pub use line_buffer::LineBuffer;
-use line_buffer::{LineTextRenderOptions, LineTextVirtualColumns};
-use line_submission::{LineSubmission, SmoothScrollMarker};
-use message_surface::{MessagePositionPolicy, MessagePositionRequest};
-pub(crate) use message_surface::{MessageSurface, MessageSurfaceOutput};
+use line_buffer::LineTextRenderOptions;
+use line_buffer::LineTextVirtualColumns;
+use line_submission::LineSubmission;
+use line_submission::SmoothScrollMarker;
+use message_surface::MessagePositionPolicy;
+use message_surface::MessagePositionRequest;
+pub(crate) use message_surface::MessageSurface;
+pub(crate) use message_surface::MessageSurfaceOutput;
+use popup_surface::PopupMenuAnchor;
+use popup_surface::PopupMenuAnchorGrid;
+use popup_surface::PopupMenuHideRequest;
+use popup_surface::PopupMenuPositionEvent;
+use popup_surface::PopupMenuPositionGeometry;
+use popup_surface::PopupMenuPositionRequest;
+use popup_surface::PopupMenuPublicationPolicy;
 pub(crate) use popup_surface::PopupMenuSurface;
-use popup_surface::{
-    PopupMenuAnchor, PopupMenuAnchorGrid, PopupMenuHideRequest, PopupMenuPositionEvent,
-    PopupMenuPositionGeometry, PopupMenuPositionRequest, PopupMenuPublicationPolicy,
-    PopupMenuSurfaceOutput, PopupMenuSurfaceRequest,
-};
-pub(crate) use row::{GridRow, GridRowSegment};
+use popup_surface::PopupMenuSurfaceOutput;
+use popup_surface::PopupMenuSurfaceRequest;
+pub(crate) use row::GridRow;
+pub(crate) use row::GridRowSegment;
+pub(crate) use store::GridStore;
 use store::StoredGridGuard;
-pub(crate) use store::{GridStore, lock_grid_store};
+pub(crate) use store::lock_grid_store;
 pub(crate) use surface::GridSurfaceOutput;
 use tabstops::TabStops;
-use virtual_text::{VirtualText, VirtualTextChunk, VirtualTextRenderOptions};
+use virtual_text::VirtualText;
+use virtual_text::VirtualTextChunk;
+use virtual_text::VirtualTextRenderOptions;
+use window_surface::FloatAnchorPosition;
+use window_surface::WindowFloatAnchor;
+use window_surface::WindowFloatAnchorWindow;
+use window_surface::WindowFloatConversionRequest;
+use window_surface::WindowFloatGeometry;
+use window_surface::WindowFloatLayerPolicy;
+use window_surface::WindowFloatPositionEvent;
+use window_surface::WindowFloatSurfaceRequest;
+use window_surface::WindowFloatSurfaceUpdate;
+use window_surface::WindowFloatToSplitUpdate;
+use window_surface::WindowPositionFlushRequest;
+use window_surface::WindowPositionFlushUpdate;
 pub(crate) use window_surface::WindowSurface;
-use window_surface::{
-    FloatAnchorPosition, WindowFloatAnchor, WindowFloatAnchorWindow, WindowFloatConversionRequest,
-    WindowFloatGeometry, WindowFloatLayerPolicy, WindowFloatPositionEvent,
-    WindowFloatSurfaceRequest, WindowFloatSurfaceUpdate, WindowFloatToSplitUpdate,
-    WindowPositionFlushRequest, WindowPositionFlushUpdate, WindowSurfaceCloseRequest,
-    WindowSurfaceDestroyRequest, WindowSurfaceHideRequest, WindowSurfaceOutput,
-    WindowSurfaceRequest, WindowSurfaceUpdate,
-};
+use window_surface::WindowSurfaceCloseRequest;
+use window_surface::WindowSurfaceDestroyRequest;
+use window_surface::WindowSurfaceHideRequest;
+use window_surface::WindowSurfaceOutput;
+use window_surface::WindowSurfaceRequest;
+use window_surface::WindowSurfaceUpdate;
+
+use crate::context::registered_context;
+use crate::defines::OptInt;
+use crate::generated::enums::RdbFlags;
+use crate::generated::enums::Slf;
+use crate::mbyte;
+use crate::ui::GridOutputTarget;
+use crate::ui::output::OwnedRawLineCommand;
+use crate::ui::output::UiCommand;
+use crate::ui::{self};
 
 /// if data[0] is 0xFF, then data[1..4] is a 24-bit index (in machine endianness)
 /// otherwise it must be a UTF-8 string of length maximum 4 (no NUL when n=4)
@@ -3610,14 +3637,20 @@ impl<'a> ArabicShaper<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::ffi::lifecycle::{
-        CWindowSurfaceRequest, grid_configure_window_surface, grid_destroy_window_surface,
-        grid_is_allocated, grid_require_full_redraw, grid_requires_compositor_invalidation,
-        grid_revalidate_for_redraw,
-    };
-    use super::ffi::message::{grid_prepare_for_messages, grid_release_message};
-    use super::ffi::operations::{grid_assign_handle, grid_inspect_cell, grid_invalidate};
-    use super::ffi::view::{grid_view_has_target, grid_view_targets_default};
+    use super::ffi::lifecycle::CWindowSurfaceRequest;
+    use super::ffi::lifecycle::grid_configure_window_surface;
+    use super::ffi::lifecycle::grid_destroy_window_surface;
+    use super::ffi::lifecycle::grid_is_allocated;
+    use super::ffi::lifecycle::grid_require_full_redraw;
+    use super::ffi::lifecycle::grid_requires_compositor_invalidation;
+    use super::ffi::lifecycle::grid_revalidate_for_redraw;
+    use super::ffi::message::grid_prepare_for_messages;
+    use super::ffi::message::grid_release_message;
+    use super::ffi::operations::grid_assign_handle;
+    use super::ffi::operations::grid_inspect_cell;
+    use super::ffi::operations::grid_invalidate;
+    use super::ffi::view::grid_view_has_target;
+    use super::ffi::view::grid_view_targets_default;
     use super::*;
 
     fn characters(line_buffer: &LineBuffer) -> Vec<VimSCharT> {

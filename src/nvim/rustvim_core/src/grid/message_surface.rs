@@ -1,24 +1,34 @@
 //! Safe coordination of the message grid, compositor layer, and UI events.
 
-use crate::{
-    ui::{
-        GridOutputTarget,
-        output::{OwnedRawLineCommand, UiCommand},
-    },
-    ui_compositor::{
-        CompositorContext, CompositorGridPlacement, CompositorGridPlacementRequest,
-        CompositorMessagePositionRequest, CompositorResult, CompositorRuntime,
-        RegisteredGridPlacement,
-    },
-};
-
-use super::{
-    CMessageSurfaceRequest, CMessageSurfaceScrollRequest, CMessageSurfaceUpdate, GridContext,
-    GridId, GridSize, GridSurfaceOutput, GridViewDescriptor, LineGrid, LocalGridSpace,
-    MessageGridMode, MessageGridPositionUpdate, MessageGridScrollFlushPlan,
-    MessageGridScrollFlushRequest, MessageGridScrollUp, MessageGridScrollUpAction,
-    MessageGridTransition, VimSAttrT, VimSCharT,
-};
+use super::CMessageSurfaceRequest;
+use super::CMessageSurfaceScrollRequest;
+use super::CMessageSurfaceUpdate;
+use super::GridContext;
+use super::GridId;
+use super::GridSize;
+use super::GridSurfaceOutput;
+use super::GridViewDescriptor;
+use super::LineGrid;
+use super::LocalGridSpace;
+use super::MessageGridMode;
+use super::MessageGridPositionUpdate;
+use super::MessageGridScrollFlushPlan;
+use super::MessageGridScrollFlushRequest;
+use super::MessageGridScrollUp;
+use super::MessageGridScrollUpAction;
+use super::MessageGridTransition;
+use super::VimSAttrT;
+use super::VimSCharT;
+use crate::ui::GridOutputTarget;
+use crate::ui::output::OwnedRawLineCommand;
+use crate::ui::output::UiCommand;
+use crate::ui_compositor::CompositorContext;
+use crate::ui_compositor::CompositorGridPlacement;
+use crate::ui_compositor::CompositorGridPlacementRequest;
+use crate::ui_compositor::CompositorMessagePositionRequest;
+use crate::ui_compositor::CompositorResult;
+use crate::ui_compositor::CompositorRuntime;
+use crate::ui_compositor::RegisteredGridPlacement;
 
 /// Appearance and stacking policy of the message surface.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

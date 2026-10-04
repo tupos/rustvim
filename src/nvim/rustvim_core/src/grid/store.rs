@@ -1,14 +1,17 @@
 #![forbid(unsafe_code)]
 
-use std::{
-    collections::{HashMap, HashSet, hash_map::Entry},
-    ops::{Deref, DerefMut},
-    sync::MutexGuard,
-};
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::collections::hash_map::Entry;
+use std::ops::Deref;
+use std::ops::DerefMut;
+use std::sync::MutexGuard;
 
+use super::GridId;
+use super::GridView;
+use super::GridViewDescriptor;
+use super::ScreenGrid;
 use crate::context::registered_context;
-
-use super::{GridId, GridView, GridViewDescriptor, ScreenGrid};
 
 /// Failures produced while managing permanently owned screen grids.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
@@ -203,7 +206,8 @@ impl DerefMut for StoredGridGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::grid::{GridPosition, LineBuffer};
+    use crate::grid::GridPosition;
+    use crate::grid::LineBuffer;
 
     fn grid_with_id(grid_id: i32) -> ScreenGrid {
         let mut line_buffer = LineBuffer::new(2);

@@ -1,7 +1,8 @@
 // vim: sw=4
 
-use crate::grid::VimSCharT;
 use std::ffi::CStr;
+
+use crate::grid::VimSCharT;
 
 #[link(name = "nvim")]
 #[link(name = "utf8proc")]

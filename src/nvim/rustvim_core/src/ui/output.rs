@@ -1,11 +1,15 @@
 #![forbid(unsafe_code)]
 
-use std::{ops::Range, sync::Mutex};
+use std::ops::Range;
+use std::sync::Mutex;
 
-use crate::{
-    grid::{GridDelta, GridSize, Position, Region, VimSAttrT, VimSCharT},
-    ui::LineFlags,
-};
+use crate::grid::GridDelta;
+use crate::grid::GridSize;
+use crate::grid::Position;
+use crate::grid::Region;
+use crate::grid::VimSAttrT;
+use crate::grid::VimSCharT;
+use crate::ui::LineFlags;
 
 /// Receives validated UI commands belonging to coordinate space `Space`.
 pub(crate) trait UiOutput<Space> {
