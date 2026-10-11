@@ -11,3 +11,5 @@ pub mod option;
 pub mod pos;
 pub mod ui;
 mod ui_compositor;
+
+pub use rustvim_tracing::rustvim_tracing_initialize;

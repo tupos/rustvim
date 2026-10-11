@@ -5,6 +5,7 @@ members = [
   "src/nvim/rust_os",
   "src/nvim/rustvim_core",
   "src/nvim/rustvim_lib",
+  "src/nvim/rustvim_tracing",
 ]
 
 [workspace.dependencies]

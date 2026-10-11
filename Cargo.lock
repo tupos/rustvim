@@ -62,9 +62,8 @@ name = "rustvim_core"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "rustvim_tracing",
  "thiserror",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -73,6 +72,14 @@ version = "0.1.0"
 dependencies = [
  "rust_os",
  "rustvim_core",
+]
+
+[[package]]
+name = "rustvim_tracing"
+version = "0.1.0"
+dependencies = [
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

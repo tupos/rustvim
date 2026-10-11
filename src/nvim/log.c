@@ -198,6 +198,36 @@ bool logmsg(int log_level, const char *context, const char *func_name, int line_
   return ret;
 }
 
+/// Reports whether Neovim would emit an event at the requested log level.
+///
+/// This non-variadic boundary lets Rust avoid formatting disabled events.
+bool rust_log_level_enabled(int log_level)
+{
+  return did_log_init
+         && log_level >= LOGLVL_DBG
+         && log_level <= LOGLVL_ERR
+         && log_level >= g_min_log_level;
+}
+
+/// Sends one already-formatted Rust tracing event to Neovim's logger.
+///
+/// @param log_level  Log level from log.h.
+/// @param context    NUL-terminated tracing target and separator.
+/// @param func_name  NUL-terminated Rust source location, or NULL.
+/// @param line_num   Rust source line, or -1.
+/// @param message    NUL-terminated formatted event fields.
+///
+/// @return true if the event was emitted, false if disabled or invalid.
+bool rust_log_event(int log_level, const char *context, const char *func_name, int line_num,
+                    const char *message)
+{
+  if (message == NULL || !rust_log_level_enabled(log_level)) {
+    return false;
+  }
+
+  return logmsg(log_level, context, func_name, line_num, true, "%s", message);
+}
+
 /// Logs an already formatted debug message from a non-C caller.
 void log_debug_message(const char *message)
 {
