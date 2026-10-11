@@ -6,3 +6,5 @@ edition = "2024"
 [dependencies]
 libc = { workspace = true }
 thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

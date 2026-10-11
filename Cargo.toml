@@ -10,6 +10,12 @@ members = [
 [workspace.dependencies]
 libc = "0.2"
 thiserror = "2.0.21"
+tracing = { version = "0.1.44", default-features = false, features = ["std"] }
+tracing-subscriber = {
+  version = "0.3.23",
+  default-features = false,
+  features = ["registry"],
+}
 
 [profile.release-debinfo]
 inherits = "release"
