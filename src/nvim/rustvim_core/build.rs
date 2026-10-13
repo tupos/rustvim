@@ -104,7 +104,12 @@ fn link_cmake_library(cache: &str, key: &str) {
         library_link_name(path).unwrap_or_else(|| panic!("cannot derive link name from {library}"));
 
     println!("cargo::rustc-link-search=native={}", directory.display());
-    println!("cargo::rustc-link-lib={name}");
+    if path.extension().is_some_and(|extension| extension == "a") {
+        // Preserve CMake's archive selection when shared libraries coexist.
+        println!("cargo::rustc-link-lib=static={name}");
+    } else {
+        println!("cargo::rustc-link-lib={name}");
+    }
 }
 
 fn main() {
