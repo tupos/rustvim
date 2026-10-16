@@ -1,0 +1,7 @@
+[book]
+title = "The RustVim Book"
+language = "en"
+src = "src"
+
+[build]
+build-dir = "book"
