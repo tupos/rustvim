@@ -1,6 +1,7 @@
 //! Safe logging shared by native callers and tracing events.
 #![forbid(unsafe_code)]
 
+use std::backtrace::Backtrace;
 use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::fs::DirBuilder;
@@ -11,7 +12,6 @@ use std::io::Write;
 use std::marker::PhantomData;
 use std::path::Path;
 use std::path::PathBuf;
-use std::process::Command;
 use std::rc::Rc;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
@@ -208,18 +208,17 @@ impl LogState {
         output.flush()
     }
 
-    /// Writes a trace header, then symbolizes native frame addresses with `addr2line`.
+    /// Writes a trace header followed by an indented Rust-formatted backtrace.
     ///
-    /// This preserves the existing C stack-trace behavior. The first frame is
-    /// skipped to omit the capture helper. Arguments are passed without a shell,
-    /// and invalid UTF-8 in symbolizer output is replaced before writing.
-    /// Process, symbolization, and output failures are returned as I/O errors.
+    /// Rust resolves native C and Rust frames in-process on supported platforms.
+    /// Function names and source locations depend on available debug information.
+    /// The standard formatter produces UTF-8; output errors propagate to the caller.
     fn write_callstack(
         &mut self,
         output: &mut dyn Write,
         metadata: &LogMetadata,
         source: (&str, i32),
-        frames: &[usize],
+        backtrace: &Backtrace,
     ) -> io::Result<()> {
         let message = LogMessage {
             level: Level::DEBUG,
@@ -230,19 +229,7 @@ impl LogState {
         };
         self.write_record(output, metadata, &message)?;
 
-        let symbols = Command::new("addr2line")
-            .arg("-e")
-            .arg(std::env::current_exe()?)
-            .args(["-f", "-p"])
-            .args(frames.iter().skip(1).map(|frame| format!("0x{frame:x}")))
-            .output()?;
-        if !symbols.status.success() {
-            return Err(io::Error::other(format!(
-                "addr2line failed: {}",
-                String::from_utf8_lossy(&symbols.stderr).trim_end()
-            )));
-        }
-        Logger::write_stack_lines(output, &String::from_utf8_lossy(&symbols.stdout))?;
+        Logger::write_stack_lines(output, &backtrace.to_string())?;
         output.flush()
     }
 }
@@ -510,30 +497,33 @@ impl LogGuard<'_> {
         write(&mut output)
     }
 
-    /// Writes symbolized native frames without constructing a shell command.
-    pub fn callstack(
-        &self,
-        metadata: &LogMetadata,
-        source: (&str, i32),
-        frames: &[usize],
-    ) -> io::Result<()> {
+    /// Captures the current native stack in Rust and writes it to the log.
+    ///
+    /// Capture ignores `RUST_BACKTRACE` and `RUST_LIB_BACKTRACE` and runs before
+    /// acquiring the output lock. C callers can appear in the captured stack
+    /// when their code has unwind information.
+    pub fn callstack(&self, metadata: &LogMetadata, source: (&str, i32)) -> io::Result<()> {
+        let backtrace = Backtrace::force_capture();
         let mut state = self.logger.lock_state();
         state.update_name(metadata);
         let mut output = self.logger.open_output(&state, metadata);
-        state.write_callstack(&mut output, metadata, source, frames)
+        state.write_callstack(&mut output, metadata, source, &backtrace)
     }
 
-    /// Writes symbolized native frames to a borrowed FILE adapter.
+    /// Captures the current native stack in Rust and writes to a borrowed output.
+    ///
+    /// Uses the same unconditional capture as [`Self::callstack`]. The output
+    /// remains owned by the caller and is flushed after the complete trace.
     pub fn callstack_to(
         &self,
         output: &mut dyn Write,
         metadata: &LogMetadata,
         source: (&str, i32),
-        frames: &[usize],
     ) -> io::Result<()> {
+        let backtrace = Backtrace::force_capture();
         let mut state = self.logger.lock_state();
         state.update_name(metadata);
-        state.write_callstack(output, metadata, source, frames)
+        state.write_callstack(output, metadata, source, &backtrace)
     }
 }
 
@@ -697,6 +687,43 @@ mod tests {
 
         assert!(result.is_err());
         assert!(logger.prepare(Level::WARN, 3).is_ok());
+    }
+
+    /// Checks stack capture produces indented UTF-8 beneath the native header.
+    #[test]
+    fn writes_a_rust_backtrace_with_the_native_header() {
+        let logger = logger();
+        let guard = logger.prepare_unfiltered().unwrap();
+        let mut output = Vec::new();
+
+        guard
+            .callstack_to(&mut output, &metadata(), ("caller", 42))
+            .unwrap();
+
+        let output = String::from_utf8(output).unwrap();
+        let backtrace = output
+            .strip_prefix("DBG 2026-10-18T00:00:00.123 server     caller:42: trace:\n")
+            .unwrap();
+        assert!(!backtrace.is_empty());
+        assert!(backtrace.lines().all(|line| line.starts_with("  ")));
+        assert_ne!(backtrace.trim(), Backtrace::disabled().to_string());
+    }
+
+    /// Checks a write failure after the trace header is returned to the caller.
+    #[test]
+    fn propagates_backtrace_output_failures() {
+        let logger = logger();
+        let guard = logger.prepare_unfiltered().unwrap();
+        let header = b"DBG 2026-10-18T00:00:00.123 server     caller:42: trace:\n";
+        let mut storage = vec![0; header.len()];
+        let mut output = storage.as_mut_slice();
+
+        let error = guard
+            .callstack_to(&mut output, &metadata(), ("caller", 42))
+            .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::WriteZero);
+        assert_eq!(storage, header);
     }
 
     /// Checks stack indentation preserves Unicode and a missing final newline.
