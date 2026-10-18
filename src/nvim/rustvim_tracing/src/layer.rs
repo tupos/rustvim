@@ -1,3 +1,4 @@
+//! Tracing subscriber layer that formats events for Neovim's logging bridge.
 #![forbid(unsafe_code)]
 
 use std::fmt::Write;
@@ -93,6 +94,8 @@ pub(super) fn install() -> Result<(), SetGlobalDefaultError> {
 
 #[cfg(test)]
 mod tests {
+    //! Checks event formatting through a capturing subscriber layer.
+
     use std::sync::Arc;
     use std::sync::Mutex;
 
@@ -121,6 +124,7 @@ mod tests {
     #[derive(Debug)]
     struct TestFailure;
 
+    /// Verifies messages and structured debug fields share one formatted payload.
     #[test]
     fn formats_messages_and_structured_fields_without_subscriber_fmt() {
         let event = Arc::new(Mutex::new(None));

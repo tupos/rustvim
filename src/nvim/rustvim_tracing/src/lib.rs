@@ -1,7 +1,10 @@
 //! Structured Rust diagnostics routed through Neovim's existing logger.
 
+pub mod buffer;
 mod ffi;
 mod layer;
+pub mod logger;
+pub mod writer;
 
 pub use tracing::Level;
 pub use tracing::debug;
