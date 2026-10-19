@@ -32,9 +32,9 @@ where
         Interest::sometimes()
     }
 
-    /// Consults Neovim before allocating or formatting event fields.
+    /// Consults the logger before allocating or formatting event fields.
     fn enabled(&self, metadata: &Metadata<'_>, _context: Context<'_, S>) -> bool {
-        ffi::enabled(metadata.level())
+        self.logger.enabled(*metadata.level())
     }
 
     /// Reserves logging before formatting structured fields.

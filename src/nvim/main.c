@@ -239,6 +239,9 @@ static void early_init(mparm_T *paramp)
   init_homedir();               // find real value of $HOME
   set_init_1(paramp != NULL ? paramp->clean : false);
   log_init();
+#ifdef NVIM_LOG_DEBUG
+  log_set_level(0);
+#endif
 
   TIME_MSG("inits 1");
 

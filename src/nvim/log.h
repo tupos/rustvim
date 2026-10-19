@@ -53,14 +53,10 @@
 # define LOG_CALLSTACK_TO_FILE(fp) log_callstack_to_file(fp, __func__, __LINE__)
 #endif
 
-#ifndef NVIM_LOG_DEBUG
-EXTERN int g_min_log_level INIT( = LOGLVL_WRN);
-#else
-EXTERN int g_min_log_level INIT( = 0);
-#endif
-
 /// Initializes the Rust logger and its tracing subscriber during native startup.
 void log_init(void);
+/// Sets the Rust logger's minimum severity and returns its previous value.
+int log_set_level(int level);
 /// Formats one native message; returns false when filtered, recursive, or failed.
 bool logmsg(int log_level, const char *context, const char *func_name, int line_num, bool eol,
             const char *fmt, ...) REAL_FATTR_PRINTF(6, 7);

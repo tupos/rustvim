@@ -635,10 +635,7 @@ static int nlua_with(lua_State *L)
     flags |= CMOD_SILENT;
   }
 
-  const int save_min_log_level = g_min_log_level;
-  if (log_level >= 0) {
-    g_min_log_level = log_level;
-  }
+  const int save_min_log_level = log_level >= 0 ? log_set_level(log_level) : -1;
   cmdmod_T save_cmdmod = cmdmod;
   CLEAR_FIELD(cmdmod);
   cmdmod.cmod_flags = flags;
@@ -669,7 +666,7 @@ static int nlua_with(lua_State *L)
   undo_cmdmod(&cmdmod);
   cmdmod = save_cmdmod;
   if (log_level >= 0) {
-    g_min_log_level = save_min_log_level;
+    log_set_level(save_min_log_level);
   }
 
   if (status) {

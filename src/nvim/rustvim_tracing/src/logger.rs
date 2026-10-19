@@ -16,6 +16,7 @@ use std::rc::Rc;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicI32;
 use std::sync::atomic::Ordering;
 use std::thread;
 use std::thread::ThreadId;
@@ -139,6 +140,8 @@ pub struct Logger {
     environment_path: Option<PathBuf>,
     /// Failure to create the default log directory, if any.
     directory_error: Option<io::Error>,
+    /// Severity threshold shared by native messages and tracing events.
+    minimum_level: AtomicI32,
     /// Threads holding guards; locked only while checking or changing membership.
     active_threads: Mutex<HashSet<ThreadId>>,
     /// Reusable printf storage, borrowed synchronously while C formats a message.
@@ -244,6 +247,7 @@ impl Logger {
     /// opened, creates the default path's parent directories and tries that
     /// path, then `nvim.log` in the current directory. Retains startup diagnostic
     /// information and any fallback path for the adapter to publish.
+    /// Starts at WARN; native debug startup enables all levels after installation.
     pub fn initialize(requested: Option<PathBuf>, default: PathBuf) -> Self {
         let requested = requested.and_then(Self::requested_path);
         if let Some(path) = requested.as_ref().filter(|path| Self::can_open(path)) {
@@ -305,6 +309,7 @@ impl Logger {
             wanted_path,
             environment_path,
             directory_error,
+            minimum_level: AtomicI32::new(Self::level_number(Level::WARN)),
             active_threads: Mutex::new(HashSet::new()),
             buffer: Mutex::new(LogBuffer::new()),
             state: Mutex::new(LogState::default()),
@@ -327,13 +332,28 @@ impl Logger {
         self.directory_error.as_ref()
     }
 
+    /// Reports whether the level meets this logger's current severity threshold.
+    ///
+    /// The threshold does not synchronize other state, so relaxed atomics suffice.
+    pub fn enabled(&self, level: Level) -> bool {
+        Self::level_number(level) >= self.minimum_level.load(Ordering::Relaxed)
+    }
+
+    /// Replaces the minimum severity and returns its previous value for restoration.
+    ///
+    /// Uses native numbering: 0 enables every level, 1 is DEBUG (including TRACE),
+    /// 2 is INFO, 3 is WARN, and 4 is ERROR. Values above 4 suppress all messages.
+    pub fn set_minimum_level(&self, minimum: i32) -> i32 {
+        self.minimum_level.swap(minimum, Ordering::Relaxed)
+    }
+
     /// Filters the level and reserves this thread before native formatting.
     ///
     /// The guard must stay alive while C writes into its Rust-owned buffer.
-    /// Returns [`Rejected::Filtered`] below the native minimum level, or
+    /// Returns [`Rejected::Filtered`] below this logger's minimum level, or
     /// [`Rejected::Recursive`] if this thread already holds a guard.
-    pub fn prepare(&self, level: Level, minimum: i32) -> Result<LogGuard<'_>, Rejected> {
-        if Self::level_number(level) < minimum {
+    pub fn prepare(&self, level: Level) -> Result<LogGuard<'_>, Rejected> {
+        if !self.enabled(level) {
             return Err(Rejected::Filtered);
         }
         self.prepare_unfiltered()
@@ -661,7 +681,7 @@ mod tests {
     #[test]
     fn keeps_complete_unicode_names() {
         let logger = logger();
-        let guard = logger.prepare(Level::WARN, 3).unwrap();
+        let guard = logger.prepare(Level::WARN).unwrap();
         let mut metadata = metadata();
         metadata.parent = "é".repeat(40);
         let message = LogMessage {
@@ -710,32 +730,92 @@ mod tests {
         assert_eq!(state.name, "ui/server");
     }
 
+    /// Checks the warning default, debug startup, and levels that suppress all messages.
+    #[test]
+    fn filters_with_the_owned_minimum_level() {
+        let logger = logger();
+        assert!(!logger.enabled(Level::DEBUG));
+        assert!(!logger.enabled(Level::INFO));
+        assert!(logger.enabled(Level::WARN));
+        assert!(logger.enabled(Level::ERROR));
+
+        assert_eq!(logger.set_minimum_level(0), 3);
+        assert!(logger.enabled(Level::TRACE));
+        assert!(logger.enabled(Level::DEBUG));
+        assert!(logger.enabled(Level::INFO));
+
+        assert_eq!(logger.set_minimum_level(5), 0);
+        for level in [
+            Level::TRACE,
+            Level::DEBUG,
+            Level::INFO,
+            Level::WARN,
+            Level::ERROR,
+        ] {
+            assert!(!logger.enabled(level));
+            assert!(matches!(logger.prepare(level), Err(Rejected::Filtered)));
+        }
+    }
+
+    /// Checks nested overrides can restore the preceding threshold at each level.
+    #[test]
+    fn restores_nested_minimum_levels() {
+        let logger = logger();
+        let outer = logger.set_minimum_level(2);
+        assert!(logger.enabled(Level::INFO));
+
+        let inner = logger.set_minimum_level(4);
+        assert!(!logger.enabled(Level::WARN));
+        assert!(logger.enabled(Level::ERROR));
+
+        assert_eq!(logger.set_minimum_level(inner), 4);
+        assert!(logger.enabled(Level::INFO));
+        assert_eq!(logger.set_minimum_level(outer), 2);
+        assert!(!logger.enabled(Level::INFO));
+        assert!(logger.enabled(Level::WARN));
+    }
+
+    /// Checks changing one logger's threshold does not affect another logger.
+    #[test]
+    fn keeps_minimum_levels_separate_for_each_logger() {
+        let first = logger();
+        let second = logger();
+        first.set_minimum_level(2);
+
+        assert!(first.prepare(Level::INFO).is_ok());
+        assert!(matches!(
+            second.prepare(Level::INFO),
+            Err(Rejected::Filtered)
+        ));
+        assert!(second.prepare(Level::WARN).is_ok());
+    }
+
     /// Checks a filtered message does not reserve the thread.
     #[test]
     fn filters_before_reserving_the_thread() {
         let logger = logger();
         assert!(matches!(
-            logger.prepare(Level::INFO, 3),
+            logger.prepare(Level::INFO),
             Err(Rejected::Filtered)
         ));
-        assert!(logger.prepare(Level::ERROR, 3).is_ok());
+        assert!(logger.prepare(Level::ERROR).is_ok());
     }
 
     /// Checks recursion requests one diagnostic and dropping the guard permits reuse.
     #[test]
     fn reports_recursion_once_and_releases_the_reservation() {
         let logger = logger();
-        let guard = logger.prepare(Level::WARN, 3).unwrap();
+        let guard = logger.prepare(Level::WARN).unwrap();
         assert!(matches!(
-            logger.prepare(Level::ERROR, 3),
+            logger.prepare(Level::ERROR),
             Err(Rejected::Recursive { notify: true })
         ));
         assert!(matches!(
-            logger.prepare(Level::ERROR, 3),
+            logger.prepare(Level::ERROR),
             Err(Rejected::Recursive { notify: false })
         ));
         drop(guard);
-        assert!(logger.prepare(Level::WARN, 3).is_ok());
+        assert!(logger.prepare(Level::WARN).is_ok());
     }
 
     /// Verifies one logger's active guard does not reserve a different logger.
@@ -743,11 +823,11 @@ mod tests {
     fn keeps_recursion_tracking_separate_for_each_logger() {
         let first = logger();
         let second = logger();
-        let _first_guard = first.prepare(Level::WARN, 3).unwrap();
-        let _second_guard = second.prepare(Level::WARN, 3).unwrap();
+        let _first_guard = first.prepare(Level::WARN).unwrap();
+        let _second_guard = second.prepare(Level::WARN).unwrap();
 
         assert!(matches!(
-            first.prepare(Level::ERROR, 3),
+            first.prepare(Level::ERROR),
             Err(Rejected::Recursive { notify: true })
         ));
     }
@@ -756,21 +836,21 @@ mod tests {
     #[test]
     fn allows_other_threads_to_log_to_the_same_logger() {
         let logger = Arc::new(logger());
-        let guard = logger.prepare(Level::WARN, 3).unwrap();
+        let guard = logger.prepare(Level::WARN).unwrap();
         let other = Arc::clone(&logger);
 
         thread::spawn(move || {
-            let _guard = other.prepare(Level::WARN, 3).unwrap();
+            let _guard = other.prepare(Level::WARN).unwrap();
         })
         .join()
         .unwrap();
 
         assert!(matches!(
-            logger.prepare(Level::ERROR, 3),
+            logger.prepare(Level::ERROR),
             Err(Rejected::Recursive { notify: true })
         ));
         drop(guard);
-        assert!(logger.prepare(Level::WARN, 3).is_ok());
+        assert!(logger.prepare(Level::WARN).is_ok());
     }
 
     /// Verifies panic unwinding releases the active-thread reservation.
@@ -778,12 +858,12 @@ mod tests {
     fn releases_the_reservation_during_unwinding() {
         let logger = logger();
         let result = catch_unwind(AssertUnwindSafe(|| {
-            let _guard = logger.prepare(Level::WARN, 3).unwrap();
+            let _guard = logger.prepare(Level::WARN).unwrap();
             panic!("formatting failed");
         }));
 
         assert!(result.is_err());
-        assert!(logger.prepare(Level::WARN, 3).is_ok());
+        assert!(logger.prepare(Level::WARN).is_ok());
     }
 
     /// Checks stack capture produces indented UTF-8 beneath the native header.
@@ -837,12 +917,12 @@ mod tests {
     #[test]
     fn rejects_recursion_during_formatting() {
         let logger = Logger::new(None, None, None, None);
-        let guard = logger.prepare(Level::WARN, 0).unwrap();
+        let guard = logger.prepare(Level::WARN).unwrap();
         assert_eq!(
             guard.format_message(
                 |output| {
                     assert!(matches!(
-                        logger.prepare(Level::WARN, 0),
+                        logger.prepare(Level::WARN),
                         Err(Rejected::Recursive { .. })
                     ));
                     output[..2].copy_from_slice(b"x\0");
@@ -859,11 +939,11 @@ mod tests {
     fn formatting_recovers_after_a_panicking_callback() {
         let logger = Logger::new(None, None, None, None);
         let result = catch_unwind(AssertUnwindSafe(|| {
-            let guard = logger.prepare(Level::WARN, 0).unwrap();
+            let guard = logger.prepare(Level::WARN).unwrap();
             guard.format_message::<()>(|_| panic!("formatter failed"), |_| ());
         }));
         assert!(result.is_err());
-        let guard = logger.prepare(Level::WARN, 0).unwrap();
+        let guard = logger.prepare(Level::WARN).unwrap();
         assert_eq!(
             guard.format_message(
                 |output| {

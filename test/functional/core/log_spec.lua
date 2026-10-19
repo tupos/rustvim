@@ -138,7 +138,7 @@ describe('log', function()
                     int line, bool newline, const char *format, ...);
         void log_callstack(const char *function_name, int line);
         void log_uv_handles(void *loop);
-        extern int g_min_log_level;
+        int log_set_level(int level);
         extern unsigned char main_loop[1];
       ]=])
     ]])
@@ -160,25 +160,50 @@ describe('log', function()
     )
   end)
 
-  it('uses the current native severity threshold', function()
+  it('uses the current Rust-owned severity threshold', function()
     setup_native()
     eq({ false, false, true, true }, exec_lua(function()
       local ffi = require('ffi')
-      local saved = ffi.C.g_min_log_level
-      ffi.C.g_min_log_level = 3
+      local saved = ffi.C.log_set_level(3)
       local emitted = {
         ffi.C.logmsg(1, nil, 'level_test', 1, true, 'skip-debug'),
         ffi.C.logmsg(2, nil, 'level_test', 2, true, 'skip-info'),
         ffi.C.logmsg(3, nil, 'level_test', 3, true, 'keep-warning'),
         ffi.C.logmsg(4, nil, 'level_test', 4, true, 'keep-error'),
       }
-      ffi.C.g_min_log_level = saved
+      ffi.C.log_set_level(saved)
       return emitted
     end))
     assert_nolog('skip%-debug', testlog)
     assert_nolog('skip%-info', testlog)
     assert_log('WRN .-level_test:3: keep%-warning', testlog)
     assert_log('ERR .-level_test:4: keep%-error', testlog)
+  end)
+
+  it('restores severity after nested Lua scopes and callback errors', function()
+    setup_native()
+    eq({ false, { true, false, true, false, true }, false }, exec_lua(function()
+      local ffi = require('ffi')
+      local saved = ffi.C.log_set_level(3)
+      ---Returns whether INFO passes the current scoped threshold.
+      local function info()
+        return ffi.C.logmsg(2, nil, 'scope_test', 1, true, 'scoped-info')
+      end
+
+      local before = info()
+      local scoped = vim._with({ log_level = 2 }, function()
+        local outer = info()
+        local inner = vim._with({ log_level = 4 }, info)
+        local restored = info()
+        local ok = pcall(vim._with, { log_level = 5 }, function()
+          error('expected callback failure')
+        end)
+        return { outer, inner, restored, ok, info() }
+      end)
+      local after = info()
+      ffi.C.log_set_level(saved)
+      return { before, scoped, after }
+    end))
   end)
 
   it('preserves missing source metadata and the newline flag', function()

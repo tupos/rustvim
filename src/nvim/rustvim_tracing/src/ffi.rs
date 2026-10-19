@@ -38,8 +38,6 @@ struct NativeStats {
 }
 
 unsafe extern "C" {
-    /// Native severity threshold, including temporary Lua callback adjustments.
-    static mut g_min_log_level: libc::c_int;
     /// Native statistics storage, initialized before Rust startup.
     static mut g_stats: NativeStats;
     /// Nonzero when this process acts as a remote UI client.
@@ -61,17 +59,6 @@ unsafe extern "C" {
     fn uv_print_all_handles(loop_pointer: *mut libc::c_void, output: *mut libc::FILE);
 }
 
-/// Reads Neovim's current threshold, including temporary Lua callback adjustments.
-fn minimum() -> i32 {
-    // SAFETY: Neovim owns this process-lifetime variable and its native updates.
-    unsafe { g_min_log_level }
-}
-
-/// Filters tracing fields before they are evaluated or formatted.
-pub(super) fn enabled(level: &Level) -> bool {
-    Logger::level_number(*level) >= minimum()
-}
-
 /// Accounts for native attempts skipped before initialization or due to recursion.
 fn skipped() {
     // SAFETY: This mirrors the native counter update in process-lifetime g_stats.
@@ -87,7 +74,7 @@ fn reserve<'a>(
     line: i32,
 ) -> Option<LogGuard<'a>> {
     let result = match level {
-        Some(level) => logger.prepare(level, minimum()),
+        Some(level) => logger.prepare(level),
         None => logger.prepare_unfiltered(),
     };
     match result {
@@ -211,6 +198,15 @@ pub(super) fn emit(logger: &Logger, event: &Event<'_>) {
     }
 }
 
+/// Replaces the installed logger's severity threshold and returns the previous one.
+///
+/// Before logger installation, returns WARN without changing any state.
+#[unsafe(no_mangle)]
+pub extern "C" fn log_set_level(level: libc::c_int) -> libc::c_int {
+    layer::with_logger(|logger| logger.set_minimum_level(level))
+        .unwrap_or_else(|| Logger::level_number(Level::WARN))
+}
+
 /// Initializes the logger and installs its tracing subscriber during native startup.
 ///
 /// Native environment and path initialization must already have completed.
@@ -288,7 +284,7 @@ pub unsafe extern "C" fn rustvim_logmsg(
         return false;
     }
     layer::with_logger(|logger| {
-        if !enabled(&level) {
+        if !logger.enabled(level) {
             return false;
         }
         // SAFETY: The caller keeps both optional strings readable throughout this call.
