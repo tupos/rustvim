@@ -223,8 +223,7 @@ pub(super) fn emit(logger: &Logger, event: &Event<'_>) {
 #[unsafe(no_mangle)]
 pub extern "C" fn log_init() {
     let requested = std::env::var_os("NVIM_LOG_FILE").map(PathBuf::from);
-    // SAFETY: Startup initialized the native home cache and excludes concurrent updates.
-    let home = unsafe { rust_os::ffi::cached_home_directory() };
+    let home = rust_os::env::cached_home_directory();
     let default =
         rust_os::stdpaths::user_state_subpath(home.as_deref(), Path::new("logs/nvim.log"), 0, true);
     let logger = Logger::initialize(requested, default);

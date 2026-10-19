@@ -365,48 +365,16 @@ void os_get_hostname(char *hostname, size_t size)
 #endif
 }
 
-/// The "real" home directory as determined by `init_homedir`.
-static char *homedir = NULL;
-
 /// Gets the "real", resolved user home directory as determined by `init_homedir`.
 const char *os_homedir(void)
 {
+  const char *homedir = rustvim_cached_homedir();
   if (!homedir) {
     emsg("os_homedir failed: homedir not initialized");
     return NULL;
   }
   return homedir;
 }
-
-/// Sets `homedir` to the "real", resolved user home directory, as follows:
-///   1. get value of $HOME
-///   2. if $HOME is not set, try the following
-/// For Windows:
-///   1. assemble homedir using HOMEDRIVE and HOMEPATH
-///   2. try os_uv_homedir()
-///   3. resolve a direct reference to another system variable
-///   4. guess C drive
-/// For Unix:
-///   1. try os_uv_homedir()
-///   2. go to that directory
-///     This also works with mounts and links.
-///     Don't do this for Windows, it will change the "current dir" for a drive.
-///   3. fall back to current working directory as a last resort
-void init_homedir(void)
-{
-  xfree(homedir);
-  homedir = NULL;
-  homedir = rustvim_resolve_homedir();
-}
-
-#ifdef EXITFREE
-
-void free_homedir(void)
-{
-  xfree(homedir);
-}
-
-#endif
 
 /// Call expand_env() and store the result in an allocated string.
 /// This is not very memory efficient, this expects the result to be freed
@@ -535,7 +503,8 @@ size_t expand_env_esc(const char *restrict srcp, char *restrict dst, int dstlen,
       } else if (src[1] == NUL  // home directory
                  || vim_ispathsep(src[1])
                  || vim_strchr(" ,\t\n", (uint8_t)src[1]) != NULL) {
-        var = homedir;
+        // This branch only reads the cached string; mustfree remains false.
+        var = (char *)rustvim_cached_homedir();
         tail = src + 1;
       } else {  // user directory
 #ifdef UNIX
@@ -766,7 +735,7 @@ char *vim_getenv(const char *name)
 
 #ifdef MSWIN
   if (strcmp(name, "HOME") == 0) {
-    return xstrdup(homedir);
+    return xstrdup(rustvim_cached_homedir());
   }
 #endif
 
@@ -921,6 +890,7 @@ size_t home_replace(const buf_T *const buf, const char *src, char *const dst, si
 
   // We check both the value of the $HOME environment variable and the
   // "real" home directory.
+  const char *homedir = rustvim_cached_homedir();
   if (homedir != NULL) {
     dirlen = strlen(homedir);
   }
@@ -965,7 +935,7 @@ size_t home_replace(const buf_T *const buf, const char *src, char *const dst, si
     // and the home directory is "/home/piet", the file does not end up
     // as "~er/bla" (which would seem to indicate the file "bla" in user
     // er's home directory)).
-    char *p = homedir;
+    const char *p = homedir;
     size_t len = dirlen;
     while (true) {
       if (len
@@ -1113,7 +1083,7 @@ void vim_unsetenv_ext(const char *var)
 {
   os_unsetenv(var);
 
-  // "homedir" is not cleared, keep using the old value until $HOME is set.
+  // Keep the cached home directory until $HOME is set again.
   if (STRICMP(var, "VIM") == 0) {
     didset_vim = false;
   } else if (STRICMP(var, "VIMRUNTIME") == 0) {

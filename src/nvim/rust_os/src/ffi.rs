@@ -3,12 +3,11 @@
 use std::borrow::Cow;
 use std::ffi::CStr;
 use std::path::Path;
+#[cfg(windows)]
 use std::path::PathBuf;
 use std::ptr;
 
 unsafe extern "C" {
-    /// Borrows Neovim's existing home cache without changing its lifetime.
-    fn os_homedir() -> *const libc::c_char;
     /// Allocates native storage or terminates on allocation failure.
     fn xmalloc(size: usize) -> *mut libc::c_void;
 }
@@ -41,17 +40,6 @@ unsafe fn native_path<'a>(pointer: *const libc::c_char) -> Option<Cow<'a, Path>>
     }
 }
 
-/// Copies the existing native home cache into an owned Rust path.
-///
-/// # Safety
-///
-/// Home initialization must have completed. No native home-cache update may
-/// run concurrently with this synchronous copy.
-pub unsafe fn cached_home_directory() -> Option<PathBuf> {
-    // SAFETY: The caller guarantees the cache remains stable during this copy.
-    unsafe { native_path(os_homedir()) }.map(Cow::into_owned)
-}
-
 /// Transfers a path to native-owned storage that callers release with xfree.
 fn native_owned_path(path: &Path) -> *mut libc::c_char {
     #[cfg(unix)]
@@ -71,22 +59,43 @@ fn native_owned_path(path: &Path) -> *mut libc::c_char {
     output.cast()
 }
 
-/// Resolves home for the native cache; the caller releases the result with xfree.
-#[unsafe(no_mangle)]
-pub extern "C" fn rustvim_resolve_homedir() -> *mut libc::c_char {
-    crate::env::home_directory().map_or(ptr::null_mut(), |home| native_owned_path(&home))
-}
-
-/// Returns the shared application state directory in native-owned storage.
+/// Borrows the Rust-owned native string without allocating or reporting errors.
 ///
 /// # Safety
 ///
-/// Native home initialization must have completed, and no cache update may run
-/// concurrently with this synchronous copy.
+/// The caller must not modify or free the returned string. It must exclude cache
+/// initialization and clearing for the entire time it uses a non-null pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rustvim_state_directory() -> *mut libc::c_char {
-    // SAFETY: Native callers serialize home-cache changes with standard-path queries.
-    let home = unsafe { cached_home_directory() };
+pub unsafe extern "C" fn rustvim_cached_homedir() -> *const libc::c_char {
+    crate::env::home_directory_cache()
+        .native_path()
+        .map_or(ptr::null(), CStr::as_ptr)
+}
+
+/// Refreshes the shared home cache for native startup and HOME assignments.
+///
+/// # Safety
+///
+/// No native caller may still be using a string borrowed from the previous cache.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn init_homedir() {
+    crate::env::initialize_home_directory();
+}
+
+/// Releases the Rust-owned home cache during native shutdown.
+///
+/// # Safety
+///
+/// No native caller may still be using a string borrowed from the cache.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn free_homedir() {
+    crate::env::clear_home_directory();
+}
+
+/// Returns the shared application state directory in native-owned storage.
+#[unsafe(no_mangle)]
+pub extern "C" fn rustvim_state_directory() -> *mut libc::c_char {
+    let home = crate::env::cached_home_directory();
     native_owned_path(&crate::stdpaths::state_directory(home.as_deref()))
 }
 
@@ -94,20 +103,19 @@ pub unsafe extern "C" fn rustvim_state_directory() -> *mut libc::c_char {
 ///
 /// # Safety
 ///
-/// name must be a readable NUL-terminated string. Native home initialization must
-/// have completed, and its cache must remain stable until this call returns.
+/// A non-null name must remain a readable NUL-terminated string until this call
+/// returns. A null name is rejected with a null result.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn stdpaths_user_state_subpath(
     name: *const libc::c_char,
     trailing_separators: usize,
     escape_commas: bool,
 ) -> *mut libc::c_char {
-    // SAFETY: Both strings remain valid under the native caller's contract.
+    // SAFETY: The caller supplies a readable name that remains valid for this call.
     let Some(name) = (unsafe { native_path(name) }) else {
         return ptr::null_mut();
     };
-    // SAFETY: The native caller excludes home-cache updates during this call.
-    let home = unsafe { cached_home_directory() };
+    let home = crate::env::cached_home_directory();
     native_owned_path(&crate::stdpaths::user_state_subpath(
         home.as_deref(),
         name.as_ref(),

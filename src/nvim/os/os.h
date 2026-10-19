@@ -17,8 +17,14 @@ extern char *default_vim_dir;
 extern char *default_vimruntime_dir;
 extern char *default_lib_dir;
 
-/// Resolves home in Rust; the native cache owns and releases the returned string.
-char *rustvim_resolve_homedir(void);
+/// Borrows the Rust-owned home; do not modify or free it, or use it across cache updates.
+const char *rustvim_cached_homedir(void);
+/// Resolves and replaces the cached home; no borrowed cache string may remain in use.
+void init_homedir(void);
+#ifdef EXITFREE
+/// Releases the cached home after all native borrowers have finished.
+void free_homedir(void);
+#endif
 /// Returns the Rust-built application state directory, released with xfree.
 char *rustvim_state_directory(void);
 /// Returns a Rust-built state subpath owned by the caller and released with xfree.
