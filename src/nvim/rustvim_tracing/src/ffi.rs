@@ -45,18 +45,12 @@ unsafe extern "C" {
     /// Nonzero when this process acts as a remote UI client.
     static mut ui_client_channel_id: u64;
 
-    /// Releases storage returned by Neovim's native allocation functions.
-    fn xfree(pointer: *mut libc::c_void);
     /// Updates a native environment variable during single-threaded initialization.
     fn os_setenv(
         name: *const libc::c_char,
         value: *const libc::c_char,
         overwrite: bool,
     ) -> libc::c_int;
-    /// Returns an allocated environment value, or NULL when unset or empty.
-    fn os_getenv(name: *const libc::c_char) -> *mut libc::c_char;
-    /// Finds the platform-specific tail of a native path, accepting NULL.
-    fn path_tail(path: *const libc::c_char) -> *const libc::c_char;
     /// Borrows the current string value of a native v: variable.
     fn get_vim_var_str(index: libc::c_int) -> *const libc::c_char;
     /// Fills local calendar time, returning NULL if conversion fails.
@@ -160,16 +154,16 @@ fn metadata() -> Option<LogMetadata> {
         calendar.tm_sec
     );
 
-    // SAFETY: These native helpers return live strings or NULL. The parent
-    // allocation is owned here; the v:servername value remains native-owned.
-    let (parent, server, ui) = unsafe {
-        let parent = os_getenv(c"NVIM".as_ptr());
-        let parent_name = text(path_tail(parent)).unwrap().into_owned();
-        xfree(parent.cast());
-        let server_name = text(path_tail(get_vim_var_str(VV_SEND_SERVER)))
-            .unwrap()
-            .into_owned();
-        (parent_name, server_name, ui_client_channel_id != 0)
+    let parent = std::env::var_os("NVIM").unwrap_or_default();
+    let parent = rust_os::path::tail(&parent.to_string_lossy()).to_owned();
+
+    // SAFETY: Neovim owns the server string and UI flag during this synchronous read.
+    let (server, ui) = unsafe {
+        let server = text(get_vim_var_str(VV_SEND_SERVER)).unwrap_or_default();
+        (
+            rust_os::path::tail(&server).to_owned(),
+            ui_client_channel_id != 0,
+        )
     };
     Some(LogMetadata {
         timestamp,

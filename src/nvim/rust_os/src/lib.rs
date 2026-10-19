@@ -1,5 +1,6 @@
 pub mod env;
 pub mod ffi;
+pub mod path;
 pub mod stdpaths;
 
 pub fn hello_from_rust_os() {
