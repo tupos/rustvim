@@ -238,13 +238,14 @@ impl LogState {
 
 impl Logger {
     /// Selects the requested, state-directory, current-directory, or stderr
-    /// destination. Paths have already been expanded by the Neovim adapter.
+    /// destination. The requested path is the unexpanded NVIM_LOG_FILE value.
     ///
     /// Probing a path may create its log file. If the requested path cannot be
     /// opened, creates the default path's parent directories and tries that
     /// path, then `nvim.log` in the current directory. Retains startup diagnostic
     /// information and any fallback path for the adapter to publish.
     pub fn initialize(requested: Option<PathBuf>, default: PathBuf) -> Self {
+        let requested = requested.and_then(Self::requested_path);
         if let Some(path) = requested.as_ref().filter(|path| Self::can_open(path)) {
             return Self::new(Some(path.clone()), None, None, None);
         }
@@ -272,6 +273,21 @@ impl Logger {
         };
         let environment_path = destination.clone();
         Self::new(destination, wanted, environment_path, directory_error)
+    }
+
+    /// Interprets the raw NVIM_LOG_FILE value without expanding its contents.
+    ///
+    /// Empty values and the literal variable marker select the default path,
+    /// matching the previous C adapter. Windows separators become slashes;
+    /// other platforms retain the original path bytes. Filesystem operations,
+    /// rather than the C expander's scratch buffer, determine path limits.
+    fn requested_path(path: PathBuf) -> Option<PathBuf> {
+        if path.as_os_str().is_empty() || path.as_os_str() == "$NVIM_LOG_FILE" {
+            return None;
+        }
+        #[cfg(windows)]
+        let path = PathBuf::from(path.to_string_lossy().replace('\\', "/"));
+        Some(path)
     }
 
     /// Constructs a logger from an already selected destination and diagnostics.
@@ -578,6 +594,67 @@ mod tests {
             server: "server".into(),
             pid: 42,
         }
+    }
+
+    /// Checks values treated as unset by the former C expansion use the default.
+    #[test]
+    fn ignores_empty_and_unexpanded_marker_paths() {
+        for value in ["", "$NVIM_LOG_FILE"] {
+            assert_eq!(Logger::requested_path(value.into()), None);
+        }
+    }
+
+    /// Checks environment references, tildes, spaces, and Unicode remain literal.
+    #[test]
+    fn preserves_requested_path_contents() {
+        for value in [
+            "~/nvim.log",
+            "$OTHER/nvim.log",
+            "$NVIM_LOG_FILE/nvim.log",
+            "$NVIM_LOG_FILE/",
+            "logs/héllo 東京.log",
+        ] {
+            let path = PathBuf::from(value);
+            assert_eq!(Logger::requested_path(path.clone()), Some(path));
+        }
+    }
+
+    /// Checks path interpretation does not impose the C scratch-buffer limit.
+    #[test]
+    fn keeps_paths_longer_than_the_c_expansion_buffer() {
+        let path = PathBuf::from(format!("{}nvim.log", "logs/".repeat(1000)));
+        assert_eq!(Logger::requested_path(path.clone()), Some(path));
+    }
+
+    /// Checks Unix filesystem names retain bytes that are not valid UTF-8.
+    #[cfg(unix)]
+    #[test]
+    fn preserves_non_utf8_requested_paths() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let path = PathBuf::from(OsString::from_vec(b"logs/invalid-\xff.log".to_vec()));
+        assert_eq!(Logger::requested_path(path.clone()), Some(path));
+    }
+
+    /// Checks backslashes remain filename characters on Unix.
+    #[cfg(unix)]
+    #[test]
+    fn preserves_backslashes_in_unix_requested_paths() {
+        let path = PathBuf::from(r"logs\nvim.log");
+        assert_eq!(Logger::requested_path(path.clone()), Some(path));
+    }
+
+    /// Checks Windows paths keep the slash spelling produced by the C expander.
+    #[cfg(windows)]
+    #[test]
+    fn normalizes_windows_requested_path_separators() {
+        assert_eq!(
+            Logger::requested_path(PathBuf::from(r"C:\logs\héllo.log"))
+                .unwrap()
+                .into_os_string(),
+            std::ffi::OsString::from("C:/logs/héllo.log")
+        );
     }
 
     /// Checks long Unicode names and payloads are emitted without truncation.

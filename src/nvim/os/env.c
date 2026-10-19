@@ -367,7 +367,6 @@ void os_get_hostname(char *hostname, size_t size)
 
 /// The "real" home directory as determined by `init_homedir`.
 static char *homedir = NULL;
-static char *os_uv_homedir(void);
 
 /// Gets the "real", resolved user home directory as determined by `init_homedir`.
 const char *os_homedir(void)
@@ -395,102 +394,9 @@ const char *os_homedir(void)
 ///   3. fall back to current working directory as a last resort
 void init_homedir(void)
 {
-  // In case we are called a second time.
   xfree(homedir);
   homedir = NULL;
-
-  char *var = os_getenv("HOME");
-  char *tofree = var;
-
-#ifdef MSWIN
-  // Typically, $HOME is not defined on Windows, unless the user has
-  // specifically defined it for Vim's sake. However, on Windows NT
-  // platforms, $HOMEDRIVE and $HOMEPATH are automatically defined for
-  // each user. Try constructing $HOME from these.
-  if (var == NULL) {
-    char *homedrive = os_getenv("HOMEDRIVE");
-    char *homepath = os_getenv("HOMEPATH");
-    if (homepath == NULL) {
-      homepath = xstrdup(PATHSEPSTR);
-    }
-    if (homedrive != NULL
-        && strlen(homedrive) + strlen(homepath) < MAXPATHL) {
-      snprintf(os_buf, MAXPATHL, "%s%s", homedrive, homepath);
-      if (os_buf[0] != NUL) {
-        var = os_buf;
-      }
-    }
-    xfree(homepath);
-    xfree(homedrive);
-  }
-  if (var == NULL) {
-    var = os_uv_homedir();
-  }
-
-  // Weird but true: $HOME may contain an indirect reference to another
-  // variable, esp. "%USERPROFILE%".  Happens when $USERPROFILE isn't set
-  // when $HOME is being set.
-  if (var != NULL && *var == '%') {
-    const char *p = strchr(var + 1, '%');
-    if (p != NULL) {
-      vim_snprintf(os_buf, (size_t)(p - var), "%s", var + 1);
-      var = NULL;
-      char *exp = os_getenv(os_buf);
-      if (exp != NULL) {
-        if (*exp != NUL && strlen(exp) + strlen(p) < MAXPATHL) {
-          vim_snprintf(os_buf, MAXPATHL, "%s%s", exp, p + 1);
-          var = os_buf;
-        }
-        xfree(exp);
-      }
-    }
-  }
-
-  // Default home dir is C:/
-  // Best assumption we can make in such a situation.
-  if (var == NULL
-      // Empty means "undefined"
-      || *var == NUL) {
-    var = "C:/";
-  }
-#endif
-
-#ifdef UNIX
-  if (var == NULL) {
-    var = os_uv_homedir();
-  }
-
-  // Get the actual path.  This resolves links.
-  if (var != NULL && os_realpath(var, IObuff, IOSIZE) != NULL) {
-    var = IObuff;
-  }
-
-  // Fall back to current working directory if home is not found
-  if ((var == NULL || *var == NUL)
-      && os_dirname(os_buf, sizeof(os_buf)) == OK) {
-    var = os_buf;
-  }
-#endif
-  if (var != NULL) {
-    homedir = TO_SLASH_SAVE(var);
-  }
-  xfree(tofree);
-}
-
-static char homedir_buf[MAXPATHL];
-
-static char *os_uv_homedir(void)
-{
-  homedir_buf[0] = NUL;
-  size_t homedir_size = MAXPATHL;
-  // http://docs.libuv.org/en/v1.x/misc.html#c.uv_os_homedir
-  int ret_value = uv_os_homedir(homedir_buf, &homedir_size);
-  if (ret_value == 0 && homedir_size < MAXPATHL) {
-    return homedir_buf;
-  }
-  ELOG("uv_os_homedir() failed %d: %s", ret_value, os_strerror(ret_value));
-  homedir_buf[0] = NUL;
-  return NULL;
+  homedir = rustvim_resolve_homedir();
 }
 
 #ifdef EXITFREE

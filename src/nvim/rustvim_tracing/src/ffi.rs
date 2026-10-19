@@ -3,7 +3,6 @@
 use std::borrow::Cow;
 use std::ffi::CStr;
 use std::ffi::CString;
-use std::ffi::OsString;
 use std::fs::File;
 use std::io;
 use std::mem::MaybeUninit;
@@ -46,14 +45,6 @@ unsafe extern "C" {
     /// Nonzero when this process acts as a remote UI client.
     static mut ui_client_channel_id: u64;
 
-    /// Expands a native path and returns storage owned by Neovim's allocator.
-    fn expand_env_save(source: *mut libc::c_char) -> *mut libc::c_char;
-    /// Returns an allocated state-directory path honoring NVIM_APPNAME.
-    fn stdpaths_user_state_subpath(
-        name: *const libc::c_char,
-        trailing_separators: usize,
-        escape_commas: bool,
-    ) -> *mut libc::c_char;
     /// Releases storage returned by Neovim's native allocation functions.
     fn xfree(pointer: *mut libc::c_void);
     /// Updates a native environment variable during single-threaded initialization.
@@ -135,35 +126,6 @@ unsafe fn text<'a>(pointer: *const libc::c_char) -> Option<Cow<'a, str>> {
     } else {
         // SAFETY: The caller supplies the readable string lifetime.
         Some(unsafe { CStr::from_ptr(pointer) }.to_string_lossy())
-    }
-}
-
-/// Copies a native allocation and releases it with its matching allocator.
-///
-/// # Safety
-///
-/// A non-null pointer must be a NUL-terminated string allocated by Neovim.
-unsafe fn take_bytes(pointer: *mut libc::c_char) -> Vec<u8> {
-    if pointer.is_null() {
-        return Vec::new();
-    }
-    // SAFETY: The allocation is valid until the matching xfree below.
-    let bytes = unsafe { CStr::from_ptr(pointer) }.to_bytes().to_vec();
-    // SAFETY: Ownership of this allocation was transferred by the caller.
-    unsafe { xfree(pointer.cast()) };
-    bytes
-}
-
-/// Preserves native path bytes on Unix and decodes native UTF-8 elsewhere.
-fn path(bytes: Vec<u8>) -> PathBuf {
-    #[cfg(unix)]
-    {
-        use std::os::unix::ffi::OsStringExt;
-        PathBuf::from(OsString::from_vec(bytes))
-    }
-    #[cfg(not(unix))]
-    {
-        PathBuf::from(OsString::from(String::from_utf8_lossy(&bytes).into_owned()))
     }
 }
 
@@ -260,17 +222,11 @@ pub(super) fn emit(logger: &Logger, event: &Event<'_>) {
 /// Native environment and path initialization must already have completed.
 #[unsafe(no_mangle)]
 pub extern "C" fn log_init() {
-    // SAFETY: Startup owns these native helpers; take_bytes releases both allocations.
-    let (requested, default) = unsafe {
-        let requested = take_bytes(expand_env_save(c"$NVIM_LOG_FILE".as_ptr().cast_mut()));
-        let requested = (requested != b"$NVIM_LOG_FILE").then(|| path(requested));
-        let default = path(take_bytes(stdpaths_user_state_subpath(
-            c"logs/nvim.log".as_ptr(),
-            0,
-            true,
-        )));
-        (requested, default)
-    };
+    let requested = std::env::var_os("NVIM_LOG_FILE").map(PathBuf::from);
+    // SAFETY: Startup initialized the native home cache and excludes concurrent updates.
+    let home = unsafe { rust_os::ffi::cached_home_directory() };
+    let default =
+        rust_os::stdpaths::user_state_subpath(home.as_deref(), Path::new("logs/nvim.log"), 0, true);
     let logger = Logger::initialize(requested, default);
     if let Some(path) = logger.wanted_path() {
         set_path(c"__NVIM_LOG_FILE_WANT", path);

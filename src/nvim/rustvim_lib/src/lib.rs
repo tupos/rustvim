@@ -1,3 +1,4 @@
+pub use rust_os;
 pub use rustvim_core::globals::*;
 pub use rustvim_core::grid::*;
 pub use rustvim_core::mbyte::*;

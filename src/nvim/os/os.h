@@ -17,6 +17,13 @@ extern char *default_vim_dir;
 extern char *default_vimruntime_dir;
 extern char *default_lib_dir;
 
+/// Resolves home in Rust; the native cache owns and releases the returned string.
+char *rustvim_resolve_homedir(void);
+/// Returns the Rust-built application state directory, released with xfree.
+char *rustvim_state_directory(void);
+/// Returns a Rust-built state subpath owned by the caller and released with xfree.
+char *stdpaths_user_state_subpath(const char *fname, size_t trailing_pathseps, bool escape_commas);
+
 // IWYU pragma: begin_exports
 #include "os/env.h.generated.h"
 #include "os/mem.h.generated.h"
