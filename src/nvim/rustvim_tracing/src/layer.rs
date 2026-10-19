@@ -1,4 +1,4 @@
-//! Tracing subscriber layer that formats events for Neovim's logging bridge.
+//! Tracing subscriber layer owning the shared Rust logger.
 #![forbid(unsafe_code)]
 
 use std::fmt::Write;
@@ -15,9 +15,13 @@ use tracing_subscriber::layer::Context;
 use tracing_subscriber::layer::SubscriberExt;
 
 use crate::ffi;
+use crate::logger::Logger;
 
-/// Subscriber layer that forwards enabled events to Neovim's logger.
-pub(super) struct NvimLogLayer;
+/// Subscriber layer owning the logger used by Rust events and native callers.
+pub(super) struct NvimLogLayer {
+    /// Process-lifetime logger, owned by tracing's installed subscriber.
+    pub(super) logger: Logger,
+}
 
 impl<S> Layer<S> for NvimLogLayer
 where
@@ -33,9 +37,9 @@ where
         ffi::enabled(metadata.level())
     }
 
-    /// Formats and forwards one enabled structured event.
+    /// Reserves logging before formatting structured fields.
     fn on_event(&self, event: &Event<'_>, _context: Context<'_, S>) {
-        ffi::emit(event.metadata(), &format_event(event));
+        ffi::emit(&self.logger, event);
     }
 }
 
@@ -81,15 +85,26 @@ impl Visit for EventFields {
 }
 
 /// Formats one event without timestamps, levels, or source metadata.
-fn format_event(event: &Event<'_>) -> String {
+pub(super) fn format_event(event: &Event<'_>) -> String {
     let mut fields = EventFields::default();
     event.record(&mut fields);
     fields.finish()
 }
 
 /// Installs the Neovim layer as the process-wide tracing subscriber.
-pub(super) fn install() -> Result<(), SetGlobalDefaultError> {
-    tracing::subscriber::set_global_default(tracing_subscriber::registry().with(NvimLogLayer))
+pub(super) fn install(logger: Logger) -> Result<(), SetGlobalDefaultError> {
+    tracing::subscriber::set_global_default(
+        tracing_subscriber::registry().with(NvimLogLayer { logger }),
+    )
+}
+
+/// Borrows the installed logger for one synchronous native operation.
+///
+/// Cloning the dispatcher releases tracing's lookup guard before callbacks run.
+pub(super) fn with_logger<R>(use_logger: impl FnOnce(&Logger) -> R) -> Option<R> {
+    let dispatch = tracing::dispatcher::get_default(Clone::clone);
+    let layer = dispatch.downcast_ref::<NvimLogLayer>()?;
+    Some(use_logger(&layer.logger))
 }
 
 #[cfg(test)]

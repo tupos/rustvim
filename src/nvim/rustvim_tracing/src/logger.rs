@@ -22,6 +22,7 @@ use std::thread::ThreadId;
 
 use tracing::Level;
 
+use crate::buffer::LogBuffer;
 use crate::writer::write_record;
 
 /// Runtime context used to construct a log record.
@@ -140,6 +141,8 @@ pub struct Logger {
     directory_error: Option<io::Error>,
     /// Threads holding guards; locked only while checking or changing membership.
     active_threads: Mutex<HashSet<ThreadId>>,
+    /// Reusable printf storage, borrowed synchronously while C formats a message.
+    buffer: Mutex<LogBuffer>,
     /// Cached name and reusable record storage, locked throughout output.
     state: Mutex<LogState>,
     /// Whether a recursion rejection has already requested a diagnostic.
@@ -176,8 +179,7 @@ impl LogState {
             self.name.push_str(&metadata.server);
         } else {
             self.name.push_str(if metadata.ui { "ui." } else { "?." });
-            write!(&mut self.name, "{:<5}", metadata.pid)
-                .expect("writing to a String cannot fail");
+            write!(&mut self.name, "{:<5}", metadata.pid).expect("writing to a String cannot fail");
         }
     }
 
@@ -217,13 +219,13 @@ impl LogState {
         &mut self,
         output: &mut dyn Write,
         metadata: &LogMetadata,
-        source: (&str, i32),
+        source: Option<(&str, i32)>,
         backtrace: &Backtrace,
     ) -> io::Result<()> {
         let message = LogMessage {
             level: Level::DEBUG,
             context: None,
-            source: Some(source),
+            source,
             message: "trace:",
             newline: true,
         };
@@ -288,6 +290,7 @@ impl Logger {
             environment_path,
             directory_error,
             active_threads: Mutex::new(HashSet::new()),
+            buffer: Mutex::new(LogBuffer::new()),
             state: Mutex::new(LogState::default()),
             recursion_reported: AtomicBool::new(false),
         }
@@ -409,7 +412,7 @@ impl Logger {
     }
 
     /// Maps tracing severity to native levels 1 through 4; trace shares debug.
-    fn level_number(level: Level) -> i32 {
+    pub(crate) fn level_number(level: Level) -> i32 {
         match level {
             Level::ERROR => 4,
             Level::WARN => 3,
@@ -447,7 +450,7 @@ impl Logger {
 /// is rejected before it can reuse the message buffer or deadlock on output.
 ///
 /// Dropping this guard removes its thread ID on normal returns, errors, and
-/// panic unwinding. Neither logger mutex remains locked while C formats.
+/// panic unwinding. Recursion and output mutexes are released before C formats.
 ///
 /// The Rc marker keeps the guard on its creating thread so recursion tracking
 /// also covers code invoked during output.
@@ -461,6 +464,23 @@ pub struct LogGuard<'a> {
 }
 
 impl LogGuard<'_> {
+    /// Formats and consumes a UTF-8 message while retaining its allocation.
+    ///
+    /// The recursion guard is already active before the buffer mutex is taken.
+    /// The formatter follows vsnprintf's size convention; neither callback may
+    /// call this method again on the same guard.
+    pub fn format_message<R>(
+        &self,
+        formatter: impl FnMut(&mut [u8]) -> Option<usize>,
+        consume: impl FnOnce(&str) -> R,
+    ) -> Option<R> {
+        self.logger
+            .buffer
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .format(formatter, consume)
+    }
+
     /// Writes a message, opening the destination afresh to support log rotation.
     pub fn write(&self, metadata: &LogMetadata, message: &LogMessage<'_>) -> io::Result<()> {
         let mut state = self.logger.lock_state();
@@ -502,7 +522,7 @@ impl LogGuard<'_> {
     /// Capture ignores `RUST_BACKTRACE` and `RUST_LIB_BACKTRACE` and runs before
     /// acquiring the output lock. C callers can appear in the captured stack
     /// when their code has unwind information.
-    pub fn callstack(&self, metadata: &LogMetadata, source: (&str, i32)) -> io::Result<()> {
+    pub fn callstack(&self, metadata: &LogMetadata, source: Option<(&str, i32)>) -> io::Result<()> {
         let backtrace = Backtrace::force_capture();
         let mut state = self.logger.lock_state();
         state.update_name(metadata);
@@ -518,7 +538,7 @@ impl LogGuard<'_> {
         &self,
         output: &mut dyn Write,
         metadata: &LogMetadata,
-        source: (&str, i32),
+        source: Option<(&str, i32)>,
     ) -> io::Result<()> {
         let backtrace = Backtrace::force_capture();
         let mut state = self.logger.lock_state();
@@ -697,7 +717,7 @@ mod tests {
         let mut output = Vec::new();
 
         guard
-            .callstack_to(&mut output, &metadata(), ("caller", 42))
+            .callstack_to(&mut output, &metadata(), Some(("caller", 42)))
             .unwrap();
 
         let output = String::from_utf8(output).unwrap();
@@ -719,7 +739,7 @@ mod tests {
         let mut output = storage.as_mut_slice();
 
         let error = guard
-            .callstack_to(&mut output, &metadata(), ("caller", 42))
+            .callstack_to(&mut output, &metadata(), Some(("caller", 42)))
             .unwrap_err();
 
         assert_eq!(error.kind(), io::ErrorKind::WriteZero);
@@ -734,5 +754,48 @@ mod tests {
         Logger::write_stack_lines(&mut output, "é:1\n東京:2").unwrap();
 
         assert_eq!(String::from_utf8(output).unwrap(), "  é:1\n  東京:2");
+    }
+
+    /// Checks recursion is rejected before a nested call can acquire the formatting buffer.
+    #[test]
+    fn rejects_recursion_during_formatting() {
+        let logger = Logger::new(None, None, None, None);
+        let guard = logger.prepare(Level::WARN, 0).unwrap();
+        assert_eq!(
+            guard.format_message(
+                |output| {
+                    assert!(matches!(
+                        logger.prepare(Level::WARN, 0),
+                        Err(Rejected::Recursive { .. })
+                    ));
+                    output[..2].copy_from_slice(b"x\0");
+                    Some(1)
+                },
+                |message| message == "x"
+            ),
+            Some(true)
+        );
+    }
+
+    /// Checks a panicking formatter releases recursion and poisoned buffer ownership.
+    #[test]
+    fn formatting_recovers_after_a_panicking_callback() {
+        let logger = Logger::new(None, None, None, None);
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let guard = logger.prepare(Level::WARN, 0).unwrap();
+            guard.format_message::<()>(|_| panic!("formatter failed"), |_| ());
+        }));
+        assert!(result.is_err());
+        let guard = logger.prepare(Level::WARN, 0).unwrap();
+        assert_eq!(
+            guard.format_message(
+                |output| {
+                    output[..2].copy_from_slice(b"x\0");
+                    Some(1)
+                },
+                |message| message == "x"
+            ),
+            Some(true)
+        );
     }
 }

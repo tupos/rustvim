@@ -76,6 +76,32 @@ impl LogBuffer {
         Some(consume(&self.storage[..written]))
     }
 
+    /// Formats into reusable storage, growing and retrying when it does not fit.
+    ///
+    /// The formatter returns the required byte count excluding NUL, or None on
+    /// failure. It must terminate a completed message with NUL. The consumer
+    /// borrows UTF-8; invalid native bytes become replacement characters.
+    /// The reservation is released on errors and panic unwinding.
+    pub fn format<R>(
+        &mut self,
+        mut formatter: impl FnMut(&mut [u8]) -> Option<usize>,
+        consume: impl FnOnce(&str) -> R,
+    ) -> Option<R> {
+        self.prepare_for_formatting()?;
+        let Self { storage, in_use } = self;
+        let _release = Release(in_use);
+        loop {
+            let written = formatter(storage)?;
+            if written < storage.len() {
+                if storage[written] != 0 {
+                    return None;
+                }
+                return Some(consume(&String::from_utf8_lossy(&storage[..written])));
+            }
+            storage.resize(written.checked_add(1)?, 0);
+        }
+    }
+
     /// Cancels formatting while retaining the allocation.
     pub fn cancel(&mut self) {
         self.in_use = false;
@@ -109,10 +135,7 @@ mod tests {
     #[test]
     fn accepts_raw_message_bytes() {
         let mut buffer = LogBuffer::new();
-        buffer
-            .prepare_for_formatting()
-            .unwrap()[..5]
-            .copy_from_slice(&[b'a', 0, 0xff, b'z', 0]);
+        buffer.prepare_for_formatting().unwrap()[..5].copy_from_slice(&[b'a', 0, 0xff, b'z', 0]);
 
         assert_eq!(
             buffer.consume_message(4, |message| message.to_vec()),
@@ -161,10 +184,7 @@ mod tests {
     #[test]
     fn rejects_nested_formatting_without_disturbing_the_message() {
         let mut buffer = LogBuffer::new();
-        buffer
-            .prepare_for_formatting()
-            .unwrap()[..6]
-            .copy_from_slice(b"outer\0");
+        buffer.prepare_for_formatting().unwrap()[..6].copy_from_slice(b"outer\0");
 
         assert!(buffer.prepare_for_formatting().is_none());
         assert_eq!(
@@ -224,5 +244,76 @@ mod tests {
         assert!(result.is_err());
         assert!(buffer.prepare_for_formatting().is_some());
         buffer.cancel();
+    }
+
+    /// Checks retries preserve a full UTF-8 message and reuse the grown allocation.
+    #[test]
+    fn formatting_retries_and_reuses_the_buffer() {
+        let mut buffer = LogBuffer::new();
+        let payload = "é".repeat(INITIAL_SIZE);
+        let mut calls = 0;
+        let mut grown_pointer = std::ptr::null();
+        assert_eq!(
+            buffer.format(
+                |output| {
+                    calls += 1;
+                    if output.len() > payload.len() {
+                        output[..payload.len()].copy_from_slice(payload.as_bytes());
+                        output[payload.len()] = 0;
+                        grown_pointer = output.as_ptr();
+                    }
+                    Some(payload.len())
+                },
+                |message| message == payload
+            ),
+            Some(true)
+        );
+        assert_eq!(calls, 2);
+        assert_eq!(
+            buffer.format(
+                |output| {
+                    assert_eq!(output.as_ptr(), grown_pointer);
+                    output[..2].copy_from_slice(b"x\0");
+                    Some(1)
+                },
+                |message| message == "x"
+            ),
+            Some(true)
+        );
+    }
+
+    /// Checks native encoding errors become valid UTF-8 without truncating the text.
+    #[test]
+    fn formatting_replaces_invalid_utf8() {
+        let mut buffer = LogBuffer::new();
+        assert_eq!(
+            buffer.format(
+                |output| {
+                    output[..4].copy_from_slice(&[b'a', 0xff, b'b', 0]);
+                    Some(3)
+                },
+                str::to_owned
+            ),
+            Some("a\u{fffd}b".to_owned())
+        );
+    }
+
+    /// Checks formatter errors and malformed output release storage for another call.
+    #[test]
+    fn formatting_failures_release_the_buffer() {
+        let mut buffer = LogBuffer::new();
+        assert_eq!(buffer.format(|_| None, |_| ()), None);
+        assert_eq!(
+            buffer.format(
+                |output| {
+                    output[0] = b'x';
+                    Some(0)
+                },
+                |_| ()
+            ),
+            None
+        );
+        assert_eq!(buffer.format(|_| Some(usize::MAX), |_| ()), None);
+        assert!(buffer.prepare_for_formatting().is_some());
     }
 }

@@ -239,9 +239,6 @@ static void early_init(mparm_T *paramp)
   init_homedir();               // find real value of $HOME
   set_init_1(paramp != NULL ? paramp->clean : false);
   log_init();
-  if (!rustvim_tracing_initialize()) {
-    ELOG("Failed to initialize Rust tracing");
-  }
 
   TIME_MSG("inits 1");
 

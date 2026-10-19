@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 rust_os = { path = "../rust_os" }
 rustvim_core = { path = "../rustvim_core" }
+rustvim_tracing = { path = "../rustvim_tracing" }
 
 [lib]
 crate-type = ["staticlib"]

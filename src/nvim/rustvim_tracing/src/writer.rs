@@ -136,10 +136,7 @@ mod tests {
     #[test]
     fn converts_native_buffer_bytes_to_utf8_without_adding_a_linefeed() {
         let mut buffer = LogBuffer::new();
-        buffer
-            .prepare_for_formatting()
-            .unwrap()[..4]
-            .copy_from_slice(&[b'a', 0, 0xff, 0]);
+        buffer.prepare_for_formatting().unwrap()[..4].copy_from_slice(&[b'a', 0, 0xff, 0]);
         let mut output = Vec::new();
 
         buffer

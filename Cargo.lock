@@ -72,12 +72,14 @@ version = "0.1.0"
 dependencies = [
  "rust_os",
  "rustvim_core",
+ "rustvim_tracing",
 ]
 
 [[package]]
 name = "rustvim_tracing"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "tracing",
  "tracing-subscriber",
 ]
