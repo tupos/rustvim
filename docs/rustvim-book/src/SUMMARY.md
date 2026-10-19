@@ -21,3 +21,4 @@
   - [grid/message_surface.rs](rust/message-surface.md)
   - [grid/popup_surface.rs](rust/popup-surface.md)
   - [grid/row.rs](rust/row.md)
+- [rust_os](rust/os.md)
