@@ -111,8 +111,7 @@ static const char *e_auchangedbuf = N_("E812: Autocommands changed buffer or buf
 /// Shows a message about file `name`, e.g. `"foo.txt" [New]`.
 ///
 /// @param s Info appended to the filename, e.g. "[New]".
-/// @param msg_id Emit as a progress-message with this id, or NULL for a plain message.
-///               Caller must emit a non-"running" status for `msg_id`, later.
+/// @param msg_id Emit as a "bufwrite" message with this id, or NULL for a plain message.
 static void filemess(buf_T *buf, char *name, char *s, const char *msg_id)
 {
   int prev_msg_col = msg_col;
@@ -144,7 +143,7 @@ static void filemess(buf_T *buf, char *name, char *s, const char *msg_id)
   msg_scrolled_ign = true;
   // may truncate the message to avoid a hit-return prompt
   if (msg_id != NULL) {
-    msg_progress(IObuff, (char *)msg_id, "running", 0, false, true, false);
+    msg_with_id(IObuff, (char *)msg_id, "bufwrite", NULL, 0, false, true, false);
   } else {
     msg_outtrans(msg_may_trunc(false, IObuff), 0, false);
   }
@@ -152,11 +151,29 @@ static void filemess(buf_T *buf, char *name, char *s, const char *msg_id)
   msg_scrolled_ign = false;
 }
 
-/// Shows the "busy" message for writing file `name`, as a progress-message. #39280
-/// Caller must end the progress by emitting a non-"running" status to the same `msg_id`.
-void filemess_progress(buf_T *buf, char *name, const char *msg_id)
+/// Shows file `name` before writing it, as a "bufwrite" message with `msg_id`, which buf_write()
+/// replaces when done (or with a progress-message, if slow).
+void filemess_bufwrite(buf_T *buf, char *name, const char *msg_id)
 {
   filemess(buf, name, "", msg_id);
+}
+
+/// If a file read/write is slower than this, emit a progress-message.
+uint64_t slow_io_ns(void)
+{
+  // XXX: combine v:testing + $NVIM_TEST. this is a shitty hack but i dont want another gd flag.
+  return nvim_testing && get_vim_var_nr(VV_TESTING) ? 0 : NS_PER_SEC / 2;
+}
+
+/// Shows the progress-message of a slow readfile(). Locks `curbuf` so Progress handlers cannot
+/// accidentally unload it while it is loading.
+static char *readfile_progress(char *s, char *msg_id, char *status, int percent, bool hist)
+{
+  buf_T *buf = curbuf;
+  buf->b_locked++;
+  char *rv = msg_progress(s, msg_id, status, percent, 0, hist, s != NULL, false);
+  buf->b_locked--;
+  return rv;
 }
 
 /// Read lines from file "fname" into the buffer after line "from".
@@ -682,11 +699,19 @@ int readfile(char *fname, char *sfname, linenr_T from, linenr_T lines_to_skip,
   // Autocommands may add lines to the file, need to check if it is empty
   wasempty = (curbuf->b_ml.ml_flags & ML_EMPTY);
 
-  if (!recoverymode && !filtering && !(flags & READ_DUMMY) && !silent) {
-    if (!read_stdin && !read_buffer) {
-      filemess(curbuf, sfname, "", NULL);
-    }
+  // `silent` ('shortmess=F') skips file msg, but not the progress-message of a slow read.
+  const bool show_msg = !recoverymode && !filtering && !(flags & READ_DUMMY)
+                        && !read_stdin && !read_buffer && msg_silent == 0;
+  if (show_msg && !silent) {
+    filemess(curbuf, sfname, "", NULL);
   }
+
+  // Slow read: progress-message id, and last shown percent.
+  char msg_id[MAXPATHL + 32];
+  fname_msg_id(msg_id, sizeof(msg_id), "nvim.bufread", curbuf, sfname);
+  bool progress = false;
+  int percent = -1;  // -1: unknown size (fifo).
+  const uint64_t read_start = os_hrtime();
 
   msg_scroll = false;                   // overwrite the file message
 
@@ -1637,6 +1662,20 @@ rewind_retry:
       size = -1;
     }
     linerest = (ptr - line_start);
+
+    // Slow read: show a progress-message (with updated %).
+    if (show_msg && (progress || os_hrtime() - read_start > slow_io_ns())) {
+      FileInfo info;
+      const uint64_t total = os_fileinfo_fd(fd, &info) ? os_fileinfo_size(&info) : 0;
+      const int pct = total > 0 ? (int)MIN((uint64_t)filesize * 100 / total, 100) : -1;
+      if (!progress || pct != percent) {
+        progress = true;
+        percent = pct;
+        add_quoted_fname(IObuff, IOSIZE, curbuf, sfname);
+        readfile_progress(IObuff, msg_id, "running", percent, false);
+      }
+    }
+
     os_breakcheck();
   }
 
@@ -1752,6 +1791,9 @@ failed:
     }
 
     if (got_int) {
+      if (progress) {
+        readfile_progress(NULL, msg_id, "cancel", -1, false);
+      }
       if (!(flags & READ_DUMMY)) {
         filemess(curbuf, sfname, _(e_interr), NULL);
         if (newfile) {
@@ -1835,7 +1877,9 @@ failed:
         if (msg_col > 0) {
           msg_putchar('\r');  // overwrite previous message
         }
-        p = (uint8_t *)msg_trunc(IObuff, false, 0);
+        p = (uint8_t *)(progress
+                        ? readfile_progress(IObuff, msg_id, error ? "failed" : "success", -1, true)
+                        : msg_trunc(IObuff, false, 0));
       }
 
       if (read_stdin || read_buffer || restart_edit != 0
@@ -1848,6 +1892,8 @@ failed:
         set_keep_msg((char *)p, 0);
       }
       msg_scrolled_ign = false;
+    } else if (progress) {
+      readfile_progress(NULL, msg_id, error ? "failed" : "success", -1, false);
     }
 
     // with errors writing the file requires ":w!"
@@ -1915,12 +1961,19 @@ failed:
       apply_autocmds_exarg(EVENT_FILTERREADPOST, NULL, sfname,
                            false, curbuf, eap);
     } else if (newfile || (read_buffer && sfname != NULL)) {
-      apply_autocmds_exarg(EVENT_BUFREADPOST, NULL, sfname,
-                           false, curbuf, eap);
+      // 'filetype' detection is triggered by BufReadPost.
+      bool did_bufrp = apply_autocmds_exarg(EVENT_BUFREADPOST, NULL, sfname, false, curbuf, eap);
+
       if (!curbuf->b_au_did_filetype && *curbuf->b_p_ft != NUL) {
         // EVENT_FILETYPE was not triggered but the buffer already has a
         // filetype.  Trigger EVENT_FILETYPE using the existing filetype.
         apply_autocmds(EVENT_FILETYPE, curbuf->b_p_ft, curbuf->b_fname, true, curbuf);
+      }
+
+      if (!did_bufrp && *curbuf->b_p_ft == NUL && augroup_exists("filetypedetect")) {
+        // BufReadPost was skipped, and 'filetype' is empty. Retry filetype-detection now.
+        apply_autocmds_group(EVENT_BUFREADPOST, sfname, NULL, true, augroup_find("filetypedetect"),
+                             curbuf, curwin, NULL, NULL, false);
       }
     } else {
       apply_autocmds_exarg(EVENT_FILEREADPOST, sfname, sfname,
@@ -2176,6 +2229,17 @@ void add_quoted_fname(char *const ret_buf, const size_t bufsize, const buf_T *co
   ret_buf[len++] = '"';
   len += home_replace(buf, fname, ret_buf + len, bufsize - 4, true);
   xstrlcpy(ret_buf + len, "\" ", bufsize - len);
+}
+
+/// Sets progress-message id of reading/writing file `fname`, e.g. `nvim.bufread "foo.txt"`.
+/// Call this once per read/write, so its messages share a msg-id.
+void fname_msg_id(char *msg_id, size_t size, const char *prefix, const buf_T *buf,
+                  const char *fname)
+  FUNC_ATTR_NONNULL_ARG(1, 3)
+{
+  size_t len = (size_t)snprintf(msg_id, size, "%s ", prefix);
+  add_quoted_fname(msg_id + len, size - len, buf, fname);
+  msg_id[strlen(msg_id) - 1] = NUL;  // add_quoted_fname() appends a space, for display only.
 }
 
 /// Append message for text mode to IObuff.
@@ -2710,7 +2774,9 @@ static int rename_with_tmp(const char *const from, const char *const to)
         }
         // Strange, the second step failed.  Try moving the
         // file back and return failure.
-        os_rename(tempname, from);
+        if (os_rename(tempname, from) != OK) {
+          ELOG("failed to restore %s, file is at: %s", from, tempname);
+        }
         return -1;
       }
       // If it fails for one temp name it will most likely fail
@@ -2759,14 +2825,13 @@ int vim_rename(const char *from, const char *to)
     return rename_with_tmp(from, to);
   }
 
-  // Delete the "to" file, this is required on some systems to make the
-  // os_rename() work, on other systems it makes sure that we don't have
-  // two files when the os_rename() fails.
-
-  os_remove(to);
-
-  // First try a normal rename, return if it works.
+  // First try a normal rename without removing "to".
   if (os_rename(from, to) == OK) {
+    return 0;
+  }
+
+  // Retry after removing "to", e.g. when renaming a directory over a file.
+  if (os_remove(to) == 0 && os_rename(from, to) == OK) {
     return 0;
   }
 

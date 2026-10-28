@@ -149,12 +149,13 @@ function vim.gsplit(s, sep, opts)
   local empty_start = true -- Only empty segments seen so far.
 
   --- @param i integer?
-  --- @param j integer
+  --- @param j integer?
   --- @param ... unknown
   --- @return string
   --- @return ...
   local function _pass(i, j, ...)
     if i then
+      assert(j)
       assert(j + 1 > start, 'Infinite loop detected')
       local seg = s:sub(start, i - 1)
       start = j + 1
@@ -343,6 +344,7 @@ function vim.tbl_contains(t, value, opts)
     vim.validate('value', value, 'callable')
     pred = value
   else
+    --- @param v any
     pred = function(v)
       return v == value
     end
@@ -601,6 +603,7 @@ end
 
 --- We only merge empty tables or tables that are not list-like (indexed by consecutive integers
 --- starting from 1)
+--- @param v any
 local function can_merge(v)
   return type(v) == 'table' and (vim.tbl_isempty(v) or not vim.islist(v))
 end
@@ -815,8 +818,8 @@ end
 ---@generic T: table
 ---@param dst T List which will be modified and appended to
 ---@param src table List from which values will be inserted
----@param start integer? Start index on src. Defaults to 1
----@param finish integer? Final index on src. Defaults to `#src`
+---@param start integer? (default: 1) Start index on src.
+---@param finish integer? (default: `#src`) Final index on src.
 ---@return T dst
 function vim.list_extend(dst, src, start, finish)
   vim.validate('dst', dst, 'table')
@@ -959,11 +962,13 @@ function vim.islist(t)
   return true
 end
 
+-- EmmyLua 0.25.1 cannot subtract unions, so return_cast only removes Lua nil on false.
 --- Tests if `t` is `nil` or |vim.NIL|.
 ---
 --- @since 15
 --- @param t? any
 --- @return boolean `true` if `nil` or |vim.NIL|, else `false`.
+--- @return_cast t nil|vim.NIL else -nil
 function vim.isnil(t)
   return t == nil or t == vim.NIL
 end
@@ -1116,6 +1121,8 @@ do
   --- @field [2] vim.validate.Validator Argument validator
   --- @field [3]? boolean|string Optional flag or error message
 
+  --- @param val any
+  --- @param t string
   local function is_type(val, t)
     return type(val) == t or (t == 'callable' and vim.is_callable(val))
   end
@@ -1501,10 +1508,10 @@ end
 
 --- @nodoc
 --- @class vim.context.state
---- @field bo? table<string, any>
---- @field env? table<string, any>
---- @field go? table<string, any>
---- @field wo? table<string, any>
+--- @field bo table<string, any>
+--- @field env table<string, any>
+--- @field go table<string, any>
+--- @field wo table<string, any>
 
 local scope_map = { buf = 'bo', global = 'go', win = 'wo' }
 local scope_order = { 'o', 'wo', 'bo', 'go', 'env' }
@@ -1513,7 +1520,7 @@ local state_restore_order = { 'bo', 'wo', 'go', 'env' }
 --- Gets data about current state, enough to properly restore specified options/env/etc.
 --- @param context vim.context.mods
 --- @return vim.context.state
-local get_context_state = function(context)
+local function get_context_state(context)
   --- @type vim.context.state
   local res = { bo = {}, env = {}, go = {}, wo = {} }
 
@@ -1546,8 +1553,7 @@ end
 --- Notes:
 --- - Context `{ buf = buf }` has no guarantees about current window when
 ---   inside context.
---- - Context `{ buf = buf, win = win }` is yet not allowed, but this seems
----   to be an implementation detail.
+--- - Context `{ buf = buf, win = win }` requires `win` to show `buf`.
 --- - There should be no way to revert currently set `context.sandbox = true`
 ---   (like with nested `vim._with()` calls). Otherwise it kind of breaks the
 ---   whole purpose of sandbox execution.
@@ -1560,9 +1566,10 @@ end
 ---   Not triggering `OptionSet` seems to be a good idea, though. So probably
 ---   only moving context save and restore to lower level might resolve this.
 ---
+--- @generic R...
 --- @param context vim.context.mods
---- @param f function
---- @return any
+--- @param f fun(): R...
+--- @return R...
 function vim._with(context, f)
   vim.validate('context', context, 'table')
   vim.validate('f', f, 'function')
@@ -1680,6 +1687,7 @@ end
 --- @return T[]
 function vim._ensure_list(x)
   if type(x) == 'table' then
+    --- @cast x T[]
     return x
   end
   return { x }

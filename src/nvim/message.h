@@ -9,6 +9,7 @@
 #include "nvim/macros_defs.h"
 #include "nvim/message_defs.h"  // IWYU pragma: keep
 #include "nvim/types_defs.h"
+#include "nvim/option_defs.h"  // IWYU pragma: keep
 
 /// Types of dialogs passed to do_dialog().
 enum {

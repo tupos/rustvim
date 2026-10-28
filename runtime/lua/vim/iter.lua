@@ -71,7 +71,7 @@
 --- @overload fun<T>(src: T[]): vim.IterArray<T, never>
 --- @overload fun<K, V>(src: table<K, V>): vim.Iter<K, V>
 --- @overload fun(src: table, ...): vim.Iter<any, any...>
---- @overload fun(src: function, ...): vim.Iter<any, any...>
+--- @overload fun<S, C, R1, R...>(src: (fun(state: S, control: C): R1, R...), state?: S, control?: C): vim.Iter<R1, R...>
 local M = {}
 
 --- @nodoc
@@ -81,7 +81,8 @@ local M = {}
 --- @overload fun(self: vim.Iter<V1, V...>): V1?, V...
 local Iter = {}
 Iter.__index = Iter
-Iter.__call = function(self)
+
+function Iter:__call()
   return self:next()
 end
 
@@ -98,6 +99,9 @@ IterArray.__call = Iter.__call
 --- Packed tables use this as their metatable
 local packedmt = {}
 
+--- @generic V1, V...
+--- @param t V1|([V1, V...] & { n: integer })
+--- @return V1?, V...
 local function unpack(t)
   if type(t) == 'table' and getmetatable(t) == packedmt then
     return _G.unpack(t, 1, t.n)
@@ -116,8 +120,11 @@ local function pack(...)
   return ...
 end
 
+--- @generic T
+--- @param t T
 local function sanitize(t)
   if type(t) == 'table' and getmetatable(t) == packedmt then
+    --- @cast t table
     -- Remove length tag and metatable
     t.n = nil
     setmetatable(t, nil)
@@ -127,7 +134,7 @@ end
 
 --- Flattens a single array-like table. Errors if it attempts to flatten a
 --- dict-like table
---- @param t table table which should be flattened
+--- @param t any value which should be flattened
 --- @param max_depth integer depth to which the table should be flattened
 --- @param depth integer current iteration depth
 --- @param result table output table that contains flattened result
@@ -276,7 +283,8 @@ function Iter:unique(key)
 end
 
 --- @nodoc
---- @diagnostic disable-next-line:unused-local
+--- @diagnostic disable-next-line:unused
+--- @param depth? integer
 function Iter:flatten(depth)
   error('flatten() requires an array-like table')
 end
@@ -421,6 +429,7 @@ end
 ---                  Takes all of the values returned by the previous stage
 ---                  in the pipeline as arguments.
 function Iter:each(f)
+  --- @param ... any
   local function fn(...)
     if select(1, ...) ~= nil then
       f(...)
@@ -431,7 +440,7 @@ function Iter:each(f)
   end
 end
 
---- @private
+--- @nodoc
 --- @param f fun(v: V1, ...: V...)
 function IterArray:each(f)
   local inc = self._head < self._tail and 1 or -1
@@ -466,8 +475,6 @@ end
 ---
 ---
 --- @since 12
---- @overload fun<T>(self: vim.Iter<T, never>): T[]
---- @overload fun<V1, V2, V...>(self: vim.Iter<V1, V2, V...>): [V1, V2, V...][]
 --- @return any[]
 function Iter:totable()
   local t = {}
@@ -484,8 +491,6 @@ function Iter:totable()
 end
 
 --- @nodoc
---- @overload fun<T>(self: vim.IterArray<T, never>): T[]
---- @overload fun<V1, V2, V...>(self: vim.IterArray<V1, V2, V...>): [V1, V2, V...][]
 --- @return any[]
 function IterArray:totable()
   if self.next ~= IterArray.next or self._head >= self._tail then
@@ -561,6 +566,7 @@ function Iter:fold(init, f)
   local acc = init
 
   --- Use a closure to handle var args returned from iterator
+  --- @param ... any
   local function fn(...)
     if select(1, ...) ~= nil then
       acc = f(acc, ...)
@@ -617,7 +623,7 @@ function Iter:next()
   return self._next()
 end
 
---- @package
+--- @nodoc
 --- @return V1?, V...
 function IterArray:next()
   if self._head ~= self._tail then
@@ -629,7 +635,7 @@ function IterArray:next()
 end
 
 --- @nodoc
---- @diagnostic disable-next-line: unused-local
+--- @diagnostic disable-next-line: unused
 function Iter:rev()
   error('rev() requires an array-like table')
 end
@@ -683,7 +689,7 @@ function Iter:peek()
   return unpack(self._peeked)
 end
 
---- @private
+--- @nodoc
 --- @return V1?, V...
 function IterArray:peek()
   if self._head ~= self._tail then
@@ -713,12 +719,12 @@ end
 ---
 --- ```
 --- @since 12
---- @param f (fun(v: V1, ...: V...): boolean)|any
---- @overload fun<V1, V...>(self: vim.IterArray<V1, V...>, f: V1|fun(v: V1, ...: V...): boolean): V1?, V...
+--- @param f V1|fun(v: V1, ...: V...): any
 --- @return V1?, V...
 function Iter:find(f)
   if type(f) ~= 'function' then
     local val = f
+    --- @param v V1
     f = function(v)
       return v == val
     end
@@ -727,6 +733,7 @@ function Iter:find(f)
   local result = nil
 
   --- Use a closure to handle var args returned from iterator
+  --- @param ... any
   local function fn(...)
     if select(1, ...) ~= nil then
       if f(...) then
@@ -743,7 +750,8 @@ function Iter:find(f)
 end
 
 --- @nodoc
---- @diagnostic disable-next-line:unused-local
+--- @diagnostic disable-next-line:unused
+--- @param f V1|fun(v: V1, ...: V...): boolean
 function Iter:rfind(f)
   error('rfind() requires an array-like table')
 end
@@ -772,6 +780,7 @@ end
 function IterArray:rfind(f)
   if type(f) ~= 'function' then
     local val = f
+    --- @param v V1
     f = function(v)
       return v == val
     end
@@ -827,6 +836,10 @@ function Iter:take(n)
   end
 
   local stop = false
+
+  --- @generic A...
+  --- @param ... A...
+  --- @return A...
   local function fn(...)
     if not stop and select(1, ...) ~= nil and pred(...) then
       i = i + 1
@@ -844,7 +857,7 @@ function Iter:take(n)
   return self
 end
 
---- @private
+--- @nodoc
 --- @param n integer|fun(v: V1, ...: V...): boolean
 --- @return vim.IterArray<V1, V...>
 function IterArray:take(n)
@@ -866,7 +879,7 @@ function IterArray:take(n)
 end
 
 --- @nodoc
---- @diagnostic disable-next-line: unused-local
+--- @diagnostic disable-next-line: unused
 function Iter:pop()
   error('pop() requires an array-like table')
 end
@@ -894,7 +907,7 @@ function IterArray:pop()
 end
 
 --- @nodoc
---- @diagnostic disable-next-line: unused-local
+--- @diagnostic disable-next-line: unused
 function Iter:rpeek()
   error('rpeek() requires an array-like table')
 end
@@ -957,6 +970,7 @@ function Iter:skip(n)
   elseif type(n) == 'function' then
     local next = self.next
 
+    --- @return V1?, V...
     --- @diagnostic disable-next-line:duplicate-set-field
     self.next = function()
       while true do
@@ -978,7 +992,7 @@ function Iter:skip(n)
   return self
 end
 
---- @private
+--- @nodoc
 --- @param n integer|fun(v: V1, ...: V...): boolean
 --- @return vim.IterArray<V1, V...>
 function IterArray:skip(n)
@@ -1003,7 +1017,8 @@ function IterArray:skip(n)
 end
 
 --- @nodoc
---- @diagnostic disable-next-line:unused-local
+--- @diagnostic disable-next-line:unused
+--- @param n integer
 function Iter:rskip(n)
   error('rskip() requires an array-like table')
 end
@@ -1064,22 +1079,25 @@ function Iter:nth(n)
 end
 
 --- @nodoc
---- @diagnostic disable-next-line:unused-local
+--- @diagnostic disable-next-line:unused
+--- @param first integer
+--- @param last integer
 function Iter:slice(first, last)
   error('slice() requires an array-like table')
 end
 
 --- Sets the start and end of a |list-iterator| pipeline.
 ---
---- Equivalent to `:skip(first - 1):rskip(len - last + 1)`.
+--- Equivalent to `:skip(first - 1):rskip(len - last)`.
 ---
 --- @since 12
 --- @param first integer
 --- @param last integer
 --- @return vim.IterArray<V1, V...>
 function IterArray:slice(first, last)
+  local len = math.abs(self._tail - self._head)
   local left = vim._assert_integer(math.max(0, first - 1))
-  local right = vim._assert_integer(math.max(0, self._tail - last - 1))
+  local right = vim._assert_integer(math.max(0, len - last))
   return self:skip(left):rskip(right)
 end
 
@@ -1093,6 +1111,7 @@ function Iter:any(pred)
   local any = false
 
   --- Use a closure to handle var args returned from iterator
+  --- @param ... any
   local function fn(...)
     if select(1, ...) ~= nil then
       if pred(...) then
@@ -1117,6 +1136,7 @@ end
 function Iter:all(pred)
   local all = true
 
+  --- @param ... any
   local function fn(...)
     if select(1, ...) ~= nil then
       if not pred(...) then
@@ -1161,7 +1181,7 @@ function Iter:last()
   return last
 end
 
---- @private
+--- @nodoc
 --- @return V1?, V...
 function IterArray:last()
   if self._head == self._tail then
@@ -1212,7 +1232,7 @@ function Iter:enumerate()
   end)
 end
 
---- @private
+--- @nodoc
 --- @return vim.IterArray<integer, V1, V...>
 function IterArray:enumerate()
   local inc = self._head < self._tail and 1 or -1

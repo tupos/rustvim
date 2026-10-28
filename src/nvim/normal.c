@@ -151,22 +151,6 @@ static inline void normal_state_init(NormalState *s)
 /// The argument is a cmdarg_T.
 typedef void (*nv_func_T)(cmdarg_T *cap);
 
-// Values for cmd_flags.
-#define NV_NCH      0x01          // may need to get a second char
-#define NV_NCH_NOP  (0x02|NV_NCH)  // get second char when no operator pending
-#define NV_NCH_ALW  (0x04|NV_NCH)  // always get a second char
-#define NV_LANG     0x08        // second char needs language adjustment
-
-#define NV_SS       0x10        // may start selection
-#define NV_SSS      0x20        // may start selection with shift modifier
-#define NV_STS      0x40        // may stop selection without shift modif.
-#define NV_RL       0x80        // 'rightleft' modifies command
-#define NV_KEEPREG  0x100       // don't clear regname
-#define NV_NCW      0x200       // not allowed in command-line window
-#define NV_NCH_ARG  0x400       // second char is a typed operand (mark/register name),
-                                // not part of the command name (see NV_LANG for f/t/r)
-#define NV_MOTION   0x800       // Motion command.
-
 // Generally speaking, every Normal mode command should either clear any
 // pending operator (with *clearop*()), or set the motion type variable
 // oap->motion_type.
@@ -193,18 +177,18 @@ static const struct nv_cmd {
   { Ctrl_F,    nv_page,        NV_STS,                 FORWARD },
   { Ctrl_G,    nv_ctrlg,       0,                      0 },
   { Ctrl_H,    nv_ctrlh,       NV_MOTION,              0 },
-  { Ctrl_I,    nv_pcmark,      0,                      0 },
+  { Ctrl_I,    nv_pcmark,      NV_JUMP,                0 },
   { NL,        nv_down,        NV_MOTION,              false },
   { Ctrl_K,    nv_error,       0,                      0 },
   { Ctrl_L,    nv_clear,       0,                      0 },
   { CAR,       nv_down,        NV_MOTION,              true },
   { Ctrl_N,    nv_down,        NV_STS|NV_MOTION,       false },
-  { Ctrl_O,    nv_ctrlo,       0,                      0 },
+  { Ctrl_O,    nv_ctrlo,       NV_JUMP,                0 },
   { Ctrl_P,    nv_up,          NV_STS|NV_MOTION,       false },
   { Ctrl_Q,    nv_visual,      0,                      false },
   { Ctrl_R,    nv_redo_or_register, 0,                      0 },
   { Ctrl_S,    nv_ignore,      0,                      0 },
-  { Ctrl_T,    nv_tagpop,      NV_NCW,                 0 },
+  { Ctrl_T,    nv_tagpop,      NV_NCW|NV_JUMP,         0 },
   { Ctrl_U,    nv_halfpage,    0,                      0 },
   { Ctrl_V,    nv_visual,      0,                      false },
   { 'V',       nv_visual,      0,                      false },
@@ -221,14 +205,14 @@ static const struct nv_cmd {
   { ' ',       nv_right,       NV_MOTION,              0 },
   { '!',       nv_operator,    0,                      0 },
   { '"',       nv_regname,     NV_NCH_NOP|NV_NCH_ARG|NV_KEEPREG, 0 },
-  { '#',       nv_ident,       0,                      0 },
+  { '#',       nv_ident,       NV_MOTION,              0 },
   { '$',       nv_dollar,      NV_MOTION,              0 },
   { '%',       nv_percent,     NV_MOTION,              0 },
   { '&',       nv_optrans,     0,                      0 },
   { '\'',      nv_gomark,      NV_NCH_ALW|NV_NCH_ARG,  true },
   { '(',       nv_brace,       NV_MOTION,              BACKWARD },
   { ')',       nv_brace,       NV_MOTION,              FORWARD },
-  { '*',       nv_ident,       0,                      0 },
+  { '*',       nv_ident,       NV_MOTION,              0 },
   { '+',       nv_down,        NV_MOTION,              true },
   { ',',       nv_csearch,     NV_MOTION,              true },
   { '-',       nv_up,          NV_MOTION,              true },
@@ -257,13 +241,13 @@ static const struct nv_cmd {
   { 'D',       nv_abbrev,      NV_KEEPREG,             0 },
   { 'E',       nv_wordcmd,     NV_MOTION,              true },
   { 'F',       nv_csearch,     NV_NCH_ALW|NV_LANG|NV_MOTION, BACKWARD },
-  { 'G',       nv_goto,        NV_MOTION,              true },
-  { 'H',       nv_scroll,      NV_MOTION,              0 },
+  { 'G',       nv_goto,        NV_JUMP,                true },
+  { 'H',       nv_scroll,      NV_JUMP,                0 },
   { 'I',       nv_edit,        0,                      0 },
   { 'J',       nv_join,        0,                      0 },
   { 'K',       nv_ident,       0,                      0 },
-  { 'L',       nv_scroll,      NV_MOTION,              0 },
-  { 'M',       nv_scroll,      NV_MOTION,              0 },
+  { 'L',       nv_scroll,      NV_JUMP,                0 },
+  { 'M',       nv_scroll,      NV_JUMP,                0 },
   { 'N',       nv_next,        NV_MOTION,              SEARCH_REV },
   { 'O',       nv_open,        0,                      0 },
   { 'P',       nv_put,         0,                      0 },
@@ -425,20 +409,13 @@ void init_normal_cmds(void)
   nv_max_linear = i - 1;
 }
 
-/// True if a command's second char (cmdarg_T.nchar) is a typed operand ("fx", "ma") rather than
-/// the second char of its name ("gJ", "iw").
-bool nv_nchar_is_arg(int cmdchar)
+/// True if command `cmdchar` has any of the given NV_XX `flags`.
+///
+/// Multiplexed commands (g/[/]/z) have one entry for all their second chars, see atom_key_class().
+bool nv_is(int cmdchar, int flags)
 {
   int idx = find_command(cmdchar);
-  return idx >= 0 && (nv_cmds[idx].cmd_flags & (NV_LANG|NV_NCH_ARG)) != 0;
-}
-
-/// True if `cmdchar` is a motion command. Multiplexed handlers (g, [, ], z) are classified by
-/// atom_key_class().
-bool nv_is_motion(int cmdchar)
-{
-  int idx = find_command(cmdchar);
-  return idx >= 0 && (nv_cmds[idx].cmd_flags & NV_MOTION) != 0;
+  return idx >= 0 && (nv_cmds[idx].cmd_flags & flags) != 0;
 }
 
 /// Search for a command in the commands table.
@@ -984,7 +961,7 @@ static bool normal_get_command_count(NormalState *s)
   return false;
 }
 
-static void normal_finish_command(NormalState *s)
+static void normal_finish_command(NormalState *s, CmdFrame *frame)
 {
   bool did_visual_op = false;
 
@@ -1026,6 +1003,11 @@ static void normal_finish_command(NormalState *s)
   // Finish up after executing a Normal mode command.
 normal_end:
 
+  if (Visual.need_end) {
+    Visual.need_end = false;
+    reset_VIsual();
+  }
+
   msg_nowait = false;
 
   if (finish_op || did_visual_op) {
@@ -1043,11 +1025,6 @@ normal_end:
   if (prev_finish_op || s->ca.cmdchar == 'r'
       || (s->ca.cmdchar == 'g' && s->ca.nchar == 'r')) {
     ui_cursor_shape();                  // may show different cursor shape
-  }
-
-  if (s->oa.op_type == OP_NOP && s->oa.regname == 0
-      && s->ca.cmdchar != K_EVENT) {
-    clear_showcmd();
   }
 
   checkpcmark();                // check if we moved since setting pcmark
@@ -1091,12 +1068,19 @@ normal_end:
 
   // Save count before an operator for next time
   opcount = s->ca.opcount;
+
+  atom_cmd_end(&s->ca, frame);
+
+  // Redraw 'showcmd' AFTER all multicursor effects have settled (atom_cmd_end).
+  if (s->oa.op_type == OP_NOP && s->oa.regname == 0 && s->ca.cmdchar != K_EVENT) {
+    clear_showcmd();
+  }
 }
 
 static int normal_execute(VimState *state, int key)
 {
   CmdFrame frame;
-  atom_cmd_start(&frame);
+  atom_cmd_start(&frame, key);
 
   NormalState *s = (NormalState *)state;
   s->command_finished = false;
@@ -1269,8 +1253,7 @@ static int normal_execute(VimState *state, int key)
   (nv_cmds[s->idx].cmd_func)(&s->ca);
 
 finish:
-  normal_finish_command(s);
-  atom_cmd_end(&s->ca, &frame);
+  normal_finish_command(s, &frame);
   xfree(s->ca.searchbuf);
   return 1;
 }
@@ -1509,6 +1492,18 @@ static void set_vcount_ca(cmdarg_T *cap, bool *set_prevcount)
   *set_prevcount = false;    // only set v:prevcount once
 }
 
+/// The active Visual area: `Visual.start` to the cursor. What `b_visual` saves for '< and '> marks,
+/// and "gv".
+visualinfo_T visualinfo(void)
+{
+  return (visualinfo_T){
+    .vi_start = Visual.start,
+    .vi_end = curwin->w_cursor,
+    .vi_mode = Visual.mode,
+    .vi_curswant = curwin->w_curswant,
+  };
+}
+
 /// End Visual mode.
 /// This function should ALWAYS be called to end Visual mode, except from
 /// do_pending_operator().
@@ -1520,10 +1515,7 @@ void end_visual_mode(void)
   mouse_dragging = 0;
 
   // Save the current Visual area for '< and '> marks, and "gv"
-  curbuf->b_visual.vi_mode = Visual.mode;
-  curbuf->b_visual.vi_start = Visual.start;
-  curbuf->b_visual.vi_end = curwin->w_cursor;
-  curbuf->b_visual.vi_curswant = curwin->w_curswant;
+  curbuf->b_visual = visualinfo();
   curbuf->b_visual_mode_eval = Visual.mode;
   if (!virtual_active(curwin)) {
     curwin->w_cursor.coladd = 0;
@@ -1779,6 +1771,9 @@ void clearop(oparg_T *oap)
 
 void clearopbeep(oparg_T *oap)
 {
+  if (oap->op_type == OP_MCURSOR && oap->motion_type != kMTUnknown) {
+    return;  // "zq": motion failing at primary, does not cancel the op.
+  }
   clearop(oap);
   beep_flush();
 }
@@ -2020,6 +2015,10 @@ void showcmd_update_clear_state(void)
 /// Displays 'showcmd' info, and a ("2×") hint if multicursor is active.
 void display_showcmd(void)
 {
+  if (mc_replaying()) {
+    return;  // Skip useless/broken redraws (n * cursors) during multicursor cascade.
+  }
+
   showcmd_update_clear_state();
 
   if (*p_sloc == 's') {
@@ -2184,12 +2183,6 @@ void check_scrollbind(linenr_T vtopline_diff, int leftcol_diff)
           scrollup(curwin, y, false);
         } else {
           scrolldown(curwin, -y, false);
-        }
-
-        // The scroll may not reach new_vtopline (tall virt_lines block).
-        // Sync w_scbind_pos to the actual position, else the miss repeats.
-        if (curwin->w_scbind_pos == new_vtopline) {
-          curwin->w_scbind_pos = get_vtopline(curwin);
         }
       }
 
@@ -2733,8 +2726,8 @@ static void nv_zet(cmdarg_T *cap)
 {
   colnr_T col;
   int nchar = cap->nchar;
-  int old_fdl = (int)curwin->w_p_fdl;
-  int old_fen = curwin->w_p_fen;
+  OptInt foldlevel = -1;
+  int foldenable = kNone;
 
   int64_t siso = get_sidescrolloff_value(curwin);
 
@@ -2901,6 +2894,17 @@ static void nv_zet(cmdarg_T *cap)
     nv_operator(cap);
     break;
 
+  // "zq": place multicursor(s) at (repeated) motion.
+  case 'q':
+    if (reg_recording != 0 || reg_executing != 0) {
+      // Not allowed while recording/executing a macro. |mcursor-limitations|
+      clearopbeep(cap->oap);
+      break;
+    }
+    mc_zq_start(cap);
+    nv_operator(cap);
+    break;
+
   // "zF": create fold command
   // "zf": create fold operator
   case 'F':
@@ -2908,13 +2912,7 @@ static void nv_zet(cmdarg_T *cap)
     if (foldManualAllowed(true)) {
       cap->nchar = 'f';
       nv_operator(cap);
-      curwin->w_p_fen = true;
-
-      // "zF" is like "zfzf"
-      if (nchar == 'F' && cap->oap->op_type == OP_FOLD) {
-        nv_operator(cap);
-        finish_op = true;
-      }
+      foldenable = true;
     } else {
       clearopbeep(cap->oap);
     }
@@ -2948,17 +2946,17 @@ static void nv_zet(cmdarg_T *cap)
 
   // "zn": fold none: reset 'foldenable'
   case 'n':
-    curwin->w_p_fen = false;
+    foldenable = false;
     break;
 
   // "zN": fold Normal: set 'foldenable'
   case 'N':
-    curwin->w_p_fen = true;
+    foldenable = true;
     break;
 
   // "zi": invert folding: toggle 'foldenable'
   case 'i':
-    curwin->w_p_fen = !curwin->w_p_fen;
+    foldenable = !curwin->w_p_fen;
     break;
 
   // "za": open closed fold or close open fold at cursor
@@ -2967,7 +2965,7 @@ static void nv_zet(cmdarg_T *cap)
       openFold(curwin->w_cursor, cap->count1);
     } else {
       closeFold(curwin->w_cursor, cap->count1);
-      curwin->w_p_fen = true;
+      foldenable = true;
     }
     break;
 
@@ -2977,7 +2975,7 @@ static void nv_zet(cmdarg_T *cap)
       openFoldRecurse(curwin->w_cursor);
     } else {
       closeFoldRecurse(curwin->w_cursor);
-      curwin->w_p_fen = true;
+      foldenable = true;
     }
     break;
 
@@ -3006,7 +3004,7 @@ static void nv_zet(cmdarg_T *cap)
     } else {
       closeFold(curwin->w_cursor, cap->count1);
     }
-    curwin->w_p_fen = true;
+    foldenable = true;
     break;
 
   // "zC": close fold recursively
@@ -3016,7 +3014,7 @@ static void nv_zet(cmdarg_T *cap)
     } else {
       closeFoldRecurse(curwin->w_cursor);
     }
-    curwin->w_p_fen = true;
+    foldenable = true;
     break;
 
   // "zv": open folds at the cursor
@@ -3026,48 +3024,42 @@ static void nv_zet(cmdarg_T *cap)
 
   // "zx": re-apply 'foldlevel' and open folds at the cursor
   case 'x':
-    curwin->w_p_fen = true;
+    foldenable = true;
     curwin->w_foldinvalid = true;               // recompute folds
-    newFoldLevel();                             // update right now
-    foldOpenCursor();
+    foldlevel = curwin->w_p_fdl;                // re-apply even when unchanged
     break;
 
   // "zX": undo manual opens/closes, re-apply 'foldlevel'
   case 'X':
-    curwin->w_p_fen = true;
+    foldenable = true;
     curwin->w_foldinvalid = true;               // recompute folds
-    old_fdl = -1;                               // force an update
+    foldlevel = curwin->w_p_fdl;                // re-apply even when unchanged
     break;
 
   // "zm": fold more
   case 'm':
-    if (curwin->w_p_fdl > 0) {
-      curwin->w_p_fdl -= cap->count1;
-      curwin->w_p_fdl = MAX(curwin->w_p_fdl, 0);
-    }
-    old_fdl = -1;                       // force an update
-    curwin->w_p_fen = true;
+    foldlevel = MAX(curwin->w_p_fdl - cap->count1, 0);
+    foldenable = true;
     break;
 
   // "zM": close all folds
   case 'M':
-    curwin->w_p_fdl = 0;
-    old_fdl = -1;                       // force an update
-    curwin->w_p_fen = true;
+    foldlevel = 0;
+    foldenable = true;
     break;
 
   // "zr": reduce folding
-  case 'r':
-    curwin->w_p_fdl += cap->count1;
-    {
-      int d = getDeepestNesting(curwin);
-      curwin->w_p_fdl = MIN(curwin->w_p_fdl, d);
+  case 'r': {
+    const int depth = getDeepestNesting(curwin);
+    OptInt level = MIN(curwin->w_p_fdl + cap->count1, depth);
+    if (level != curwin->w_p_fdl) {
+      foldlevel = level;
     }
     break;
+  }
 
   case 'R':     //  "zR": open all folds
-    curwin->w_p_fdl = getDeepestNesting(curwin);
-    old_fdl = -1;                       // force an update
+    foldlevel = getDeepestNesting(curwin);
     break;
 
   case 'j':     // "zj" move to next fold downwards
@@ -3098,43 +3090,45 @@ static void nv_zet(cmdarg_T *cap)
     clearopbeep(cap->oap);
   }
 
-  // Redraw when 'foldenable' changed
-  if (old_fen != curwin->w_p_fen) {
-    if (foldmethodIsDiff(curwin) && curwin->w_p_scb) {
-      // Adjust 'foldenable' in diff-synced windows.
-      FOR_ALL_WINDOWS_IN_TAB(wp, curtab) {
-        if (wp != curwin && foldmethodIsDiff(wp) && wp->w_p_scb) {
-          wp->w_p_fen = curwin->w_p_fen;
-          changed_window_setting(wp);
-        }
-      }
+  // Use the same validation, redraw and synchronization as explicit option assignments.
+  const handle_T win_handle = curwin->handle;
+  const handle_T buf_handle = curbuf->handle;
+  if (foldenable != kNone && foldenable != curwin->w_p_fen) {
+    set_option_value(kOptFoldenable, BOOLEAN_OBJ(foldenable), OPT_LOCAL, true, NULL);
+    if (curwin->handle != win_handle || curbuf->handle != buf_handle) {
+      // OptionSet left the command's window or buffer; don't finish a pending fold there.
+      clearop(cap->oap);
+      return;
     }
-    changed_window_setting(curwin);
   }
-
-  // Redraw when 'foldlevel' changed.
-  if (old_fdl != curwin->w_p_fdl) {
-    newFoldLevel();
+  // "zF" is like "zfzf": enable folding before counting lines.
+  if (nchar == 'F' && cap->oap->op_type == OP_FOLD) {
+    nv_operator(cap);
+    finish_op = true;
+  }
+  if (foldlevel >= 0) {
+    // Re-apply even an unchanged value to undo manual opens/closes.
+    set_option_value(kOptFoldlevel, INTEGER_OBJ(foldlevel), OPT_LOCAL, true, NULL);
+  }
+  if (nchar == 'x' && curwin->handle == win_handle && curbuf->handle == buf_handle) {
+    foldOpenCursor();
   }
 }
 
-/// "Q" command: Toggles a multicursor at the cursor position.
-/// "[count]Q": Places a multicursor at every match of the last search pattern.
+/// "Q" command: Toggles a multicursor at the cursor position ("1Q": add, "2Q": remove).
 /// "{visual}Q": Places a multicursor on each selected line.
 static void nv_Q(cmdarg_T *cap)
 {
-  if (reg_recording != 0 || reg_executing != 0) {
+  if (reg_recording != 0 || reg_executing != 0 || (!Visual.active && cap->count0 > 2)) {
     // Not allowed while recording/executing a macro. |mcursor-limitations|
     vim_beep(0);
   } else if (!checkclearop(cap->oap)) {
     if (Visual.active) {
-      typval_T tv_args[] = { { .v_type = VAR_UNKNOWN } };
-      nlua_call_typval("vim._core.mcursor", "visual", tv_args, NULL);
-    } else if (cap->count0 > 0) {
-      typval_T tv_args[] = { { .v_type = VAR_UNKNOWN } };
-      nlua_call_typval("vim._core.mcursor", "matches", tv_args, NULL);
+      do_cmdline_cmd("normal! zqj");  // |v_zq|: each line at the cursor column.
+      mc_follow_set(kTrue);
     } else {
-      mc_toggle(curbuf, curwin->w_cursor, true);
+      mc_toggle(curbuf, curwin->w_cursor, true,
+                cap->count0 == 0 ? kNone : cap->count0 == 1 ? kTrue : kFalse);
     }
   }
 }
@@ -4319,8 +4313,8 @@ static void nv_brackets(cmdarg_T *cap)
     }
   } else if (cap->nchar == 'C') {
     // "[C" and "]C": jump to previous/next multicursor.
-    if (cap->oap->op_type != OP_NOP) {
-      // Not an operator motion: a cascaded "d]C" would consume its own targets.
+    if (cap->oap->op_type != OP_NOP && mc_buf_has_cursors(curbuf)) {
+      // Not an operator motion in a session: a cascaded "d]C" would consume its own targets.
       clearopbeep(cap->oap);
     } else {
       typval_T tv_args[] = {
@@ -5218,27 +5212,16 @@ static void nv_gv_cmd(cmdarg_T *cap)
     return;
   }
 
-  pos_T tpos;
   // set w_cursor to the start of the Visual area, tpos to the end
+  const visualinfo_T prev = curbuf->b_visual;
   if (Visual.active) {
-    int i = Visual.mode;
-    Visual.mode = curbuf->b_visual.vi_mode;
-    curbuf->b_visual.vi_mode = i;
-    curbuf->b_visual_mode_eval = i;
-    i = curwin->w_curswant;
-    curwin->w_curswant = curbuf->b_visual.vi_curswant;
-    curbuf->b_visual.vi_curswant = i;
-
-    tpos = curbuf->b_visual.vi_end;
-    curbuf->b_visual.vi_end = curwin->w_cursor;
-    curwin->w_cursor = curbuf->b_visual.vi_start;
-    curbuf->b_visual.vi_start = Visual.start;
-  } else {
-    Visual.mode = curbuf->b_visual.vi_mode;
-    curwin->w_curswant = curbuf->b_visual.vi_curswant;
-    tpos = curbuf->b_visual.vi_end;
-    curwin->w_cursor = curbuf->b_visual.vi_start;
+    curbuf->b_visual = visualinfo();
+    curbuf->b_visual_mode_eval = Visual.mode;
   }
+  Visual.mode = prev.vi_mode;
+  curwin->w_curswant = prev.vi_curswant;
+  pos_T tpos = prev.vi_end;
+  curwin->w_cursor = prev.vi_start;
 
   Visual.active = true;
   Visual.reselect = true;
@@ -6449,10 +6432,10 @@ static void nv_q(cmdarg_T *cap)
     return;
   }
 
-  if (cap->nchar == '=') {
-    if (!mc_follow_toggle(cap->count0)) {
-      clearopbeep(cap->oap);
-    }
+  if (cap->nchar == '=' && cap->count0 > 2) {
+    clearopbeep(cap->oap);
+  } else if (cap->nchar == '=') {  // "1q=" on, "2q=" off.
+    mc_follow_set(cap->count0 == 0 ? kNone : cap->count0 == 1 ? kTrue : kFalse);
   } else if (cap->nchar == ':' || cap->nchar == '/' || cap->nchar == '?') {
     if (cmdwin_buf != NULL) {
       emsg(_(e_cmdline_window_already_open));
@@ -6559,6 +6542,7 @@ static void nv_put_opt(cmdarg_T *cap, bool fix_indent)
   if (cap->oap->op_type != OP_NOP) {
     // "dp" is ":diffput"
     if (cap->oap->op_type == OP_DELETE && cap->cmdchar == 'p') {
+      atom_capture_op(cap->oap, cap, false);  // Atom + dot-repeat for "dp".
       clearop(cap->oap);
       assert(cap->opcount >= 0);
       nv_diffgetput(true, (size_t)cap->opcount);
@@ -6712,6 +6696,7 @@ static void nv_open(cmdarg_T *cap)
 {
   // "do" is ":diffget"
   if (cap->oap->op_type == OP_DELETE && cap->cmdchar == 'o') {
+    atom_capture_op(cap->oap, cap, false);  // Atom + dot-repeat for "do".
     clearop(cap->oap);
     assert(cap->opcount >= 0);
     nv_diffgetput(false, (size_t)cap->opcount);
@@ -6754,10 +6739,11 @@ static void nv_event(cmdarg_T *cap)
   }
 }
 
-/// Executes one normal-mode command from pending input, outside the main state machine.
+/// Executes one MODE_NORMAL command (Normal, Visual, Select and Op-pending, see get_real_state())
+/// from pending input, outside the main state machine.
 ///
-/// Called in a loop; a count/register prefix or a pending operator travels into the next call via
-/// `oap` ("3dl" is three calls, one command).
+/// Called in a loop. A pending op/register travels into the next call via `oap`; a count prefix via
+/// `opcount` ("3dl" is two calls, one command).
 ///
 /// @param toplevel  `NormalState.toplevel` (full interactive-command treatment).
 void normal_cmd(oparg_T *oap, bool toplevel)

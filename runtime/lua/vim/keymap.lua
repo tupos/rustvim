@@ -39,9 +39,10 @@ local keymap = {}
 ---     type = 'v',
 ---     exclusive = false,
 ---     eol = false,
+---     bounds = true,
 ---   })
 ---   local line1 = region[1][1][2]
----   local line2 = region[#region][1][2]
+---   local line2 = region[1][2][2]
 ---   vim.print({ line1, line2 })
 --- end)
 ---
@@ -70,10 +71,10 @@ function keymap.set(modes, lhs, rhs, opts)
 
   opts = vim.deepcopy(opts or {}, true)
 
-  ---@cast modes string[]
   modes = type(modes) == 'string' and { modes } or modes
-  ---@cast lhs string[]
+  ---@cast modes string[]
   lhs = type(lhs) == 'string' and { lhs } or lhs
+  ---@cast lhs string[]
 
   if opts.expr and opts.replace_keycodes ~= false then
     opts.replace_keycodes = true
@@ -142,10 +143,10 @@ function keymap.del(modes, lhs, opts)
 
   opts = opts or {}
 
-  --- @cast modes string[]
   modes = type(modes) == 'string' and { modes } or modes
-  ---@cast lhs string[]
+  --- @cast modes string[]
   lhs = type(lhs) == 'string' and { lhs } or lhs
+  ---@cast lhs string[]
 
   local buf = opts.buf
   --- @cast opts +{buffer?:integer|boolean}

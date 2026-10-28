@@ -752,7 +752,7 @@ describe('Buffer highlighting', function()
         {13:3 +} {11:ERROR:} invalid syntax               |
         {13:5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5}|
         {13:, 5, 5, 5, 5, 5, 5, } Lorem ipsum dolor s|
-        ^x{13: = 4}                                   |
+        {13:^x = 4}                                   |
         {1:~                                       }|*2
         {7:-- VISUAL LINE --}                       |
       ]])
@@ -782,7 +782,7 @@ describe('Buffer highlighting', function()
 
       feed('jvk')
       screen:expect([[
-        ^ {3:=}{2: 3}                                    |
+        {13:^ }{3:=}{2: 3}                                    |
         {13:3} + {11:ERROR:} invalid syntax               |
         5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5|
         , 5, 5, 5, 5, 5, 5,  Lorem ipsum dolor s|
@@ -794,7 +794,7 @@ describe('Buffer highlighting', function()
       feed('o')
       screen:expect([[
         {13: }{3:=}{2: 3}                                    |
-        ^3 + {11:ERROR:} invalid syntax               |
+        {13:^3} + {11:ERROR:} invalid syntax               |
         5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5|
         , 5, 5, 5, 5, 5, 5,  Lorem ipsum dolor s|
         x = 4                                   |
@@ -806,10 +806,10 @@ describe('Buffer highlighting', function()
     it('works with listchars', function()
       command('set list listchars+=eol:$')
       screen:expect([[
-        ^1 + 2{1:$}{3:=}{2: 3}                               |
-        3 +{1:$}{11:ERROR:} invalid syntax               |
+        ^1 + 2{1:$} {3:=}{2: 3}                              |
+        3 +{1:$} {11:ERROR:} invalid syntax              |
         5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5|
-        , 5, 5, 5, 5, 5, 5,{1:-$}Lorem ipsum dolor s|
+        , 5, 5, 5, 5, 5, 5,{1:-$} Lorem ipsum dolor |
         x = 4{1:$}                                  |
         {1:~                                       }|*2
                                                 |

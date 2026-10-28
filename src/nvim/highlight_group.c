@@ -154,6 +154,9 @@ static const char *highlight_init_both[] = {
   "TabLineSel        guifg=fg      guibg=bg                gui=bold cterm=nocombine",
   "TermCursor        gui=reverse   cterm=reverse",
   "Underlined        gui=underline cterm=underline",
+  "Bold              gui=bold        cterm=bold",
+  "Italic            gui=italic      cterm=italic",
+  "BoldItalic        gui=bold,italic cterm=bold,italic",
   "lCursor           guifg=bg      guibg=fg                cterm=reverse",
 
   // UI
@@ -184,15 +187,15 @@ static const char *highlight_init_both[] = {
   "default link ComplMatchIns    NONE",
   "default link ComplHint        NonText",
   "default link ComplHintMore    MoreMsg",
-  "default link MCursor          Cursor",
+  "default link MCursor          CurSearch",
   "default link MCursorVisual    Visual",
   "default link Substitute       Search",
   "default link StatusLineTerm   StatusLine",
   "default link StatusLineTermNC StatusLineNC",
   "default link StderrMsg        ErrorMsg",
   "default link StdoutMsg        NONE",
-  "default link TabLine          StatusLineNC",
-  "default link TabLineFill      TabLine",
+  "default link TabLine          TabLineFill",
+  "default link TabLineFill      StatusLineNC",
   "default link VertSplit        WinSeparator",
   "default link VisualNOS        Visual",
   "default link Whitespace       NonText",
@@ -203,6 +206,7 @@ static const char *highlight_init_both[] = {
   "default link Character      Constant",
   "default link Number         Constant",
   "default link Boolean        Constant",
+  "default link Regexp         Constant",
   "default link Float          Number",
   "default link Conditional    Statement",
   "default link Repeat         Statement",
@@ -527,6 +531,7 @@ static const char *highlight_init_dark[] = {
   NULL
 };
 
+// NOLINTNEXTLINE(misc-use-internal-linkage): used with FFI in unittests
 const char *const highlight_init_cmdline[] = {
   // XXX When modifying a list modify it in both valid and invalid halves.
   // TODO(ZyX-I): merge valid and invalid groups via a macros.

@@ -4,6 +4,7 @@
                             NVIM REFERENCE MANUAL
 
 
+==============================================================================
 Differences between Nvim and Vim                               *vim-differences*
 
 Nvim differs from Vim in many ways, although editor and Vimscript (not
@@ -149,7 +150,6 @@ you never want any default mappings, call |:mapclear| early in your config.
 - <C-W> |i_CTRL-W-default|
 - <C-L> |CTRL-L-default|
 - & |&-default|
-- - |dir-mappings|
 - @ |v_@-default|
 - # |v_#-default|
 - * |v_star-default|
@@ -317,6 +317,7 @@ Commands:
 - |:checkhealth|
 - |:connect|
 - |:detach|
+- |:diffget|, |:diffput| (|do|, |dp|) can be |.| repeated.
 - |:drop| is always available
 - |:EditQuery|
 - |:Inspect|
@@ -349,6 +350,8 @@ Editor:
 
 Events (autocommands):
 - Fixed inconsistent behavior in execution of nested autocommands #23368
+- |InsertCharPre| is not triggered for stuffed text (|.| redo, |i_CTRL-R|,
+  |i_CTRL-A|), which also skips mappings and abbreviations.
 - |OptionSet| is triggered for 'modified' when writing a file, undoing changes,
   or using |:set| modified.
 - |Progress|
@@ -408,8 +411,7 @@ Input/Mappings:
 Normal commands:
 - |gO| shows a filetype-defined "outline" of the current buffer.
 - |gQ| restores |multicursor|s.
-- |Q| adds a |multicursor| ([count]Q: at each match; {Visual}Q: at each
-  selected line |v_Q|) instead of switching to Ex mode.
+- |Q| adds a |multicursor| instead of switching to Ex mode.
 - [count]q: enters |Ex-mode|.
 - |ZR| performs |:restart|
 - |v_al| selects the whole buffer; |v_il| selects the current line without
@@ -435,6 +437,7 @@ Options:
 - 'guicursor'   works in the terminal (TUI)
 - 'inccommand'  shows interactive results for |:substitute|-like commands
                 and |:command-preview| commands
+- 'isident'     does not affect environment variable name parsing. |expr-env|
 - 'jumpoptions'
     - "view" tries to restore |mark-view| when moving through the |jumplist|,
       |changelist|, |alternate-file|, and |mark-motions|.
@@ -508,6 +511,7 @@ TUI:
 - Start Nvim with 'verbose' level 3 to show terminal capabilities: >
         nvim -V3
 <
+
                         *'term'* *E529* *E530* *E531*
 - 'term' reflects the terminal type derived from |$TERM| and other environment
   checks.  Use `:echo &term` to get its value. For debugging only; not
@@ -525,7 +529,6 @@ TUI:
   uses one or the other, it does not attempt to merge the two.
 
 UI/Display:
-- |Visual| selection highlights the character at cursor. |visual-use|
 - messages: When showing messages longer than 'cmdheight', only
   scroll the message lines, not the entire screen. The
   separator line is decorated by |hl-MsgSeparator| and
@@ -560,6 +563,7 @@ These Nvim features were later integrated into Vim.
 - |vim-tutor-mode|
 - Lua: `require()` also searches for modules in 'runtimepath'.
 - Lua: vim.g, vim.w, vim.b, vim.t, vim.v, vim.fn, vim.call()
+- |Visual| selection highlights the character at cursor. |visual-use|
 
 ==============================================================================
 Other changes                                            *nvim-changed*
@@ -688,6 +692,8 @@ Marks:
   being undone; the mark shifts with the text it was moved to, the same as a
   mark the change never touched. Vim restores its old (wrong) position. Marks
   moved by the change itself are still restored.
+- An operator on a target that creates a Visual selection ("cgn") does not
+  change |'<| |'>|. |gv|
 
 Motion:
 - The |jumplist| avoids useless/phantom jumps.

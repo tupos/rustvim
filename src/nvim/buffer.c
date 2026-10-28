@@ -226,6 +226,8 @@ bool buf_ensure_loaded(buf_T *buf)
     return true;
   }
 
+  bufref_T bufref;
+  set_bufref(&bufref, buf);
   CtxSwitch aco = { 0 };
 
   // Make sure the buffer is in a window.
@@ -233,7 +235,8 @@ bool buf_ensure_loaded(buf_T *buf)
   // status can be OK or NOTDONE (which also means ok/done)
   int status = open_buffer(false, NULL, 0);
   ctx_restore(&aco);
-  return (status != FAIL);
+  // Autocommands may have wiped out or unloaded the buffer.
+  return status != FAIL && bufref_valid(&bufref) && buf->b_ml.ml_mfp != NULL;
 }
 
 /// Open current buffer, that is: open the memfile and read the file into
@@ -374,7 +377,7 @@ int open_buffer(bool read_stdin, exarg_T *eap, int flags_arg)
 
   // if first time loading this buffer, init b_chartab[]
   if (curbuf->b_flags & BF_NEVERLOADED) {
-    buf_init_chartab(curbuf, false);
+    buf_init_isk_chartab(curbuf);
     parse_cino(curbuf);
   }
 
@@ -636,8 +639,8 @@ bool close_buffer(win_T *win, buf_T *buf, int action, bool abort_if_last, bool i
   if (win_valid && win->w_buffer == buf && buf->b_nwindows == 1) {
     buf->b_locked++;
     buf->b_locked_split++;
-    if (apply_autocmds(EVENT_BUFWINLEAVE, buf->b_fname, buf->b_fname, false,
-                       buf) && !bufref_valid(&bufref)) {
+    if (apply_autocmds_win(EVENT_BUFWINLEAVE, buf->b_fname, buf->b_fname, false,
+                           buf, win) && !bufref_valid(&bufref)) {
       // Autocommands deleted the buffer.
       emsg(_(e_auabort));
       return false;
@@ -2217,6 +2220,9 @@ void free_buf_options(buf_T *buf, bool free_p_ff)
   clear_string_option(&buf->b_p_cinw);
   clear_string_option(&buf->b_p_cot);
   clear_string_option(&buf->b_p_cpt);
+#ifdef BACKSLASH_IN_FILENAME
+  clear_string_option(&buf->b_p_csl);
+#endif
   callback_free(&buf->b_p_cfu);
   callback_free(&buf->b_p_ofu);
   callback_free(&buf->b_p_tsrfu);
@@ -3438,6 +3444,7 @@ void maketitle(void)
   char *title_str = NULL;
   char *icon_str = NULL;
   char buf[IOSIZE];
+  const CharBuf outbuf = { buf, sizeof(buf) };
 
   if (!redrawing()) {
     // Postpone updating the title when 'lazyredraw' is set.
@@ -3459,7 +3466,7 @@ void maketitle(void)
 
     if (*p_titlestring != NUL) {
       if (stl_syntax & STL_IN_TITLE) {
-        build_stl_str_hl(curwin, buf, sizeof(buf), p_titlestring,
+        build_stl_str_hl(curwin, outbuf, p_titlestring,
                          kOptTitlestring, 0, 0, maxlen, NULL, NULL, NULL, NULL);
         title_str = buf;
       } else {
@@ -3472,7 +3479,7 @@ void maketitle(void)
       p_ssl = true;
 #endif
       char *default_titlestring = "%t%( %M%)%( (%{expand('%:p:~:h')})%)%a - Nvim";
-      build_stl_str_hl(curwin, buf, sizeof(buf), default_titlestring,
+      build_stl_str_hl(curwin, outbuf, default_titlestring,
                        kOptTitlestring, 0, 0, maxlen, NULL, NULL, NULL, NULL);
       title_str = buf;
 #ifdef MSWIN
@@ -3486,7 +3493,7 @@ void maketitle(void)
     icon_str = buf;
     if (*p_iconstring != NUL) {
       if (stl_syntax & STL_IN_ICON) {
-        build_stl_str_hl(curwin, icon_str, sizeof(buf), p_iconstring,
+        build_stl_str_hl(curwin, outbuf, p_iconstring,
                          kOptIconstring, 0, 0, 0, NULL, NULL, NULL, NULL);
       } else {
         icon_str = p_iconstring;

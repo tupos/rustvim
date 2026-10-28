@@ -9,6 +9,7 @@ local api = n.api
 local fn = n.fn
 
 local eq = t.eq
+local eq_partial = t.eq_partial
 local matches = t.matches
 local pcall_err = t.pcall_err
 local exec_lua = n.exec_lua
@@ -1220,12 +1221,16 @@ describe('vim.pack', function()
     it('is not affected by special environment variables', function()
       fn.setenv('GIT_WORK_TREE', t.paths.test_source_path)
       fn.setenv('GIT_DIR', vim.fs.joinpath(t.paths.test_source_path, '.git'))
+      local index_path = vim.fs.joinpath(repo_get_path('defbranch'), '.git', 'index')
+      local index = fn.readblob(index_path)
+      fn.setenv('GIT_INDEX_FILE', index_path)
       local ref_environ = fn.environ()
 
       vim_pack_add({ repos_src.basic })
       eq('basic main', exec_lua('return require("basic")'))
 
       eq(ref_environ, fn.environ())
+      eq(index, fn.readblob(index_path))
     end)
 
     it('validates input', function()
@@ -1631,24 +1636,14 @@ describe('vim.pack', function()
         -- textDocument/documentSymbol
         exec_lua('vim.pack.update()')
         exec_lua('vim.lsp.buf.document_symbol()')
-        local loclist = vim.tbl_map(function(x) --- @param x table
-          return {
-            lnum = x.lnum, --- @type integer
-            col = x.col, --- @type integer
-            end_lnum = x.end_lnum, --- @type integer
-            end_col = x.end_col, --- @type integer
-            text = x.text, --- @type string
-          }
-        end, fn.getloclist(0))
-        local ref_loclist = {
+        eq_partial({
           { lnum = 1, col = 1, end_lnum = 9, end_col = 1, text = '[Namespace] Error' },
           { lnum = 3, col = 1, end_lnum = 9, end_col = 1, text = '[Module] defbranch' },
           { lnum = 9, col = 1, end_lnum = 22, end_col = 1, text = '[Namespace] Update' },
           { lnum = 11, col = 1, end_lnum = 22, end_col = 1, text = '[Module] fetch' },
           { lnum = 22, col = 1, end_lnum = 31, end_col = 1, text = '[Namespace] Same' },
           { lnum = 24, col = 1, end_lnum = 31, end_col = 1, text = '[Module] semver (not active)' },
-        }
-        eq(ref_loclist, loclist)
+        }, fn.getloclist(0))
 
         n.exec('lclose')
 
@@ -1658,6 +1653,7 @@ describe('vim.pack', function()
           -- Should not be affected by special environment variables
           fn.setenv('GIT_WORK_TREE', t.paths.test_source_path)
           fn.setenv('GIT_DIR', vim.fs.joinpath(t.paths.test_source_path, '.git'))
+          fn.setenv('GIT_INDEX_FILE', vim.fs.joinpath(repo_get_path('defbranch'), '.git', 'index'))
           api.nvim_win_set_cursor(0, pos)
           exec_lua(function()
             vim.lsp.buf.hover()
@@ -1680,6 +1676,7 @@ describe('vim.pack', function()
 
           exec_lua('vim.uv.os_unsetenv("GIT_WORK_TREE")')
           exec_lua('vim.uv.os_unsetenv("GIT_DIR")')
+          exec_lua('vim.uv.os_unsetenv("GIT_INDEX_FILE")')
         end
 
         assert_hover({ 14, 0 }, 'Commit from `main` to be removed')
@@ -2173,6 +2170,9 @@ describe('vim.pack', function()
     it('is not affected by special environment variables', function()
       fn.setenv('GIT_WORK_TREE', t.paths.test_source_path)
       fn.setenv('GIT_DIR', vim.fs.joinpath(t.paths.test_source_path, '.git'))
+      local index_path = vim.fs.joinpath(repo_get_path('defbranch'), '.git', 'index')
+      local index = fn.readblob(index_path)
+      fn.setenv('GIT_INDEX_FILE', index_path)
       local ref_environ = fn.environ()
 
       vim_pack_add({ repos_src.fetch })
@@ -2180,6 +2180,7 @@ describe('vim.pack', function()
       pack_assert_content('fetch', 'return "fetch new 2"')
 
       eq(ref_environ, fn.environ())
+      eq(index, fn.readblob(index_path))
     end)
 
     it('works with out of sync lockfile', function()

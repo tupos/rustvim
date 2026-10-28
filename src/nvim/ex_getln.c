@@ -98,17 +98,6 @@
 /// Last value of prompt_id, incremented when doing new prompt
 static unsigned last_prompt_id = 0;
 
-// Struct to store the viewstate during 'incsearch' highlighting and 'inccommand' preview.
-typedef struct {
-  colnr_T vs_curswant;
-  colnr_T vs_leftcol;
-  colnr_T vs_skipcol;
-  linenr_T vs_topline;
-  int vs_topfill;
-  linenr_T vs_botline;
-  int vs_empty_rows;
-} viewstate_T;
-
 // Struct to store the state of 'incsearch' highlighting.
 typedef struct {
   pos_T search_start;   // where 'incsearch' starts searching
@@ -218,30 +207,6 @@ static void trigger_cmd_autocmd(int typechar, event_T evt)
 {
   char typestr[2] = { (char)typechar, NUL };
   apply_autocmds(evt, typestr, typestr, false, curbuf);
-}
-
-static void save_viewstate(win_T *wp, viewstate_T *vs)
-  FUNC_ATTR_NONNULL_ALL
-{
-  vs->vs_curswant = wp->w_curswant;
-  vs->vs_leftcol = wp->w_leftcol;
-  vs->vs_skipcol = wp->w_skipcol;
-  vs->vs_topline = wp->w_topline;
-  vs->vs_topfill = wp->w_topfill;
-  vs->vs_botline = wp->w_botline;
-  vs->vs_empty_rows = wp->w_empty_rows;
-}
-
-static void restore_viewstate(win_T *wp, viewstate_T *vs)
-  FUNC_ATTR_NONNULL_ALL
-{
-  wp->w_curswant = vs->vs_curswant;
-  wp->w_leftcol = vs->vs_leftcol;
-  wp->w_skipcol = vs->vs_skipcol;
-  wp->w_topline = vs->vs_topline;
-  wp->w_topfill = vs->vs_topfill;
-  wp->w_botline = vs->vs_botline;
-  wp->w_empty_rows = vs->vs_empty_rows;
 }
 
 static void init_incsearch_state(incsearch_state_T *s)
@@ -2679,7 +2644,7 @@ static bool cmdpreview_may_show(CommandLineState *s)
   char *cmdline = xstrdup(ccline.cmdbuff);
   const char *errormsg = NULL;
   emsg_off++;  // Block errors when parsing the command line, and don't update v:errmsg
-  if (!parse_cmdline(&cmdline, &ea, &cmod, &errormsg)) {
+  if (!parse_cmdline(&cmdline, &ea, &cmod, &errormsg, false)) {
     emsg_off--;
     goto end;
   }
@@ -2957,18 +2922,14 @@ char *getcmdline_prompt(const int firstc, const char *const prompt, const int hl
   return ret;
 }
 
-/// Read the 'wildmode' option, fill wim_flags[].
-int check_opt_wim(void)
+/// Parse 'wildmode', updating flags only when non-NULL and the value is valid.
+int check_opt_wim(const char *value, uint8_t *flags)
 {
-  uint8_t new_wim_flags[4];
+  uint8_t new_wim_flags[4] = { 0 };
   int i;
   int idx = 0;
 
-  for (i = 0; i < 4; i++) {
-    new_wim_flags[i] = 0;
-  }
-
-  for (char *p = p_wim; *p; p++) {
+  for (const char *p = value; *p; p++) {
     // Note: Keep this in sync with opt_wim_values.
     for (i = 0; ASCII_ISALPHA(p[i]); i++) {}
     if (p[i] != NUL && p[i] != ',' && p[i] != ':') {
@@ -3007,9 +2968,9 @@ int check_opt_wim(void)
     idx++;
   }
 
-  // only when there are no errors, wim_flags[] is changed
-  for (i = 0; i < 4; i++) {
-    wim_flags[i] = new_wim_flags[i];
+  // Only when there are no errors, the flags are changed.
+  if (flags != NULL) {
+    memcpy(flags, new_wim_flags, sizeof(new_wim_flags));
   }
   return OK;
 }
@@ -4456,19 +4417,23 @@ void cmdline_init(void)
   CLEAR_FIELD(ccline);
 }
 
-/// Check value of 'cedit' and set cedit_key.
-/// Returns NULL if value is OK, error message otherwise.
-const char *did_set_cedit(optset_T *args)
+/// Validate the 'cedit' option.
+const char *validate_cedit(optset_T *args)
 {
-  if (*p_cedit == NUL) {
-    cedit_key = -1;
-  } else {
-    int n = string_to_key(p_cedit);
+  char *value = args->os_newval.data.string.data;
+  if (*value != NUL) {
+    int n = string_to_key(value);
     if (n == 0 || vim_isprintc(n)) {
       return e_invarg;
     }
-    cedit_key = n;
   }
+  return NULL;
+}
+
+/// The 'cedit' option is changed.
+const char *did_set_cedit(optset_T *args FUNC_ATTR_UNUSED)
+{
+  cedit_key = *p_cedit == NUL ? -1 : string_to_key(p_cedit);
   return NULL;
 }
 

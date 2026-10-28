@@ -2233,7 +2233,11 @@ static int do_source_ext(char *const fname, const bool check_other, const int is
 
   if (str == NULL) {
     // Apply SourceCmd autocommands, they should get the file and source it.
-    if (has_autocmd(EVENT_SOURCECMD, fname_exp, NULL)
+    // When sourcing a file "fname_exp" was made a full path name by
+    // fix_fname() above, avoid expanding it again.
+    if ((fname == NULL
+         ? has_autocmd(EVENT_SOURCECMD, fname_exp, NULL)
+         : has_autocmd_fullname(EVENT_SOURCECMD, fname_exp, NULL))
         && apply_autocmds(EVENT_SOURCECMD, fname_exp, fname_exp,
                           false, curbuf)) {
       retval = aborting() ? FAIL : OK;
@@ -2878,8 +2882,9 @@ retry:
     have_read = true;
     ga.ga_len = len;
 
-    // If the line was longer than the buffer, read more.
-    if (ga.ga_maxlen - ga.ga_len == 1 && buf[len - 1] != '\n') {
+    // If reading from a file and the line was longer than the buffer, read more.
+    if (!sp->source_from_buf_or_str
+        && ga.ga_maxlen - ga.ga_len == 1 && buf[len - 1] != '\n') {
       continue;
     }
 

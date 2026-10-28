@@ -323,6 +323,41 @@ describe('messages2', function()
     ]])
   end)
 
+  it("uses global 'fillchars'", function()
+    command('set fillchars=msgsep:+')
+    command([[echo "foo\nbar"]])
+    screen:expect([[
+      ^                                                     |
+      {1:~                                                    }|*10
+      {3:+++++++++++++++++++++++++++++++++++++++++++++++++++++}|
+      foo                                                  |
+      bar                                                  |
+    ]])
+
+    command('wincmd v | setlocal fillchars=msgsep:!')
+    command([[echo "bar\nbaz"]])
+    screen:expect([[
+      ^                          │                          |
+      {1:~                         }│{1:~                         }|*8
+      {3:+++++++++++++++++++++++++++++++++++++++++++++++++++++}|
+      foo                                                  |
+      bar                                                  |*2
+      baz                                                  |
+    ]])
+
+    command('wincmd w')
+    command([[echo "baz\nqux"]])
+    screen:expect([[
+                                │^                          |
+      {1:~                         }│{1:~                         }|*6
+      {3:+++++++++++++++++++++++++++++++++++++++++++++++++++++}|
+      foo                                                  |
+      bar                                                  |*2
+      baz                                                  |*2
+      qux                                                  |
+    ]])
+  end)
+
   it('screenclear and empty message clears messages', function()
     command('echo "foo"')
     screen:expect([[
@@ -475,14 +510,14 @@ describe('messages2', function()
     feed('Vj')
     screen:expect([[
       {17:one two}                                              |
-      ^t{17:hree four}                                           |
+      {17:^three four}                                           |
       {1:~                                                    }|*11
       {5:-- VISUAL LINE --}                                    |
     ]])
     feed('g<C-G>')
     screen:expect([[
       {17:one two}                                              |
-      ^t{17:hree four}                                           |
+      {17:^three four}                                           |
       {1:~                                                    }|*11
       Selected 2 of 2 Lines; 4 of 4 Words; 19 of 19 Bytes  |
     ]])
@@ -1155,7 +1190,8 @@ describe('messages2', function()
 
   it('configured targets per kind', function()
     exec_lua(function()
-      local targets = { echo = 'msg', list_cmd = 'pager', bufwrite = 'cmd', lua_print = 'cmd' }
+      local targets = { echo = 'msg', list_cmd = 'pager', lua_print = 'cmd' }
+      targets['nvim%.bufwrite'] = 'msg' -- Matches the message ID, not the kind.
       require('vim._core.ui2').enable({ msg = { targets = targets } })
       print('foo') -- "lua_print" kind goes to cmd
       vim.cmd.echo('"bar"') -- "echo" kind goes to msg
@@ -1195,9 +1231,10 @@ describe('messages2', function()
     command('edit Xfile | write')
     screen:expect([[
       ^                                                     |
-      {1:~                                                    }|*11
-      {1:~                                              }{4:bar(2)}|
-      "Xfile" [New] 0L, 0B written                         |
+      {1:~                                                    }|*10
+      {1:~                        }{4:bar                         }|
+      {1:~                        }{4:"Xfile" [New] 0L, 0B written}|
+      foo(1)                                               |
     ]])
   end)
 
@@ -1291,7 +1328,22 @@ describe('messages2', function()
     ]])
   end)
 
-  it('crops long messages to make place for ruler', function()
+  it('search offset with semicolon #41929', function()
+    command(
+      'set shortmess-=S | call setline(1, ["odd line", "even line", "odd line", "even line"])'
+    )
+    feed('/even/;/even<CR>')
+    screen:expect([[
+      odd line                                             |
+      {10:even} line                                            |
+      odd line                                             |
+      {10:^even} line                                            |
+      {1:~                                                    }|*9
+      /even                              [2/2]             |
+    ]])
+  end)
+
+  it("'ruler' placement truncates long messages", function()
     command('set noruler | echo "-"->repeat(&columns)')
     screen:expect([[
       ^                                                     |
@@ -1390,6 +1442,23 @@ describe('messages2', function()
     ]])
   end)
 
+  it("'ruler' updates on 'modified' change #42255", function()
+    command('set laststatus=0 ruler rulerformat=%m noautoread')
+    command(('edit %s'):format(t.tmpname(false)))
+    feed('ihello<Esc>')
+    screen:expect([[
+      hell^o                                                |
+      {1:~                                                    }|*12
+                                                        [+]|
+    ]])
+    command('silent write')
+    screen:expect([[
+      hell^o                                                |
+      {1:~                                                    }|*12
+                                                           |
+    ]])
+  end)
+
   it('pager statusline is not clobbered by DiagnosticChanged redraw #41130', function()
     exec_lua(function()
       vim.o.laststatus = 3
@@ -1448,6 +1517,24 @@ describe('messages2', function()
       {3:                                                     }|
       {19:^c}                                                    |
       {9:de}                                                   |
+                                                           |
+    ]])
+
+    -- A prompt with pending cmd messages moves them to the dialog (cmdline.lua). The pager is
+    -- still shown, but its line count must not offset the marks copied into the dialog.
+    exec_lua(function()
+      local ui = require('vim._core.ui2')
+      vim.api.nvim_buf_set_lines(ui.bufs.cmd, 0, -1, false, { 'err' })
+      local o = { end_row = 0, end_col = 3, hl_group = 'ErrorMsg' }
+      vim.api.nvim_buf_set_extmark(ui.bufs.cmd, ui.ns, 0, 0, o)
+      ui.msg.expand_msg('cmd', 'dialog')
+    end)
+    screen:expect([[
+                                                           |
+      {1:~                                                    }|*9
+      {3:                                                     }|
+      {3:^                                                     }|
+      {9:err}                                                  |
                                                            |
     ]])
   end)

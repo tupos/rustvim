@@ -1,3 +1,4 @@
+---@type test.assert
 local test_assert = require('test.assert')
 ---@type test.harness
 local harness = require('test.harness')
@@ -110,6 +111,9 @@ local check_logs_useless_lines = {
 
 function M.eq(expected, actual, context)
   return test_assert.eq(expected, actual, context)
+end
+function M.eq_partial(expected, actual, context)
+  return test_assert.eq_partial(expected, actual, context)
 end
 function M.neq(expected, actual, context)
   return test_assert.neq(expected, actual, context)
@@ -605,6 +609,18 @@ function M.repeated_read_cmd(...)
   end
   handle:close()
   return table.concat(data)
+end
+
+--- Projects the named fields of `t` (a nil field stays absent).
+--- @param t table<string,any>
+--- @param ... string Field names.
+--- @return table<string,any>
+function M.pick(t, ...)
+  local r = {} --- @type table<string,any>
+  for _, f in ipairs({ ... }) do
+    r[f] = t[f]
+  end
+  return r
 end
 
 --- @generic T

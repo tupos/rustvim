@@ -1820,15 +1820,24 @@ impl TextGlyph {
         tab_cells: usize,
         glyph_map: &mut GlyphMapping,
     ) -> Option<Self> {
-        if text.is_empty() || max_cells == 0 {
-            return None;
-        }
-        let bytes_consumed = mbyte::first_cluster_len(text);
-        if bytes_consumed == 0 {
-            return None;
-        }
+        let cluster = mbyte::first_cluster(text)?;
+        Self::from_cluster(text, cluster, max_cells, tab_cells, glyph_map)
+    }
 
-        if text[0] == b'\t' {
+    /// Prepares a decoded cluster without repeating its width or boundary lookup.
+    fn from_cluster(
+        text: &[u8],
+        cluster: mbyte::TextCluster,
+        max_cells: usize,
+        tab_cells: usize,
+        glyph_map: &mut GlyphMapping,
+    ) -> Option<Self> {
+        if max_cells == 0 || cluster.value < 0 {
+            return None;
+        }
+        let bytes_consumed = cluster.len;
+
+        if cluster.value == i32::from(b'\t') {
             if tab_cells == 0 {
                 return None;
             }
@@ -1839,10 +1848,7 @@ impl TextGlyph {
             });
         }
 
-        let width = usize::try_from(mbyte::first_char_cells(text)).ok()?;
-        if width == 0 {
-            return None;
-        }
+        let width = cluster.cells;
         if width > max_cells {
             return Some(Self {
                 contents: TextGlyphContents::Spaces,
@@ -1852,21 +1858,28 @@ impl TextGlyph {
         }
 
         Some(Self {
-            contents: TextGlyphContents::Character(Self::screen_character(text, glyph_map)),
+            contents: TextGlyphContents::Character(Self::screen_character(
+                &text[..bytes_consumed],
+                cluster.first_compose,
+                glyph_map,
+            )),
             width,
             bytes_consumed,
         })
     }
 
     /// Converts the first text cluster to the representation stored in a cell.
-    fn screen_character(text: &[u8], glyph_map: &mut GlyphMapping) -> VimSCharT {
-        let prepend_space = mbyte::is_composing_first(mbyte::first_codepoint(text));
+    fn screen_character(
+        text: &[u8],
+        prepend_space: bool,
+        glyph_map: &mut GlyphMapping,
+    ) -> VimSCharT {
         let max_text_len = MAX_SCHAR_SIZE - 1 - usize::from(prepend_space);
-        let bounded_text = &text[..text.len().min(max_text_len)];
-        let glyph_len = mbyte::first_cluster_len(bounded_text);
-
-        if glyph_len == 1 && text[0] >= 0x80 {
-            return 0;
+        let mut glyph_len = text.len().min(max_text_len);
+        if glyph_len < text.len() {
+            while text[glyph_len] & 0xc0 == 0x80 {
+                glyph_len -= 1;
+            }
         }
 
         let prefix_len = usize::from(prepend_space);
@@ -1876,6 +1889,16 @@ impl TextGlyph {
         }
         bytes[prefix_len..prefix_len + glyph_len].copy_from_slice(&text[..glyph_len]);
         schar_from_bytes(&bytes[..prefix_len + glyph_len], glyph_map)
+    }
+
+    /// Reports spaces that allow negative-space blending through virtual text.
+    fn is_invisible(self) -> bool {
+        match self.contents {
+            TextGlyphContents::Spaces => true,
+            TextGlyphContents::Character(character) => {
+                character == schar_from_ascii(' ') || character == schar_from_char(0x2800)
+            }
+        }
     }
 }
 
@@ -2037,24 +2060,22 @@ impl LineState {
     ) -> usize {
         assert!(self.active);
         let start_col = col;
-        let mut it = text.iter().enumerate();
-        while let Some((i, c)) = it.next() {
-            if col >= self.max_col || i >= text.len() || *c == NULL_TERMINATOR {
+        let mut offset = 0;
+        while col < self.max_col {
+            let Some(cluster) = mbyte::first_cluster(&text[offset..]) else {
                 break;
-            }
-            let p = text[i..].as_ptr().cast::<libc::c_char>();
-            let max_len = (text.len() - i) as i32;
-            let mut mbyte_blen = unsafe { mbyte::utfc_ptr2len_len(p, max_len) };
-            if mbyte_blen > max_len {
-                mbyte_blen = 1;
-            }
-            let mut first_c = 0;
-            let mut schar = unsafe { mbyte::utfc_ptrlen2schar(p, mbyte_blen, &mut first_c) };
-            let mut mbyte_cells = unsafe { mbyte::utf_ptr2cells_len(p, mbyte_blen) };
-            if mbyte_cells > 2 || schar == 0 {
+            };
+            let mut mbyte_cells = cluster.cells as i32;
+            let mut schar = if mbyte_cells > 2 || cluster.value < 0x20 {
                 mbyte_cells = 1;
-                schar = schar_from_char(0xFFFD);
-            }
+                schar_from_char(0xFFFD)
+            } else {
+                TextGlyph::screen_character(
+                    &text[offset..offset + cluster.len],
+                    cluster.first_compose,
+                    &mut lock_glyph_mapping(),
+                )
+            };
 
             if col + mbyte_cells > self.max_col {
                 // Only 1 cell left, but character requires 2 cells:
@@ -2065,7 +2086,7 @@ impl LineState {
 
             // When at the start of the text and overwriting the right half of a
             // two-cell character in the same grid, truncate that into a '>'.
-            if i == 0
+            if offset == 0
                 && col > self.first
                 && col < self.last
                 && lb.cells[col as usize].character == 0
@@ -2079,9 +2100,7 @@ impl LineState {
                 lb.cells[ucol + 1] = GridCell::new(0, attr, -1);
             }
             col += mbyte_cells;
-            for _ in 0..mbyte_blen - 1 {
-                it.next();
-            }
+            offset += cluster.len;
         }
         if col > start_col {
             self.first = std::cmp::min(self.first, start_col);
@@ -2996,9 +3015,9 @@ impl BorderText {
         }
 
         while !text.is_empty() && *overflow > 0 {
-            *overflow -= mbyte::first_char_cells(text);
-            let len = mbyte::first_cluster_len(text);
-            text = &text[len.min(text.len())..];
+            let cluster = mbyte::first_cluster(text)?;
+            *overflow -= cluster.cells as i32;
+            text = &text[cluster.len..];
         }
         Some(text)
     }
@@ -4591,11 +4610,43 @@ mod tests {
             })
         );
 
-        let combining = TextGlyph::screen_character("\u{301}".as_bytes(), &mut glyph_map);
+        let combining = TextGlyph::screen_character("\u{301}".as_bytes(), true, &mut glyph_map);
         assert_eq!(
             glyph_map.resolve(combining).as_bytes(),
             " \u{301}".as_bytes()
         );
+    }
+
+    /// Long clusters are consumed completely and packed without splitting a codepoint.
+    #[test]
+    fn text_glyph_preserves_long_cluster_boundaries() {
+        let cluster = format!("a{}", "\u{1d165}".repeat(8));
+        let text = format!("{cluster}x");
+        let mut glyph_map = GlyphMapping::new();
+        let glyph = TextGlyph::from_text(text.as_bytes(), 2, 0, &mut glyph_map).unwrap();
+        assert_eq!(glyph.bytes_consumed, cluster.len());
+        let TextGlyphContents::Character(character) = glyph.contents else {
+            panic!("expected a cluster");
+        };
+        let packed = glyph_map.resolve(character);
+        assert_eq!(
+            packed.as_bytes(),
+            format!("a{}", "\u{1d165}".repeat(7)).as_bytes()
+        );
+    }
+
+    /// Truncated following sequences remain available as separate invalid bytes.
+    #[test]
+    fn text_cluster_leaves_malformed_tail_unconsumed() {
+        let text = b"e\xcc\x81\xfd";
+        let cluster = mbyte::first_cluster(text).unwrap();
+        assert_eq!(
+            (cluster.value, cluster.len, cluster.cells),
+            (i32::from(b'e'), 3, 1)
+        );
+        let invalid = mbyte::first_cluster(&text[cluster.len..]).unwrap();
+        assert_eq!((invalid.value, invalid.len, invalid.cells), (-1, 1, 4));
+        assert!(mbyte::first_cluster(b"\0").is_none());
     }
 
     #[test]

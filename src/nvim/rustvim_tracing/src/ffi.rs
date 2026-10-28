@@ -223,21 +223,20 @@ pub extern "C" fn log_init() {
     if let Some(path) = logger.environment_path() {
         set_path(c"NVIM_LOG_FILE", path);
     }
-    if let Some(error) = logger.directory_error() {
-        if let Some(guard) = reserve(&logger, Some(Level::WARN), Some("log_init"), None, -1) {
-            if let Some(metadata) = metadata() {
-                let _ = guard.write(
-                    &metadata,
-                    &LogMessage {
-                        level: Level::WARN,
-                        context: None,
-                        source: Some(("log_init", line!() as i32)),
-                        message: &format!("Failed to create log directory: {error}"),
-                        newline: true,
-                    },
-                );
-            }
-        }
+    if let Some(error) = logger.directory_error()
+        && let Some(guard) = reserve(&logger, Some(Level::WARN), Some("log_init"), None, -1)
+        && let Some(metadata) = metadata()
+    {
+        let _ = guard.write(
+            &metadata,
+            &LogMessage {
+                level: Level::WARN,
+                context: None,
+                source: Some(("log_init", line!() as i32)),
+                message: &format!("Failed to create log directory: {error}"),
+                newline: true,
+            },
+        );
     }
     crate::initialize(logger).expect("log_init must install the logging subscriber exactly once");
 }

@@ -9,6 +9,7 @@ local assert_alive = n.assert_alive
 local command, feed_command = n.command, n.feed_command
 local eval = n.eval
 local eq = t.eq
+local eq_partial = t.eq_partial
 local neq = t.neq
 local matches = t.matches
 local expect = n.expect
@@ -1674,22 +1675,7 @@ describe('float window', function()
         hide = false,
       }
       eq(expected, api.nvim_win_get_config(win))
-      eq(
-        true,
-        exec_lua(
-          [[
-        local expected, win = ...
-        local actual = vim.api.nvim_win_get_config(win)
-        for k,v in pairs(expected) do
-          if v ~= actual[k] then
-            error(k)
-          end
-        end
-        return true]],
-          expected,
-          win
-        )
-      )
+      eq_partial(expected, exec_lua('return vim.api.nvim_win_get_config(...)', win))
 
       eq({
         external = false,
@@ -8415,7 +8401,7 @@ describe('float window', function()
           {3:-- VISUAL --}                            |
         ## grid 4
           {27:foo}{1:                 }|
-          {27:ba}{1:^r                 }|
+          {27:ba^r}{1:                 }|
           {1:baz                 }|
         ]],
           float_pos = { [4] = { 1001, 'NW', 1, 2, 5, true, 50, 1, 2, 5 } },
@@ -8456,7 +8442,7 @@ describe('float window', function()
                                                   |
           {0:~                                       }|
           {0:~    }{27:foo}{1:                 }{0:               }|
-          {0:~    }{27:ba}{1:^r                 }{0:               }|
+          {0:~    }{27:ba^r}{1:                 }{0:               }|
           {0:~    }{1:baz                 }{0:               }|
           {0:~                                       }|
           {3:-- VISUAL --}                            |
@@ -8541,7 +8527,7 @@ describe('float window', function()
         ## grid 4
           {33:┌────────────────────┐}|
           {33:│}{27:foo}{1:                 }{33:│}|
-          {33:│}{27:ba}{1:^r                 }{33:│}|
+          {33:│}{27:ba^r}{1:                 }{33:│}|
           {33:│}{1:baz                 }{33:│}|
           {33:└────────────────────┘}|
         ]],
@@ -8582,7 +8568,7 @@ describe('float window', function()
           grid = [[
                {33:┌────────────────────┐}             |
           {0:~    }{33:│}{27:foo}{1:                 }{33:│}{0:             }|
-          {0:~    }{33:│}{27:ba}{1:^r                 }{33:│}{0:             }|
+          {0:~    }{33:│}{27:ba^r}{1:                 }{33:│}{0:             }|
           {0:~    }{33:│}{1:baz                 }{33:│}{0:             }|
           {0:~    }{33:└────────────────────┘}{0:             }|
           {0:~                                       }|
@@ -8667,7 +8653,7 @@ describe('float window', function()
         ## grid 4
           {3:floaty bar          }|
           {27:foo}{1:                 }|
-          {27:ba}{1:^r                 }|
+          {27:ba^r}{1:                 }|
           {1:baz                 }|
         ]],
           float_pos = { [4] = { 1001, 'NW', 1, 1, 5, true, 50, 1, 1, 5 } },
@@ -8708,7 +8694,7 @@ describe('float window', function()
                                                   |
           {0:~    }{3:floaty bar          }{0:               }|
           {0:~    }{27:foo}{1:                 }{0:               }|
-          {0:~    }{27:ba}{1:^r                 }{0:               }|
+          {0:~    }{27:ba^r}{1:                 }{0:               }|
           {0:~    }{1:baz                 }{0:               }|
           {0:~                                       }|
           {3:-- VISUAL --}                            |
@@ -8779,7 +8765,7 @@ describe('float window', function()
           {3:-- VISUAL --}                            |
         ## grid 4
           foo                 |
-          b^a{27:r}                 |
+          b{27:^ar}                 |
           {27:baz}                 |
           {0:~                   }|*2
         ]])
@@ -8806,7 +8792,7 @@ describe('float window', function()
         api.nvim_input_mouse('left', 'drag', '', 0, 1, 21)
         screen:expect([[
                              {5:│}foo                 |
-          {0:~                  }{5:│}b^a{27:r}                 |
+          {0:~                  }{5:│}b{27:^ar}                 |
           {0:~                  }{5:│}{27:baz}                 |
           {0:~                  }{5:│}{0:~                   }|*2
           {5:[No Name]           }{4:[No Name] [+]       }|

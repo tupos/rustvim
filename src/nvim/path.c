@@ -168,6 +168,7 @@ const char *invocation_path_tail(const char *invocation, size_t *len)
     int l = utfc_ptr2len(p);
     if (vim_ispathsep_nocolon(*p)) {
       tail = p + 1;  // Now tail points one past the separator.
+      tail_end = tail;
     } else if (*p == '\\' && inquote) {
       p++;
     } else if (*p == '"') {
@@ -1156,7 +1157,7 @@ static bool has_special_wildchar(char *p, int flags)
         continue;
       }
       // A quote and backtick must be followed by another one.
-      if ((*p == '`' || *p == '\'') && vim_strchr(p, (uint8_t)(*p)) == NULL) {
+      if ((*p == '`' || *p == '\'') && vim_strchr(p + 1, (uint8_t)(*p)) == NULL) {
         continue;
       }
       return true;

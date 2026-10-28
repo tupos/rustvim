@@ -8,6 +8,7 @@
 #include "nvim/mapping_defs.h"
 #include "nvim/marktree_defs.h"
 #include "nvim/memline_defs.h"
+#include "nvim/normal_defs.h"
 #include "nvim/option_defs.h"
 #include "nvim/os/fs_defs.h"
 #include "nvim/statusline_defs.h"
@@ -342,7 +343,7 @@ typedef struct {
   char *b_p_spo;              // 'spelloptions'
   unsigned b_p_spo_flags;      // 'spelloptions' flags
   int b_cjk;                  // all CJK letters as OK
-  uint8_t b_syn_chartab[32];  // syntax iskeyword option
+  uint64_t b_syn_chartab[4];  // syntax iskeyword option
   char *b_syn_isk;            // iskeyword option
 } synblock_T;
 
@@ -575,6 +576,7 @@ struct file_buffer {
   char *b_p_fenc;               ///< 'fileencoding'
   char *b_p_ff;                 ///< 'fileformat'
   char *b_p_ft;                 ///< 'filetype'
+  int b_p_follow;               ///< 'follow'
   char *b_p_fo;                 ///< 'formatoptions'
   char *b_p_flp;                ///< 'formatlistpat'
   int b_p_inf;                  ///< 'infercase'

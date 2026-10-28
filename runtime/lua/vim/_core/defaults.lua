@@ -5,12 +5,22 @@ local nvim_on = require('vim._core.util').nvim_on
 --- Default user commands
 do
   vim.api.nvim_create_user_command('Inspect', function(cmd)
-    if cmd.bang then
-      vim.print(vim.inspect_pos())
-    else
-      vim.show_pos()
+    local opts = {} --- @type vim.inspect_pos.Opts
+    local row, col --- @type integer?, integer?
+    if cmd.range > 0 then
+      row, col = cmd.line1 - 1, 0
+      opts.end_row, opts.end_col = cmd.line2, 0
     end
-  end, { desc = 'Inspect highlights and extmarks at the cursor', bang = true })
+    if cmd.bang then
+      vim.print(vim.inspect_pos(0, row, col, opts))
+    else
+      vim.show_pos(0, row, col, opts)
+    end
+  end, {
+    desc = 'Inspect highlights and extmarks at the cursor or in a line range',
+    bang = true,
+    range = true,
+  })
 
   vim.api.nvim_create_user_command('InspectTree', function(cmd)
     local opts = { lang = cmd.fargs[1] }
@@ -42,7 +52,7 @@ do
         vim.ui.open(current_file)
       end
     else
-      vim.ui.open(cmd.fargs[1])
+      vim.ui.open(assert(cmd.fargs[1]))
     end
   end, {
     desc = 'Open file with system default handler. See :help vim.ui.open()',
@@ -57,8 +67,8 @@ do
   ---
   --- See |v_star-default| and |v_#-default|
   do
+    --- @param forward 0|1
     local function _visual_search(forward)
-      assert(forward == 0 or forward == 1)
       local pos = vim.fn.getpos('.')
       local vpos = vim.fn.getpos('v')
       local mode = vim.fn.mode()
@@ -147,6 +157,7 @@ do
 
   --- Map |gx| to call |vim.ui.open| on the `textDocument/documentLink` or <cfile> at cursor.
   do
+    --- @param uri string
     local function do_open(uri)
       local cmd, err = vim.ui.open(uri)
       local rv = cmd and cmd:wait(1000) or nil
@@ -679,6 +690,7 @@ do
   end)
 
   ---@param ns integer
+  ---@param win integer
   ---@param buf integer
   ---@param count integer
   local function jump_to_prompt(ns, win, buf, count)
@@ -755,9 +767,10 @@ do
     desc = 'Skip the swapfile prompt when the swapfile is owned by a running Nvim process',
   }, function()
     local info = vim.fn.swapinfo(vim.v.swapname)
-    local user = vim.uv.os_get_passwd().username
+    local passwd = vim.uv.os_get_passwd()
+    local user = passwd and passwd.username
     local iswin = 1 == vim.fn.has('win32')
-    if info.error or info.pid <= 0 or (not iswin and info.user ~= user) then
+    if info.error or info.pid <= 0 or (not iswin and (not user or info.user ~= user)) then
       vim.v.swapchoice = '' -- Show the prompt.
       return
     end
@@ -919,6 +932,7 @@ do
   --- @param sync boolean When true (a TTY is present at startup), also send a
   --- DSR probe and synchronously wait so 'background' is set before user config,
   --- warning (E1568) if the terminal never answers the DSR.
+  --- @param chan integer
   local function detect_background(sync, chan)
     -- Re-create (clear) the handler's augroup on each call so only the
     -- most-recently-attached TUI's handler remains.
@@ -1050,7 +1064,7 @@ do
         end
 
         -- The returned SGR sequence should begin with 48:2
-        local sgr = assert(attrs[#attrs]):match('^48:2:([%d:]+)$')
+        local sgr = attrs[#attrs]:match('^48:2:([%d:]+)$')
         if not sgr then
           return
         end

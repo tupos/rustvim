@@ -56,7 +56,7 @@ describe('mbyte', function()
     local function test_seq(seq)
       local firstc = ffi.new('int[1]')
       local buf = ffi.new('char[32]')
-      lib.schar_get(buf, lib.utfc_ptr2schar(to_string(seq), firstc))
+      lib.schar_get(buf, lib.unittest_schar_from_cluster(to_string(seq), firstc))
       local str = ffi.string(buf)
       if 1 > 2 then -- for debugging
         local tbl = {}
@@ -79,7 +79,7 @@ describe('mbyte', function()
         eq(byte(c), test_seq { c })
       end
       for c = 128, 255 do
-        eq({ '', c }, test_seq { c })
+        eq({ '', -1 }, test_seq { c })
       end
     end)
 
@@ -90,11 +90,11 @@ describe('mbyte', function()
       eq(byte(0x7f), test_seq { 0x7f, 0x80 })
 
       -- No UTF-8 sequence
-      eq({ '', 0xc2 }, test_seq { 0xc2, 0x7f })
+      eq({ '', -1 }, test_seq { 0xc2, 0x7f })
       -- One UTF-8 character
       eq({ '\xc2\x80', 0x80 }, test_seq { 0xc2, 0x80 })
       -- No UTF-8 sequence
-      eq({ '', 0xc2 }, test_seq { 0xc2, 0xc0 })
+      eq({ '', -1 }, test_seq { 0xc2, 0xc0 })
     end)
 
     itp('3-byte sequences', function()
@@ -109,7 +109,7 @@ describe('mbyte', function()
       eq({ '\x7f', 0x7f }, test_seq { 0x7f, 0xcc, 0x80 })
 
       -- No UTF-8 sequence
-      eq({ '', 0xc2 }, test_seq { 0xc2, 0x7f, 0xcc })
+      eq({ '', -1 }, test_seq { 0xc2, 0x7f, 0xcc })
       -- Incomplete combining character
       eq({ '\xc2\x80', 0x80 }, test_seq { 0xc2, 0x80, 0xcc })
 
@@ -128,7 +128,7 @@ describe('mbyte', function()
       eq({ '\x29\xcc\x80', 0x29 }, test_seq { 0x29, 0xcc, 0x80, 0xcc })
 
       -- No UTF-8 sequence
-      eq({ '', 0xc2 }, test_seq { 0xc2, 0x7f, 0xcc, 0x80 })
+      eq({ '', -1 }, test_seq { 0xc2, 0x7f, 0xcc, 0x80 })
       -- No following UTF-8 character
       eq({ '\xc2\x80', 0x80 }, test_seq { 0xc2, 0x80, 0xcc, 0xcc })
       -- Combining character U+0301
@@ -201,7 +201,7 @@ describe('mbyte', function()
       )
 
       -- No UTF-8 sequence
-      eq({ '', 0xc2 }, test_seq { 0xc2, 0x7f, 0xcc, 0x80, 0x80 })
+      eq({ '', -1 }, test_seq { 0xc2, 0x7f, 0xcc, 0x80, 0x80 })
       -- No following UTF-8 character
       eq({ '\xc2\xbc', 0xbc }, test_seq { 0xc2, 0xbc, 0xcc, 0xcc, 0x80 })
       -- Combining character U+0301
@@ -290,6 +290,43 @@ describe('mbyte', function()
         table.insert(e_offsets, result.end_off)
       end
       eq(expected_offsets, { b = b_offsets, e = e_offsets })
+    end)
+  end)
+
+  describe('utf_ptr2cells', function()
+    local function check(str, expected)
+      -- TODO: rework a better test structure for the new world
+      -- of bounded and unbounded CharInfo iterators
+      eq(expected, lib.utf_ptr2cells(to_cstr(str)))
+      -- this a bit of a cop-out (string not cluster), but see above
+      eq(expected, lib.mb_string2cells_len(to_cstr(str), #str))
+    end
+
+    itp('gives a spacing mark its own cell', function()
+      check('ำ', 1)
+      check('ท', 1)
+      check('ทำ', 2)
+      check('का', 2)
+    end)
+
+    itp('gives the halfwidth katakana sound marks their own cell', function()
+      check('ｶ', 1)
+      check('ｶﾞ', 2)
+      check('ﾊﾟ', 2) -- U+FF9F, the semi-voiced mark
+    end)
+
+    itp('does not widen clusters of non-spacing marks', function()
+      check('ท่', 1)
+      check('é', 1) -- decomposed, so the acute joins the cluster
+    end)
+
+    itp('clamps to the maximum cells per cluster', function()
+      check('ทำำ', 2)
+    end)
+
+    itp('leaves double-width and illegal bytes alone', function()
+      check('漢', 2)
+      eq(4, lib.utf_ptr2cells(to_cstr('\xff'))) -- illegal byte, shown as <ff>
     end)
   end)
 

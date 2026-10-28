@@ -1,7 +1,7 @@
 --- Multicursor:
 --- - Display: kitty cursors if supported (`detect()`), else "highlight" cursors (hl-MCursor).
 ---   https://github.com/kovidgoyal/kitty/blob/master/docs/multiple-cursors-protocol.rst
---- - Commands: `[count]Q`, `{Visual}Q`, `gQ`, `]C`, `g CTRL-A`.
+--- - Commands: `gQ`, `]C`, `g CTRL-A`.
 --- - Script API: `active()`.
 
 local M = {}
@@ -10,10 +10,14 @@ local M = {}
 local ns = vim.api.nvim_create_namespace('nvim.multicursor')
 --- Selection-end cursors, during a Visual selection.
 local vcur_ns = vim.api.nvim_create_namespace('nvim.multicursor.cursor')
+--- Previous session's cursors, snapshotted on clear ("gQ"). Mark id 1 is the primary cursor.
+local last_ns = vim.api.nvim_create_namespace('nvim.multicursor.last')
 --- Kitty cursors protocol: host terminal supports the protocol.
 local tty_cursors = false
 local last_seq = '' ---@type string
 local pending = false
+--- Max CSI params in one terminal seq (kitty: 256). #41969
+local max_csi_params = 256
 
 --- Gets the operative mcursors namespace, depending on the current state.
 --- @param buf integer
@@ -49,6 +53,7 @@ local function coords()
 end
 
 --- Kitty cursors protocol: Sends a term sequence. Empty string ('') means clear.
+--- @param seq string
 local function send(seq)
   if seq == last_seq then -- Skip redundant sequences.
     return
@@ -57,12 +62,39 @@ local function send(seq)
   vim.api.nvim_ui_send(seq == '' and '\027[>0;4 q' or seq)
 end
 
+--- Kitty cursors protocol: Builds the escape sequence for extra cursors at screen coords `c`.
+---@param c string[] Coords in "2:row:col" format.
+local function cursor_seq(c)
+  local seq = '\027[>0;4 q' -- Clear.
+  local hl = vim.api.nvim_get_hl(0, { name = 'MCursor', link = false })
+  if hl.fg then
+    seq = seq
+      .. ('\027[>30;2:%d:%d:%d q'):format(
+        bit.rshift(bit.band(hl.fg, 0xFF0000), 16),
+        bit.rshift(bit.band(hl.fg, 0xFF00), 8),
+        bit.band(hl.fg, 0xFF)
+      )
+  end
+  if hl.bg then
+    seq = seq
+      .. ('\027[>40;2:%d:%d:%d q'):format(
+        bit.rshift(bit.band(hl.bg, 0xFF0000), 16),
+        bit.rshift(bit.band(hl.bg, 0xFF00), 8),
+        bit.band(hl.bg, 0xFF)
+      )
+  end
+  -- Shape 29 at each position, in batches of ~(max_csi_params/3).
+  local per_seq = math.floor((max_csi_params - 1) / 3) -- Shape takes 1 param, each coord takes 3.
+  for i = 1, #c, per_seq do
+    seq = seq .. ('\027[>29;%s q'):format(table.concat(c, ';', i, math.min(i + per_seq - 1, #c)))
+  end
+  return seq
+end
+
 --- Kitty cursors protocol: Updates the cursors.
 local function refresh()
   local c = coords()
-  -- Clear all extra cursors ("no cursor" over the full-screen rectangle), then set shape 29 (mimic
-  -- primary) at each position.
-  send(#c == 0 and '' or ('\027[>0;4 q\027[>29;%s q'):format(table.concat(c, ';')))
+  send(#c == 0 and '' or cursor_seq(c))
 end
 
 --- Displays the mcursors. Invoked per-redraw while cursors exist.
@@ -71,6 +103,9 @@ end
 ---
 --- NOTE: The fake Visual selections ("nvim.multicursor.visual") are self-painting extmarks.
 --- TODO(justimk): could also do that for "nvim.multicursor" after #41576.
+--- @param bufnr integer
+--- @param topline integer
+--- @param botline integer
 local function display_win(_, _, bufnr, topline, botline)
   if tty_cursors then -- Terminal draws the cursors; emit once per redraw (on_end).
     pending = true
@@ -131,16 +166,22 @@ function M.enable(enable)
 end
 
 --- ]C/[C: Jumps to the [count]'th next/previous cursor.
+--- Without a session, jumps to the previous session's cursors ("gQ").
 --- @param forward boolean
 --- @param count integer?
 --- @return boolean moved
 function M.jump(forward, count)
   local last = vim.api.nvim_buf_line_count(0)
   local positions = {} ---@type vim.Pos[]
-  for _, m in ipairs(vim.api.nvim_buf_get_extmarks(0, ns, 0, -1, {})) do
-    if m[2] < last then
-      positions[#positions + 1] = vim.pos(0, m[2], m[3])
+  local jump_ns = M.active() and ns or last_ns
+  local prev ---@type vim.Pos?
+  for _, m in ipairs(vim.api.nvim_buf_get_extmarks(0, jump_ns, 0, -1, {})) do
+    local pos = vim.pos(0, m[2], m[3])
+    -- Skip duplicates (sorted): the "last" primary (mark 1) may share a position with a cursor.
+    if m[2] < last and pos ~= prev then
+      positions[#positions + 1] = pos
     end
+    prev = pos
   end
   local n = #positions
   if n == 0 then
@@ -164,60 +205,28 @@ function M.jump(forward, count)
     idx = (i - 1 - steps) % n + 1
   end
   vim.cmd [[normal! m']]
-  -- Leave a cursor behind: the jump rotates which cursor is primary, the set of positions stays.
-  vim.api.nvim_mcursor(0, curpos:to_cursor())
-  vim.api.nvim_win_set_cursor(0, positions[idx]:to_cursor())
+  vim.api.nvim_win_set_cursor(0, assert(positions[idx]):to_cursor())
   return true
 end
 
---- Restores the previous multicursors.
+--- Restores the previous multicursors, and the primary-cursor position.
 function M.restore()
-  local last_ns = vim.api.nvim_create_namespace('nvim.multicursor.last')
-  local lastrow = vim.api.nvim_buf_line_count(0)
-  for _, m in ipairs(vim.api.nvim_buf_get_extmarks(0, last_ns, 0, -1, {})) do
-    if m[2] < lastrow then
-      vim.api.nvim_mcursor(0, { m[2] + 1, m[3] })
-    end
-  end
-end
-
---- Places a cursor on each line of the Visual selection. Enables "follow mode" (q=).
-function M.visual()
-  local vline = vim.fn.line('v') --[[@as integer]]
-  local cline = vim.fn.line('.') --[[@as integer]]
-  local first, last = math.min(vline, cline), math.max(vline, cline)
-  local vcol = vim.fn.virtcol('.', true)[1] --[[@as integer]]
-  vim.cmd.normal({ vim.keycode('<Esc>'), bang = true }) -- End Visual mode.
-  --- Screen column (per-line: multibyte chars/tabs shift the byte<->screen mapping), or the
-  --- past-EOL insertion point on shorter lines.
-  --- @param lnum integer
-  local function bytecol(lnum)
-    if vim.fn.virtcol({ lnum, '$' }) <= vcol then
-      return vim.fn.col({ lnum, '$' }) - 1
-    end
-    return vim.fn.virtcol2col(0, lnum, vcol) - 1
-  end
-  vim.api.nvim_win_set_cursor(0, { first, bytecol(first) })
-  for lnum = first, last do
-    vim.api.nvim_mcursor(0, { lnum, bytecol(lnum) })
-  end
-  vim.cmd('norm! 1q=') -- "Follow" mode.
-end
-
---- "[count]Q": Places a multicursor at every match of the last search pattern.
-function M.matches()
-  if vim.fn.getreg('/') == '' then
-    require('vim._core.util').echo_err('E35: No previous regular expression')
+  if M.active() then
+    vim.api.nvim_echo({ { 'gQ: multicursor session is active' } }, true, {})
     return
   end
-  local view = vim.fn.winsaveview()
-  vim.api.nvim_win_set_cursor(0, { 1, 0 })
-  local pos = vim.fn.searchpos('', 'cW')
-  while pos[1] ~= 0 do
-    vim.api.nvim_mcursor(0, { pos[1], pos[2] - 1 })
-    pos = vim.fn.searchpos('', 'W')
+  local lastrow = vim.api.nvim_buf_line_count(0)
+  local primary ---@type [integer, integer]?
+  for _, m in ipairs(vim.api.nvim_buf_get_extmarks(0, last_ns, 0, -1, {})) do
+    if m[2] < lastrow and m[1] == 1 then -- Extmark 1 = primary cursor.
+      primary = { m[2] + 1, m[3] }
+    elseif m[2] < lastrow then
+      vim.api.nvim_buf_set_extmark(0, ns, m[2], m[3], {})
+    end
   end
-  vim.fn.winrestview(view)
+  if primary then
+    vim.api.nvim_win_set_cursor(0, primary)
+  end
 end
 
 --- Inserts an ascending number at each cursor (Emacs F3-counter): 1, 2, 3, ….

@@ -40,9 +40,9 @@ function vim.api.nvim__cmdwin_set(type, buf) end
 --- @param index integer Completion candidate index
 --- @param opts vim.api.keyset.complete_set? Optional parameters.
 --- - info: (string) info text.
---- @return table<string,number> # Dict containing these keys:
---- - winid: (number) floating window id
---- - bufnr: (number) buffer id in floating window
+--- @return table<string,integer> # Dict containing these keys:
+--- - winid: (integer) floating window id
+--- - bufnr: (integer) buffer id in floating window
 function vim.api.nvim__complete_set(index, opts) end
 
 --- WARNING: This feature is experimental/unstable.
@@ -121,12 +121,6 @@ function vim.api.nvim__invalidate_glyph_cache() end
 
 --- WARNING: This feature is experimental/unstable.
 ---
---- Returns true if a multicursor cascade is in-progress.
---- @return boolean
-function vim.api.nvim__mcursor_cascading() end
-
---- WARNING: This feature is experimental/unstable.
----
 --- Get the properties for namespace
 ---
 --- @param ns_id integer Namespace
@@ -141,6 +135,13 @@ function vim.api.nvim__ns_get(ns_id) end
 --- @param opts vim.api.keyset.ns_opts? Optional parameters to set:
 --- - wins: a list of windows to be scoped in
 function vim.api.nvim__ns_set(ns_id, opts) end
+
+--- WARNING: This feature is experimental/unstable.
+---
+--- @param name string
+--- @param value any
+--- @return any
+function vim.api.nvim__option_to_object(name, value) end
 
 --- WARNING: This feature is experimental/unstable.
 ---
@@ -696,7 +697,8 @@ function vim.api.nvim_buf_line_count(buf) end
 ---   hidden because of scrolling with 'nowrap' or 'smoothscroll'. Currently only
 ---   affects "overlay" virt_text.
 --- - virt_text_pos: Position of virtual text:
----   - "eol": Right after EOL character (default).
+---   - "eol": One cell after the line text or its displayed 'listchars' EOL character
+---     (default).
 ---   - "eol_right_align": Display right-aligned in the window unless the virtual text
 ---     is longer than the space available. If the virtual text is too long, it is
 ---     truncated to fit in the window after the EOL character. If the line is
@@ -849,6 +851,14 @@ function vim.api.nvim_call_function(fn, args) end
 --- @param data string Data to write. 8-bit clean: may contain NUL bytes.
 function vim.api.nvim_chan_send(chan, data) end
 
+--- Sets channel properties.
+---
+--- @param chan integer Channel id, or 0 for current (RPC) channel.
+--- @param config vim.api.keyset.chan_set Properties:
+--- - detach: (boolean, default: true) Closing the channel does not self-exit Nvim. Nvim
+---   self-exits when the last `detach=false` `RPC` channel closes. See also `:detach!`.
+function vim.api.nvim_chan_set(chan, config) end
+
 --- Clears all autocommands matching the {opts} query. To delete autocmds see `nvim_del_autocmd()`.
 ---
 --- @param opts vim.api.keyset.clear_autocmds? Optional parameters:
@@ -969,13 +979,14 @@ function vim.api.nvim_create_augroup(name, opts) end
 --- - callback (`function|string?`) Lua function (or Vimscript function name, if string)
 ---   called when the event(s) is triggered. Lua callback can return `lua-truthy` to delete
 ---   the autocommand. Callback receives one argument, a table with keys: [event-args]()
----     - buf: (`number`) [<abuf>]
+---     - buf: (`integer`) [<abuf>]
 ---     - data: (`any`) Arbitrary data passed from [nvim_exec_autocmds()] [event-data]()
 ---     - event: (`vim.api.keyset.events`) Name of the triggered event `autocmd-events`
 ---     - file: (`string`) [<afile>] (not expanded to a full path)
----     - group: (`number?`) Group id, if any
----     - id: (`number`) Autocommand id
+---     - group: (`integer?`) Group id, if any
+---     - id: (`integer`) Autocommand id
 ---     - match: (`string`) [<amatch>] (expanded to a full path)
+---     - win: (`integer`) id of the window for the event, see `window-ID`
 --- - command (string?) Vim command executed on event. Not allowed with {callback}.
 --- - desc (`string?`) Description (for documentation and troubleshooting).
 --- - group (`string|integer?`) Group name or id to match against.
@@ -1166,8 +1177,8 @@ function vim.api.nvim_eval(expr) end
 ---
 --- @param str string Statusline string (see 'statusline').
 --- @param opts vim.api.keyset.eval_statusline? Optional parameters.
---- - fillchar: (string) Character to fill blank spaces in the statusline (see
----                      'fillchars'). Treated as single-width even if it isn't.
+--- - fillchar: (string) Single-width character to fill blank spaces
+---                      in the statusline (see 'fillchars').
 --- - highlights: (boolean) Return highlight information.
 --- - maxwidth: (number) Maximum width of statusline.
 --- - use_statuscol_lnum: (number) Evaluate statuscolumn for this line number instead of statusline.
@@ -1300,17 +1311,19 @@ function vim.api.nvim_get_autocmds(opts) end
 
 --- Gets information about a channel.
 ---
---- See `nvim_list_uis()` for an example of how to get channel info.
+--- The docs for `nvim_list_uis()` show an example.
 ---
---- @param chan integer channel_id, or 0 for current channel
+--- @param chan integer Channel id, or 0 for current (RPC) channel
 --- @return table<string,any> # Channel info dict with these keys:
---- - "id"       Channel id.
 --- - "argv"     (optional) Job arguments list.
---- - "stream"   Stream underlying the channel.
----      - "stdio"      stdin and stdout of this Nvim instance
----      - "stderr"     stderr of this Nvim instance
----      - "socket"     TCP/IP socket or named pipe
----      - "job"        Job with communication over its stdio.
+--- - "buf"      (optional) Buffer connected to |terminal| instance.
+--- - "buffer"   (optional) Deprecated alias for `buf`.
+--- - "client"   (optional) Info about the peer (client on the other end of the channel), as set
+---              by |nvim_set_client_info()|.
+--- - "detach"   (optional) Closing the |RPC| channel does not exit Nvim. |nvim_chan_set()|
+--- - "exitcode" (optional) Exit code of the |terminal| process.
+--- - "id"       Channel id.
+--- - "internal" (optional) In-process channel (stream=socket).
 --- - "mode"     How data received on the channel is interpreted.
 ---      - "bytes"      Send and receive raw bytes.
 ---      - "terminal"   |terminal| instance interprets ASCII sequences.
@@ -1318,12 +1331,11 @@ function vim.api.nvim_get_autocmds(opts) end
 --- - "pty"      (optional) Name of pseudoterminal. On a POSIX system this is a device path like
 ---              "/dev/pts/1". If unknown, the key will still be present if a pty is used (e.g.
 ---              for conpty on Windows).
---- - "buf"      (optional) Buffer connected to |terminal| instance.
---- - "buffer"   (optional) Deprecated alias for `buf`.
---- - "client"   (optional) Info about the peer (client on the other end of the channel), as set
----              by |nvim_set_client_info()|.
---- - "exitcode" (optional) Exit code of the |terminal| process.
----
+--- - "stream"   Stream underlying the channel.
+---      - "stdio"      stdin and stdout of this Nvim instance
+---      - "stderr"     stderr of this Nvim instance
+---      - "socket"     TCP/IP socket or named pipe
+---      - "job"        Job with communication over its stdio.
 function vim.api.nvim_get_chan_info(chan) end
 
 --- Returns the 24-bit RGB value of a `nvim_get_color_map()` color name or
@@ -1680,13 +1692,6 @@ function vim.api.nvim_list_wins() end
 --- @return any
 function vim.api.nvim_load_context(dict) end
 
---- Adds a multicursor in the given buffer.
----
---- @param buf integer Buffer handle, or 0 for current buffer
---- @param pos [integer, integer] (row, col) (1,0)-indexed cursor position (byte offset)
---- @return integer # Total number of extra cursors.
-function vim.api.nvim_mcursor(buf, pos) end
-
 --- @deprecated
 --- @param msg string
 --- @param log_level integer
@@ -1897,7 +1902,7 @@ function vim.api.nvim_out_write(str) end
 ---
 --- @param str string Command line string to parse. Cannot contain "\n".
 --- @param opts vim.api.keyset.empty? Optional parameters. Reserved for future use.
---- @return vim.api.keyset.cmd # Dict containing command information, with these keys:
+--- @return vim.api.keyset.cmd_ret # Dict containing command information, with these keys:
 --- - cmd: (string) Command name.
 --- - range: (array) (optional) Command range ([<line1>] [<line2>]).
 ---                  Omitted if command doesn't accept a range.
@@ -2309,17 +2314,19 @@ function vim.api.nvim_set_option(name, value) end
 --- `:set`: for global-local options, both the global and local value are set
 --- unless otherwise specified with {scope}.
 ---
---- Note the options {win} and {buf} cannot be used together.
+--- Note that `win` and `buf` cannot be used together.
 ---
 --- @param name string Option name
---- @param value any New option value
+--- @param value any New option value. May be structured for dict/list options, e.g. 'formatoptions'
+--- accepts `{ 'c', 'r' }`, 'listchars' accepts `{ eol = '~' }`.
 --- @param opts vim.api.keyset.option? Optional parameters
 --- - buf: Buffer number. Used for setting buffer local option.
---- - dry_run: (`boolean?`, default: false) If true, then the
----   option value won't be set.
---- - operation: One of "set", "append", "prepend", or "remove".
----   Corresponds to `:set=`, `:set+=`, `:set^=`, and `:set-=`.
----   Default is "set".
+--- - dry_run: (`boolean?`, default: false) If true, validates the
+---   option value without setting it.
+--- - operation: (`string?`, default: "set") One of "set", "append", "prepend", or
+---   "remove". Corresponds to `:set=`, `:set+=`, `:set^=`, and `:set-=`.
+---   With "remove", each item in a structured `value` is removed regardless of
+---   order/adjacency.
 --- - scope: One of "global" or "local". Analogous to
 --- `:setglobal` and `:setlocal`, respectively.
 --- - tab: `tab-ID` for tab-local options (currently only 'cmdheight'). Tabpage 0

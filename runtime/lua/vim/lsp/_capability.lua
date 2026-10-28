@@ -44,7 +44,7 @@ local buf_capabilities = {}
 ---@field augroup integer
 ---
 --- Per-client state data, scoped to the lifetime of the attached client.
----@field client_state table<integer, table>
+---@field client_state table<integer, table?>
 local M = {}
 M.__index = M
 
@@ -92,7 +92,7 @@ function M:destroy()
   api.nvim_del_augroup_by_id(self.augroup)
   self.active[self.bufnr] = nil
 
-  buf_capabilities[self.bufnr] = vim.tbl_filter(function(cap) ---@param cap vim.lsp.Capability
+  buf_capabilities[self.bufnr] = vim.tbl_filter(function(cap)
     return cap ~= self
   end, buf_capabilities[self.bufnr])
 
@@ -118,18 +118,18 @@ end
 
 --- Callback invoked when textDocument/didClose is sent for a client.
 ---@param client_id integer
----@diagnostic disable-next-line: unused-local
+---@diagnostic disable-next-line: unused
 function M:on_close(client_id) end
 
 --- Callback invoked when textDocument/didChange or textDocument/didOpen is sent for a client.
 ---@param client_id integer
----@diagnostic disable-next-line: unused-local
+---@diagnostic disable-next-line: unused
 function M:on_change(client_id) end
 
 --- Callback invoked on every redraw.
 ---@param topline integer
 ---@param botline integer
----@diagnostic disable-next-line: unused-local
+---@diagnostic disable-next-line: unused
 function M:on_win(topline, botline) end
 
 ---@param name vim.lsp.capability.Name

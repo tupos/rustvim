@@ -486,35 +486,37 @@ int utf_char2cells(int c)
   return 1;
 }
 
+/// Exposes bounded cluster values to Rust without copying source text.
+size_t rustvim_cluster_info(const char *text, int size, int *value, int *cells, bool *first_compose)
+{
+  assert(size > 0);
+  StrCharInfo ci = utf_ptr2StrCharInfo_len(text, size);
+  ClusterInfo cli = utf_ClusterInfo_len(ci, &size);
+  *value = ci.chr.value;
+  *cells = cli.cells;
+  *first_compose = cli.first_compose;
+  return (size_t)(cli.next.ptr - text);
+}
+
+/// Return the display width of a cluster, including ASCII escape widths.
+int ptr2cells(const char *p_in)
+{
+  return utf_ClusterInfo(utf_ptr2StrCharInfo((char *)p_in)).cells;
+}
+
 /// Return the number of display cells character at "*p" occupies.
-/// This doesn't take care of unprintable characters, use ptr2cells() for that.
+///
+/// This considers all ASCII bytes to have width "1". Use ptr2cells()
+/// for 'display' style printing of unprintable ASCII.
 int utf_ptr2cells(const char *p_in)
   FUNC_ATTR_PURE FUNC_ATTR_NONNULL_ALL
 {
   const uint8_t *p = (const uint8_t *)p_in;
-  // Need to convert to a character number.
-  if ((*p) >= 0x80) {
-    int len = utf8len_tab[*p];
-    int32_t c = utf_ptr2CharInfo_impl(p, (uintptr_t)len);
-    // An illegal byte is displayed as <xx>.
-    if (c <= 0) {
-      return 4;
-    }
-    // If the char is ASCII it must be an overlong sequence.
-    if (c < 0x80) {
-      return char2cells(c);
-    }
-    int cells = utf_char2cells(c);
-    if (cells == 1 && p_emoji
-        && prop_is_emojilike(utf8proc_get_property(c))) {
-      int c2 = utf_ptr2char(p_in + len);
-      if (c2 == 0xFE0F) {
-        return 2;  // emoji presentation
-      }
-    }
-    return cells;
+  if (*p < 0x80) {
+    return 1;
   }
-  return 1;
+
+  return ptr2cells(p_in);
 }
 
 /// Convert a UTF-8 byte sequence to a character number.
@@ -587,40 +589,6 @@ ret:
 #undef CHECK
 }
 
-/// Like utf_ptr2cells(), but limit string length to "size".
-/// For an empty string or truncated character returns 1.
-int utf_ptr2cells_len(const char *p, int size)
-  FUNC_ATTR_PURE
-{
-  // Need to convert to a wide character.
-  if (size > 0 && (uint8_t)(*p) >= 0x80) {
-    int len = utf_ptr2len_len(p, size);
-    if (len < utf8len_tab[(uint8_t)(*p)]) {
-      return 1;        // truncated
-    }
-    int c = utf_ptr2char(p);
-    // An illegal byte is displayed as <xx>.
-    if (utf_ptr2len(p) == 1 || c == NUL) {
-      return 4;
-    }
-    // If the char is ASCII it must be an overlong sequence.
-    if (c < 0x80) {
-      return char2cells(c);
-    }
-    int cells = utf_char2cells(c);
-    if (cells == 1 && p_emoji && size > len
-        && prop_is_emojilike(utf8proc_get_property(c))
-        && utf_ptr2len_len(p + len, size - len) == utf8len_tab[(uint8_t)p[len]]) {
-      int c2 = utf_ptr2char(p + len);
-      if (c2 == 0xFE0F) {
-        return 2;  // emoji presentation
-      }
-    }
-    return cells;
-  }
-  return 1;
-}
-
 /// Calculate the number of cells occupied by string `str`.
 ///
 /// @param str The source string, may not be NULL, must be a NUL-terminated
@@ -631,27 +599,35 @@ size_t mb_string2cells(const char *str)
 {
   size_t clen = 0;
 
-  for (const char *p = str; *p != NUL; p += utfc_ptr2len(p)) {
-    clen += (size_t)utf_ptr2cells(p);
+  StrCharInfo ci = utf_ptr2StrCharInfo((char *)str);
+  while (*ci.ptr != NUL) {
+    ClusterInfo cli = utf_ClusterInfo(ci);
+    // TODO(bfredl): moar unification, allowing dy_escape_width should be fine
+    clen += ci.chr.value < 0x80 ? 1 : (size_t)cli.cells;
+    ci = cli.next;
   }
 
   return clen;
 }
 
-/// Get the number of cells occupied by string `str` with maximum length `size`
+/// Get the number of cells occupied by string `str` with length `size`
 ///
 /// @param str The source string, may not be NULL, must be a NUL-terminated
 ///            string.
-/// @param size maximum length of string. It will terminate on earlier NUL.
+/// @param size exact length of string. It will NOT terminate on earlier NUL.
 /// @return The number of cells occupied by string `str`
 size_t mb_string2cells_len(const char *str, size_t size)
   FUNC_ATTR_PURE FUNC_ATTR_NONNULL_ARG(1)
 {
   size_t clen = 0;
 
-  for (const char *p = str; *p != NUL && p < str + size;
-       p += utfc_ptr2len_len(p, (int)size - (int)(p - str))) {
-    clen += (size_t)utf_ptr2cells_len(p, (int)size - (int)(p - str));
+  int len = (int)size;
+
+  StrCharInfo ci = utf_ptr2StrCharInfo_len((char *)str, len);
+  while (len > 0) {
+    ClusterInfo cli = utf_ClusterInfo_len(ci, &len);
+    clen += (size_t)cli.cells;
+    ci = cli.next;
   }
 
   return clen;
@@ -798,15 +774,6 @@ int mb_cptr2char_adv(const char **pp)
   return c;
 }
 
-/// When "c" is the first char of a string, determine if it needs to be prefixed
-/// by a space byte to be drawn correctly, and not merge with the space left of
-/// the string.
-bool utf_iscomposing_first(int c)
-  FUNC_ATTR_PURE
-{
-  return c >= 128 && !utf8proc_grapheme_break(' ', c);
-}
-
 /// Check if the character pointed to by "p2" is a composing character when it
 /// comes after "p1".
 ///
@@ -850,70 +817,6 @@ bool utf_iscomposing(int c1, int c2, GraphemeState *state)
           || arabic_combine(c1, c2));
 }
 
-/// Get the screen char at the beginning of a string
-///
-/// Caller is expected to check for things like unprintable chars etc
-/// If first char in string is a composing char, prepend a space to display it correctly.
-///
-/// If "p" starts with an invalid sequence, zero is returned.
-///
-/// @param[out] firstc (required) The first codepoint of the screen char,
-///                    or the first byte of an invalid sequence
-///
-/// @return the char
-schar_T utfc_ptr2schar(const char *p, int *firstc)
-  FUNC_ATTR_NONNULL_ALL
-{
-  int c = utf_ptr2char(p);
-  *firstc = c;  // NOT optional, you are gonna need it
-  bool first_compose = utf_iscomposing_first(c);
-  size_t maxlen = MAX_SCHAR_SIZE - 1 - first_compose;
-  size_t len = (size_t)utfc_ptr2len_len(p, (int)maxlen);
-
-  if (len == 1 && (uint8_t)(*p) >= 0x80) {
-    return 0;  // invalid sequence
-  }
-
-  return schar_from_buf_first(p, len, first_compose);
-}
-
-/// Get the screen char from a char with a known length
-///
-/// Like utfc_ptr2schar but use no more than p[maxlen].
-schar_T utfc_ptrlen2schar(const char *p, int len, int *firstc)
-  FUNC_ATTR_NONNULL_ALL
-{
-  if ((len == 1 && (uint8_t)(*p) >= 0x80) || len == 0) {
-    // invalid or truncated sequence
-    *firstc = (uint8_t)(*p);
-    return 0;
-  }
-
-  int c = utf_ptr2char(p);
-  *firstc = c;
-  bool first_compose = utf_iscomposing_first(c);
-  int maxlen = MAX_SCHAR_SIZE - 1 - first_compose;
-  if (len > maxlen) {
-    len = utfc_ptr2len_len(p, maxlen);
-  }
-
-  return schar_from_buf_first(p, (size_t)len, first_compose);
-}
-
-/// Caller must ensure there is space for `first_compose`
-static schar_T schar_from_buf_first(const char *buf, size_t len, bool first_compose)
-  FUNC_ATTR_NONNULL_ALL
-{
-  if (first_compose) {
-    char cbuf[MAX_SCHAR_SIZE];
-    cbuf[0] = ' ';
-    memcpy(cbuf + 1, buf, len);
-    return schar_from_buf(cbuf, len + 1);
-  } else {
-    return schar_from_buf(buf, len);
-  }
-}
-
 /// Get the length of a UTF-8 byte sequence representing a single codepoint
 ///
 /// @param[in]  p  UTF-8 string.
@@ -935,7 +838,6 @@ int utf_ptr2len(const char *const p_in)
   }
   return len;
 }
-
 // Return length of UTF-8 character, obtained from the first byte.
 // "b" must be between 0 and 255!
 // Returns 1 for an invalid first byte value.
@@ -1139,6 +1041,15 @@ bool utf_iscomposing_legacy(int c)
 {
   const utf8proc_property_t *prop = utf8proc_get_property(c);
   return prop->category == UTF8PROC_CATEGORY_MN || prop->category == UTF8PROC_CATEGORY_ME;
+}
+
+/// Checks that `c` is alphanumeric per Unicode (letter, mark or number, category L*, M*, N*), in
+/// any script: "é", "あ", "٣". Marks keep a decomposed letter whole ("e" + U+0301).
+bool utf_isalnum(int c)
+  FUNC_ATTR_PURE
+{
+  const utf8proc_property_t *prop = utf8proc_get_property(c);
+  return prop->category >= UTF8PROC_CATEGORY_LU && prop->category <= UTF8PROC_CATEGORY_NO;
 }
 
 #ifdef __SSE2__
@@ -1681,7 +1592,9 @@ ssize_t mb_utf_index_to_bytes(const char *s, size_t len, size_t index, bool use_
       count++;
     }
     if (count >= index) {
-      return (ssize_t)(i + clen);
+      // "clen" can exceed the remaining bytes for an incomplete sequence at the
+      // end of the string, so clamp to "len".
+      return (ssize_t)MIN(i + clen, len);
     }
   }
   return -1;
@@ -1868,31 +1781,77 @@ int utf_head_off(const char *base_in, const char *p_in)
   return 0;
 }
 
-/// Assumes caller already handles ascii. see `utfc_next`
-StrCharInfo utfc_next_impl(StrCharInfo cur)
-  FUNC_ATTR_PURE
+ClusterInfo utf_ClusterInfo_impl(StrCharInfo base, int *max_len)
 {
-  int32_t prev_code = cur.chr.value;
-  uint8_t *next = (uint8_t *)(cur.ptr + cur.chr.len);
+  int cells = basechar_cells_impl(base.chr);
+  int first_compose = utf_iscomposing_first(base.chr.value);
+
+  int32_t prev_code = base.chr.value;
+  uint8_t *next = (uint8_t *)(base.ptr + base.chr.len);
   GraphemeState state = GRAPHEME_STATE_INIT;
-  assert(*next >= 0x80);
+  assert(*next >= 0x80 && *max_len > 0);
+  int cluster_len = base.chr.len;
+
+  bool check_emoji = cells == 1 && p_emoji
+                     && prop_is_emojilike(utf8proc_get_property(base.chr.value));
 
   while (true) {
     uint8_t const next_len = utf8len_tab[*next];
-    int32_t const next_code = utf_ptr2CharInfo_impl(next, (uintptr_t)next_len);
-    if (!utf_iscomposing(prev_code, next_code, &state)) {
-      return (StrCharInfo){
-        .ptr = (char *)next,
-        .chr = (CharInfo){ .value = next_code, .len = (next_code < 0 ? 1 : next_len) },
+    if (next_len > *max_len) {
+      return (ClusterInfo){
+        .next = (StrCharInfo){
+          .ptr = (char *)next,
+          .chr = (CharInfo){ .value = -1, .len = 1 },
+        },
+        .cells = cells,
+        .first_compose = first_compose,
       };
+    }
+
+    int32_t const next_code = utf_ptr2CharInfo_impl(next, (uintptr_t)next_len);
+    if (next_code < 0 || !utf_iscomposing(prev_code, next_code, &state)) {
+      return (ClusterInfo){
+        .next = (StrCharInfo){
+          .ptr = (char *)next,
+          .chr = (CharInfo){ .value = next_code, .len = (next_code < 0 ? 1 : next_len) },
+        },
+        .cells = cells,
+        .first_compose = first_compose,
+      };
+    }
+
+    if (check_emoji) {
+      if (next_code == 0xFE0F) {
+        cells = 2;
+      }
+      check_emoji = false;
+    }
+
+    cluster_len += next_len;
+    if (cells == 1) {
+      /// A SpacingMark does not break the cluster (UAX#29 GB9a) but has positive
+      /// advance width (Unicode core spec D55), so it needs a cell of its own.
+      if (utf8proc_get_property(next_code)->boundclass == UTF8PROC_BOUNDCLASS_SPACINGMARK
+          || (next_code & ~1) == 0xFF9E) {  // halfwidth katakana voiced sound marks
+        // TODO(bfredl): too many places assume ASCII lead byte can never
+        // be promoted to double width. Later on we should allow this
+        if (base.chr.len != 1 && cluster_len < MAX_SCHAR_SIZE - 1 - first_compose) {
+          cells = 2;
+        }
+      }
     }
 
     prev_code = next_code;
     next += next_len;
-    if (EXPECT(*next < 0x80U, true)) {
-      return (StrCharInfo){
-        .ptr = (char *)next,
-        .chr = (CharInfo){ .value = *next, .len = 1 },
+    *max_len -= next_len;
+    if (EXPECT(*max_len == 0 || *next < 0x80U, true)) {
+      return (ClusterInfo){
+        .next = (StrCharInfo){
+          .ptr = (char *)next,
+          .chr = (CharInfo){ .value = *max_len == 0 ? -1 : *next, .len = 1 },
+        },
+        .cells = cells,
+        .first_compose = first_compose,
       };
     }
   }

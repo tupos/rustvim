@@ -109,7 +109,7 @@ local function compute_folds_levels(bufnr, info, srow, erow, callback)
       for _, match, metadata in query:iter_matches(tree:root(), bufnr, math.max(srow - 1, 0), erow) do
         for id, nodes in pairs(match) do
           if query.captures[id] == 'fold' then
-            local range = ts.get_range(nodes[1], bufnr, metadata[id])
+            local range = ts.get_range(assert(nodes[1]), bufnr, metadata[id])
             local start, _, stop, stop_col = Range.unpack4(range)
 
             if #nodes > 1 then
@@ -212,6 +212,7 @@ local group = api.nvim_create_augroup('nvim.treesitter.fold')
 ---@package
 ---@param srow integer
 ---@param erow integer 0-indexed, exclusive
+---@param bufnr integer
 function FoldInfo:foldupdate(bufnr, srow, erow)
   if self.foldupdate_range then
     edit_range(self.foldupdate_range, srow, erow, erow)
@@ -237,6 +238,7 @@ function FoldInfo:foldupdate(bufnr, srow, erow)
 end
 
 ---@package
+---@param bufnr integer
 function FoldInfo:do_foldupdate(bufnr)
   -- InsertLeave is not executed when <C-C> is used for exiting the insert mode, leaving
   -- do_foldupdate untouched. If another execution of foldupdate consumes foldupdate_range, the
@@ -319,6 +321,7 @@ end
 ---@param old_col integer
 ---@param new_row integer
 ---@param new_col integer
+---@param start_col integer
 local function on_bytes(bufnr, start_row, start_col, old_row, old_col, new_row, new_col)
   -- Buffer reload clears `foldinfos[bufnr]`, which may still be nil when callback is invoked.
   local foldinfo = foldinfos[bufnr]
@@ -443,18 +446,24 @@ nvim_on('OptionSet', group, {
     or foldinfos[buf] and { buf }
     or {}
   for _, bufnr in ipairs(bufs) do
-    local foldinfo = FoldInfo.new(bufnr)
-    foldinfos[bufnr] = foldinfo
-    api.nvim_buf_call(bufnr, function()
-      compute_folds_levels(bufnr, foldinfo, nil, nil, function()
-        -- FileType/BufUnload can clear or replace the fold state while this
-        -- async parse is in flight. Ignore callbacks for stale generations.
-        if foldinfos[bufnr] ~= foldinfo then
-          return
-        end
-        foldinfo:foldupdate(bufnr, 0, api.nvim_buf_line_count(bufnr))
+    if not api.nvim_buf_is_loaded(bufnr) then
+      -- A buffer without a parser can be unloaded without BufUnload firing (inside another
+      -- autocmd, or with :noautocmd), which leaves its entry behind.
+      foldinfos[bufnr] = nil
+    else
+      local foldinfo = FoldInfo.new(bufnr)
+      foldinfos[bufnr] = foldinfo
+      api.nvim_buf_call(bufnr, function()
+        compute_folds_levels(bufnr, foldinfo, nil, nil, function()
+          -- FileType/BufUnload can clear or replace the fold state while this
+          -- async parse is in flight. Ignore callbacks for stale generations.
+          if foldinfos[bufnr] ~= foldinfo then
+            return
+          end
+          foldinfo:foldupdate(bufnr, 0, api.nvim_buf_line_count(bufnr))
+        end)
       end)
-    end)
+    end
   end
 end)
 return M

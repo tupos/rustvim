@@ -58,7 +58,7 @@ local function resolve_variable(var, default)
   elseif var == 'TM_FILENAME_BASE' then
     return expand_or_default('%:t:r')
   elseif var == 'TM_DIRECTORY' then
-    return expand_or_default('%:p:h:t')
+    return expand_or_default('%:p:h')
   elseif var == 'TM_FILEPATH' then
     return expand_or_default('%:p')
   end
@@ -108,9 +108,10 @@ end
 --- @param extmark_id integer
 --- @return Range4
 local function get_extmark_range(bufnr, extmark_id)
+  -- Snippet and tabstop marks are created with both end positions.
   local mark = vim.api.nvim_buf_get_extmark_by_id(bufnr, snippet_ns, extmark_id, { details = true })
+  --- @cast mark [integer, integer, { end_row: integer, end_col: integer }]
 
-  --- @diagnostic disable-next-line: undefined-field
   return { mark[1], mark[2], mark[3].end_row, mark[3].end_col }
 end
 
@@ -389,6 +390,7 @@ local function select_tabstop(tabstop)
       ('<Cmd>call cursor(%s,%s)<CR>'):format(range[1] + 1, range[2] + 1),
       'v',
       ('<Cmd>call cursor(%s,%s)<CR>'):format(range[3] + 1, range[4]),
+      vim.o.selection == 'exclusive' and 'l' or '',
       'o<c-g><c-r>_',
     }
     feedkeys(table.concat(keys))
@@ -649,7 +651,7 @@ function M.jump(direction)
 
   -- Find the tabstop with the lowest range.
   local tabstops = M._session.tabstops[dest_index]
-  local dest = tabstops[1]
+  local dest = assert(tabstops[1])
   for _, tabstop in ipairs(tabstops) do
     local dest_range, range = dest:get_range(), tabstop:get_range()
     if (range[1] < dest_range[1]) or (range[1] == dest_range[1] and range[2] < dest_range[2]) then

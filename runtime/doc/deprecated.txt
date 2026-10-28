@@ -4,13 +4,11 @@
                              NVIM REFERENCE MANUAL
 
 
-Nvim                                                             *deprecated*
+==============================================================================
+Deprecated features                                          *deprecated*
 
 The items listed below are deprecated: they will be removed in the future.
 They should not be used in new scripts, and old scripts should be updated.
-
-==============================================================================
-Deprecated features
 
 ------------------------------------------------------------------------------
 DEPRECATED IN 0.13					*deprecated-0.13*
@@ -39,6 +37,11 @@ LUA
 • vim.F.ok_or_nil()
 • vim.F.npcall()			Renamed to |vim.npcall()|
 • vim.F.nil_wrap()			Use |vim.npcall()| instead
+
+TREESITTER
+
+• *vim.treesitter.get_captures_at_pos()* Use |vim.treesitter.get_captures()|
+  with `(buf, { row, col })` instead.
 
 UI
 
@@ -361,6 +364,7 @@ OPTIONS
 			WARNING: Setting this breaks plugins, because "/g"
 			will have the opposite effect. |:s_g|
 • *'highlight'* *'hl'*	Names of builtin |highlight-groups| cannot be changed.
+• *'isprint* *'isp'*	Printability of ASCII or Unicode chars cannot be changed.
 • *'langnoremap'*	Deprecated alias to 'nolangremap'.
 • *'magic'* *'nomagic'*	boolean	(default on) Changes the special characters in
 			search |pattern|s.

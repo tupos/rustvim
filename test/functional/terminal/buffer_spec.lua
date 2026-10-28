@@ -599,7 +599,7 @@ describe(':terminal buffer', function()
       api.nvim_input_mouse('right', 'release', '', 0, 1, 27)
       screen:expect([[
         rows: 6, cols: 25       │rows: 6, cols: 25        |
-        mo{108:use enabled}           │mo^u{108:se enabled}            |
+        mo{108:use enabled}           │mo{108:^use enabled}            |
         {108: }                       │{108: }                        |*3
         [Process suspended]     │[Process suspended]      |
         {5:-- VISUAL --}                                      |
@@ -638,6 +638,23 @@ end)
 
 describe(':terminal buffer', function()
   before_each(clear)
+
+  it('exit emits FileChangedShell #41759', function()
+    local path = t.tmpname()
+    write_file(path, 'foo\n')
+    command('edit ' .. path)
+    command('set noautoread') -- Disable 'autoread' to exercise :checktime specifically.
+    api.nvim_buf_set_lines(0, 0, -1, true, { 'local change' })
+    n.exec('let g:fcs = 0 | autocmd FileChangedShell * let g:fcs = 1')
+    write_file(path, 'external change\n')
+
+    -- Terminal in another tab, so returning to the buffer is not what triggers the check.
+    command('tabnew')
+    fn.jobstart({ testprg('shell-test'), 'EXIT', '0' }, { term = true })
+    retry(nil, 10000, function()
+      eq(1, api.nvim_get_var('fcs'))
+    end)
+  end)
 
   it('can resume suspended PTY process running in fish', function()
     skip(is_os('win'), 'N/A for Windows')
@@ -978,6 +995,20 @@ describe(':terminal buffer', function()
       {5:-- TERMINAL --}                                    |
     ]])
     eq('🏴‍☠️ yarrr', api.nvim_get_current_line())
+  end)
+
+  it('[Process exited] message does not hide last line #42334', function()
+    local screen = Screen.new(50, 7)
+    local chan = api.nvim_open_term(0, {})
+    api.nvim_chan_send(chan, ('meow\r\n'):rep(10) .. 'LAST LINE')
+    fn.chanclose(chan)
+    feed('i')
+    screen:expect([[
+      meow                                              |*4
+      LAST LINE                                         |
+      ^[Terminal closed]                                 |
+      {5:-- TERMINAL --}                                    |
+    ]])
   end)
 
   it('handles split UTF-8 sequences #16245', function()
@@ -1477,6 +1508,15 @@ describe(':terminal buffer', function()
     eq(oldbuf, buffilepost_bufs[1][1])
     matches('^term://', buffilepost_bufs[1][2])
   end)
+
+  it('double width char does not crash 1-wide terminal #41856', function()
+    command('botright vnew')
+    local screen = Screen.new(50, 7)
+    local chan = api.nvim_open_term(0, {})
+    screen:try_resize(25, 7)
+    api.nvim_chan_send(chan, 'キ')
+    assert_alive()
+  end)
 end)
 
 describe('on_lines does not emit out-of-bounds line indexes when', function()
@@ -1605,7 +1645,9 @@ describe('terminal input', function()
       '<BS>',
       '<S-Tab>',
       '<Insert>',
+      '<S-Insert>',
       '<Del>',
+      '<S-Del>',
       '<PageUp>',
       '<PageDown>',
       '<S-Up>',
@@ -1677,6 +1719,7 @@ describe('terminal input', function()
     }
     -- FIXME: The escape sequence to enable kitty keyboard mode doesn't work on Windows
     if not is_os('win') then
+      table.insert(keys, '<S-BS>')
       table.insert(keys, '<C-I>')
       table.insert(keys, '<C-M>')
       table.insert(keys, '<C-[>')

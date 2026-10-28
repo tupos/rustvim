@@ -475,7 +475,8 @@ ArrayOf(DictAs(get_extmark_item)) nvim_buf_get_extmarks(Buffer buf, Integer ns_i
 ///                 hidden because of scrolling with 'nowrap' or 'smoothscroll'. Currently only
 ///                 affects "overlay" virt_text.
 ///               - virt_text_pos: Position of virtual text:
-///                 - "eol": Right after EOL character (default).
+///                 - "eol": One cell after the line text or its displayed 'listchars' EOL character
+///                   (default).
 ///                 - "eol_right_align": Display right-aligned in the window unless the virtual text
 ///                   is longer than the space available. If the virtual text is too long, it is
 ///                   truncated to fit in the window after the EOL character. If the line is
@@ -609,11 +610,12 @@ Integer nvim_buf_set_extmark(Buffer buf, Integer ns_id, Integer line, Integer co
       String conceal_str = opts->conceal.data.string;
       hl.flags |= kSHConceal;
       if (conceal_str.size > 0) {
-        int ch;
-        hl.conceal_char = utfc_ptr2schar(conceal_str.data, &ch);
-        VALIDATE(hl.conceal_char && vim_isprintc(ch), "%s", "conceal char must be printable", {
+        StrCharInfo ci = utf_ptr2StrCharInfo(conceal_str.data);
+        ClusterInfo cli = utf_ClusterInfo(ci);
+        VALIDATE(ci.chr.value >= 0x20 && cli.cells <= 2, "%s", "conceal char must be printable", {
           goto error;
         });
+        hl.conceal_char = schar_from_cluster(ci, cli);
       }
     }
   }

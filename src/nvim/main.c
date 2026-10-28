@@ -73,6 +73,7 @@
 #include "nvim/main.h"
 #include "nvim/mapping.h"
 #include "nvim/mark.h"
+#include "nvim/mcursor.h"
 #include "nvim/memline.h"
 #include "nvim/memory.h"
 #include "nvim/message.h"
@@ -155,6 +156,7 @@ static const char *err_too_many_args = N_("Too many edit arguments");
 static const char *err_extra_cmd =
   N_("Too many \"+command\", \"-c command\" or \"--cmd command\" arguments");
 
+/// Initializes event services for startup and forked unit-test children.
 void event_init(void)
 {
   loop_init(&main_loop, NULL);
@@ -166,7 +168,6 @@ void event_init(void)
   // mspgack-rpc initialization
   channel_init();
   terminal_init();
-  ui_init();
   TIME_MSG("event init");
 }
 
@@ -201,6 +202,7 @@ static void early_init(mparm_T *paramp)
   init_normal_cmds();   // Init the table of Normal mode commands.
   runtime_init();
   highlight_init();
+  mc_init();
 
 #ifdef MSWIN
   OSVERSIONINFO ovi;
@@ -290,6 +292,7 @@ int main(int argc, char **argv)
   }
 
   event_init();
+  ui_init();
 
   early_init(&params);
 
@@ -317,7 +320,11 @@ int main(int argc, char **argv)
   }
 #endif
 
-  if (embedded_mode) {
+  // "--embed --listen …": use stdio as RPC chan only if stdin is a pipe/socket.
+  // Otherwise (tty, /dev/null, EOF) wait for a UI.
+  uv_handle_type stdin_type = uv_guess_handle(STDIN_FILENO);
+  bool stdio_rpc = !params.listen_addr || stdin_type == UV_NAMED_PIPE || stdin_type == UV_TCP;
+  if (embedded_mode && stdio_rpc) {
     const char *err;
     if (!channel_from_stdio(true, CALLBACK_READER_INIT, &err)) {
       abort();
@@ -427,10 +434,13 @@ int main(int argc, char **argv)
   // Set the break level after the terminal is initialized.
   debug_break_level = params.use_debug_break_level;
 
-  // Wait for UIs to set up Nvim or show early messages
-  // and prompts (--cmd, swapfile dialog, …).
+  // Wait for UIs to set up Nvim or show early messages and prompts (--cmd, swapfile dialog, …).
   bool use_remote_ui = (embedded_mode && !headless_mode);
   if (use_remote_ui) {
+    if (!stdio_rpc) {
+      fprintf(stderr, "Nvim server (pid: %" PRId64 ") waiting for UI, listening on: \"%s\"\n",
+              os_get_pid(), get_vim_var_str(VV_SEND_SERVER));
+    }
     TIME_MSG("waiting for UI");
     remote_ui_wait_for_attach();
     TIME_MSG("done waiting for UI");
@@ -470,8 +480,10 @@ int main(int argc, char **argv)
 
   // Reset 'loadplugins' for "-u NONE" before "--cmd" arguments.
   // Allows for setting 'loadplugins' there.
-  // For --clean we still want to load plugins.
-  p_lpl = vimrc_none ? params.clean : p_lpl;
+  // For --clean we still want to load plugins (unless --noplugin was given).
+  if (vimrc_none && !params.clean) {
+    p_lpl = false;
+  }
 
   // Execute --cmd arguments.
   exe_pre_commands(&params);
@@ -728,7 +740,6 @@ void os_exit(int r)
     }
   } else {
     ui_flush();
-    ui_call_stop();
   }
 
   if (!event_teardown() && r == 0) {
@@ -757,6 +768,14 @@ void os_exit(int r)
 #endif
 
   exit(r);
+}
+
+/// Prompts/dialogs should not wait for a key (no chance of meaningful input).
+bool input_unanswerable(void)
+{
+  return v_dying  // Got deadly signal.
+         // Exiting without a UI.
+         || (exiting && !ui_active());
 }
 
 /// Exit properly
@@ -806,7 +825,7 @@ void getout(int exitval)
           bufref_T bufref;
 
           set_bufref(&bufref, buf);
-          apply_autocmds(EVENT_BUFWINLEAVE, buf->b_fname, buf->b_fname, false, buf);
+          apply_autocmds_win(EVENT_BUFWINLEAVE, buf->b_fname, buf->b_fname, false, buf, wp);
           if (bufref_valid(&bufref)) {
             buf_set_changedtick(buf, -1);  // note that we did it already
           }
@@ -869,6 +888,9 @@ void getout(int exitval)
   profile_dump();
 
   if (did_emsg) {
+    if (!headless_mode && input_unanswerable()) {
+      WLOG("Exiting with error: \"%s\"", get_vim_var_str(VV_ERRMSG));
+    }
     // give the user a chance to read the (error) message
     no_wait_return = false;
     // TODO(justinmk): this may call getout(0), clobbering exitval...

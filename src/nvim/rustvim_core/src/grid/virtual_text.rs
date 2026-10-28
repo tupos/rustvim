@@ -147,14 +147,15 @@ impl VirtualTextRenderer<'_> {
                 continue;
             }
 
-            let cluster_len = mbyte::first_cluster_len(text);
-            if cluster_len == 0 || cluster_len > text.len() {
+            let Some(cluster) = mbyte::first_cluster(text) else {
                 return;
-            }
+            };
 
             if self.skip_cells > 0 {
-                let Some(width) = self.input_width(text) else {
-                    return;
+                let width = if cluster.value == i32::from(b'\t') {
+                    self.tab_stops.padding_at(self.virtual_column)
+                } else {
+                    cluster.cells
                 };
                 let skipped = self.skip_cells.min(width);
                 self.skip_cells -= skipped;
@@ -162,7 +163,7 @@ impl VirtualTextRenderer<'_> {
                 if !self.advance_virtual_column(width) {
                     return;
                 }
-                text = &text[cluster_len..];
+                text = &text[cluster.len..];
                 continue;
             }
 
@@ -172,7 +173,8 @@ impl VirtualTextRenderer<'_> {
             } else {
                 0
             };
-            let Some(glyph) = TextGlyph::from_text(text, max_cells, tab_cells, self.glyph_mapping)
+            let Some(glyph) =
+                TextGlyph::from_cluster(text, cluster, max_cells, tab_cells, self.glyph_mapping)
             else {
                 return;
             };
@@ -182,7 +184,7 @@ impl VirtualTextRenderer<'_> {
                 glyph,
                 chunk.highlight.0,
                 self.highlight_mode,
-                text[0] == b' ',
+                glyph.is_invisible(),
                 max_cells,
             ) {
                 return;
@@ -193,17 +195,6 @@ impl VirtualTextRenderer<'_> {
                 return;
             }
             text = &text[bytes_consumed..];
-        }
-    }
-
-    /// Returns the display width of the first input glyph.
-    fn input_width(&self, text: &[u8]) -> Option<usize> {
-        if text[0] == b'\t' {
-            Some(self.tab_stops.padding_at(self.virtual_column))
-        } else {
-            usize::try_from(mbyte::first_char_cells(text))
-                .ok()
-                .filter(|&width| width > 0)
         }
     }
 

@@ -2,8 +2,6 @@
 
 use std::ffi::CStr;
 
-use crate::grid::VimSCharT;
-
 #[link(name = "nvim")]
 #[link(name = "utf8proc")]
 unsafe extern "C" {
@@ -12,9 +10,6 @@ unsafe extern "C" {
 
     #[link_name = "utf_ptr2char"]
     fn utf_ptr2char_ffi(p_in: *const libc::c_char) -> libc::c_int;
-
-    #[link_name = "utf_iscomposing_first"]
-    fn utf_iscomposing_first_ffi(c: libc::c_int) -> bool;
 
     #[link_name = "utf_ptr2len"]
     fn utf_ptr2len_ffi(p_in: *const libc::c_char) -> libc::c_int;
@@ -25,13 +20,14 @@ unsafe extern "C" {
     #[link_name = "mb_string2cells_len"]
     fn mb_string2cells_len_ffi(text: *const libc::c_char, len: libc::size_t) -> libc::size_t;
 
-    pub fn utfc_ptr2len_len(p: *const libc::c_char, size: libc::c_int) -> libc::c_int;
-    pub fn utf_ptr2cells_len(p: *const libc::c_char, size: libc::c_int) -> libc::c_int;
-    pub fn utfc_ptrlen2schar(
-        p: *const libc::c_char,
-        len: libc::c_int,
-        firstc: *mut libc::c_int,
-    ) -> VimSCharT;
+    /// Copies primitive results from the editor's bounded cluster decoder.
+    fn rustvim_cluster_info(
+        text: *const libc::c_char,
+        size: libc::c_int,
+        value: *mut libc::c_int,
+        cells: *mut libc::c_int,
+        first_compose: *mut bool,
+    ) -> usize;
 }
 
 pub fn utf_ptr2cells(p_in: &CStr) -> libc::c_int {
@@ -46,29 +42,46 @@ pub fn utf_ptr2char(p_in: &CStr) -> libc::c_int {
     unsafe { utf_ptr2char_ffi(p_in.as_ptr()) }
 }
 
-/// Returns the first codepoint in a bounded byte slice.
-///
-/// The local trailing NUL gives Neovim's extended UTF-8 decoder enough
-/// readable input for every supported sequence without requiring the source
-/// slice itself to be NUL-terminated.
-pub(crate) fn first_codepoint(text: &[u8]) -> libc::c_int {
-    if text.is_empty() {
-        return 0;
-    }
-
-    const MAX_UTF8_BYTES: usize = 6;
-    let mut terminated = [0; MAX_UTF8_BYTES + 1];
-    let copy_len = text.len().min(MAX_UTF8_BYTES);
-    terminated[..copy_len].copy_from_slice(&text[..copy_len]);
-    let input =
-        CStr::from_bytes_until_nul(&terminated).expect("local UTF-8 input is NUL-terminated");
-    utf_ptr2char(input)
+/// Decoded source metadata shared by grid, column, and virtual-text rendering.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct TextCluster {
+    /// First decoded value; negative identifies a malformed byte.
+    pub(crate) value: i32,
+    /// Source bytes consumed by this complete bounded cluster.
+    pub(crate) len: usize,
+    /// Display cells occupied under the current editor options.
+    pub(crate) cells: usize,
+    /// A leading space is needed to display this cluster independently.
+    pub(crate) first_compose: bool,
 }
 
-/// Returns whether a codepoint needs a leading space in a screen cell.
-pub(crate) fn is_composing_first(codepoint: libc::c_int) -> bool {
-    // SAFETY: The C function is pure and accepts every integer value.
-    unsafe { utf_iscomposing_first_ffi(codepoint) }
+/// Decodes the first cluster, stopping at empty input or a leading NUL.
+pub(crate) fn first_cluster(text: &[u8]) -> Option<TextCluster> {
+    if text.first().is_none_or(|&byte| byte == 0) {
+        return None;
+    }
+    let size = text.len().min(libc::c_int::MAX as usize) as libc::c_int;
+    let mut value = 0;
+    let mut cells = 0;
+    let mut first_compose = false;
+    // SAFETY: The bounded decoder reads only size bytes and writes these local outputs.
+    let len = unsafe {
+        rustvim_cluster_info(
+            text.as_ptr().cast(),
+            size,
+            &mut value,
+            &mut cells,
+            &mut first_compose,
+        )
+    };
+    assert!(len > 0 && len <= size as usize);
+    assert!(cells > 0);
+    Some(TextCluster {
+        value,
+        len,
+        cells: cells as usize,
+        first_compose,
+    })
 }
 
 /// Returns the byte length of the first codepoint using Neovim's UTF-8 rules.
@@ -87,29 +100,6 @@ pub(crate) fn string_cells(text: &[u8]) -> usize {
     // the call. The length-delimited C function does not require a trailing
     // NUL.
     unsafe { mb_string2cells_len_ffi(text.as_ptr().cast::<libc::c_char>(), text.len()) }
-}
-
-/// Returns the byte length of the first base character and its composing
-/// characters using Neovim's multibyte rules.
-pub(crate) fn first_cluster_len(text: &[u8]) -> usize {
-    if text.is_empty() {
-        return 0;
-    }
-    let len = libc::c_int::try_from(text.len()).unwrap_or(libc::c_int::MAX);
-    // SAFETY: `text` is nonempty and valid for reads of `len` bytes. The
-    // length-delimited C function cannot inspect beyond that range.
-    unsafe { utfc_ptr2len_len(text.as_ptr().cast::<libc::c_char>(), len) as usize }
-}
-
-/// Returns the display width of the first character in `text`.
-pub(crate) fn first_char_cells(text: &[u8]) -> libc::c_int {
-    if text.is_empty() {
-        return 0;
-    }
-    let len = libc::c_int::try_from(text.len()).unwrap_or(libc::c_int::MAX);
-    // SAFETY: `text` is nonempty and valid for reads of `len` bytes. The
-    // length-delimited C function cannot inspect beyond that range.
-    unsafe { utf_ptr2cells_len(text.as_ptr().cast::<libc::c_char>(), len) }
 }
 
 /// A codepoint encoded with Neovim's extended UTF-8 representation.
@@ -136,5 +126,52 @@ impl EncodedCodepoint {
     /// Returns only the initialized encoded bytes.
     pub(crate) fn as_bytes(&self) -> &[u8] {
         &self.bytes[..self.len]
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::first_cluster;
+
+    /// A combining mark at the slice boundary must not trigger a lookahead read.
+    #[test]
+    fn bounded_cluster_stops_before_an_inaccessible_page() {
+        // SAFETY: sysconf reads the process's fixed page size.
+        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+        assert!(page_size > 0);
+        let page_size = page_size as usize;
+        // SAFETY: Creates two private pages without referring to existing memory.
+        let mapping = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                page_size * 2,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
+        assert_ne!(mapping, libc::MAP_FAILED);
+        // SAFETY: The second page belongs exclusively to this mapping.
+        let protected =
+            unsafe { libc::mprotect(mapping.add(page_size), page_size, libc::PROT_NONE) };
+        if protected != 0 {
+            // SAFETY: Releases the complete mapping before reporting the failure.
+            unsafe {
+                libc::munmap(mapping, page_size * 2);
+            }
+            panic!("failed to protect the lookahead page");
+        }
+        // SAFETY: These three bytes are writable and end immediately before the protected page.
+        let text =
+            unsafe { std::slice::from_raw_parts_mut(mapping.cast::<u8>().add(page_size - 3), 3) };
+        text.copy_from_slice(b"e\xcc\x81");
+        let cluster = first_cluster(text).unwrap();
+        // SAFETY: The borrowed bytes are no longer used; release both mapped pages.
+        assert_eq!(unsafe { libc::munmap(mapping, page_size * 2) }, 0);
+        assert_eq!(
+            (cluster.value, cluster.len, cluster.cells),
+            (i32::from(b'e'), 3, 1)
+        );
     }
 }

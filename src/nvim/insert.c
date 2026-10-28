@@ -986,13 +986,16 @@ static int insert_handle_key(InsertState *s)
       pum_want.active = false;
     }
 
-    if (curbuf->b_u_synced
-        || (bufref_valid(&save_curbuf)
-            && curbuf == save_curbuf.br_buf
-            && tick != buf_get_changedtick(curbuf))) {
+    const bool changed = bufref_valid(&save_curbuf) && curbuf == save_curbuf.br_buf
+                         && tick != buf_get_changedtick(curbuf);
+    if (curbuf->b_u_synced || changed) {
       // The K_EVENT, K_COMMAND, or K_LUA synced undo or changed this buffer.
       // Save the cursor line before the next typed edit.
       Ins.need_undo = true;
+    }
+    if (changed && !ins_compl_active()) {  // Multicursor: keep the edit as preview text.
+      mc_ins_cascade();
+      mc_ins_cascade_restart();
     }
     break;
   }
@@ -2097,7 +2100,7 @@ void insertchar(int c, int flags, int second_indent)
            && MB_BYTE2LEN(c) == 1
            && i < INPUT_BUFLEN
            && (textwidth == 0
-               || (virtcol += byte2cells((uint8_t)buf[i - 1])) < (colnr_T)textwidth)
+               || (virtcol += ascii2cells((uint8_t)buf[i - 1])) < (colnr_T)textwidth)
            && !(!no_abbr && !vim_iswordc(c) && vim_iswordc((uint8_t)buf[i - 1]))) {
       c = vgetc();
       buf[i++] = (char)c;
@@ -3574,8 +3577,9 @@ static bool ins_bs(int c, int mode, int *inserted_space_p)
           space_sci = sci;
           space_vcol = vcol;
         }
-        vcol += charsize_nowrap(curbuf, sci.ptr, use_ts, vcol, sci.chr.value);
-        sci = utfc_next(sci);
+        ClusterInfo cli = utf_ClusterInfo(sci);
+        vcol += charsize_nowrap(curbuf, sci.ptr, use_ts, vcol, sci.chr.value, cli.cells);
+        sci = cli.next;
         prev_space = cur_space;
       }
 
@@ -3590,12 +3594,14 @@ static bool ins_bs(int c, int mode, int *inserted_space_p)
       // Find the position to stop backspacing.
       // Use charsize_nowrap() so that virtual text and wrapping are ignored.
       while (true) {
-        int size = charsize_nowrap(curbuf, space_sci.ptr, use_ts, space_vcol, space_sci.chr.value);
+        ClusterInfo cli = utf_ClusterInfo(space_sci);
+        int size = charsize_nowrap(curbuf, space_sci.ptr, use_ts, space_vcol, space_sci.chr.value,
+                                   cli.cells);
         if (space_vcol + size > want_vcol) {
           break;
         }
         space_vcol += size;
-        space_sci = utfc_next(space_sci);
+        space_sci = cli.next;
       }
       colnr_T const want_col = (int)(space_sci.ptr - line);
 
@@ -4086,7 +4092,7 @@ static bool ins_tab(void)
     // Use as many TABs as possible.  Beware of 'breakindent', 'showbreak'
     // and 'linebreak' adding extra virtual columns.
     while (ascii_iswhite(*ptr)) {
-      int i = win_charsize(cstype, vcol, tab, tab_v, &csarg).width;
+      int i = win_charsize(cstype, vcol, tab, tab_v, &csarg, 1).width;
       if (vcol + i > want_vcol) {
         break;
       }
@@ -4110,7 +4116,7 @@ static bool ins_tab(void)
       // Skip over the spaces we need.
       cstype = init_charsize_arg(&csarg, curwin, 0, ptr);
       while (vcol < want_vcol && *ptr == ' ') {
-        vcol += win_charsize(cstype, vcol, ptr, ' ', &csarg).width;
+        vcol += win_charsize(cstype, vcol, ptr, ' ', &csarg, 1).width;
         ptr++;
         repl_off++;
       }
@@ -4311,11 +4317,12 @@ int ins_copychar(linenr_T lnum)
   StrCharInfo ci = utf_ptr2StrCharInfo(line);
   int vcol = 0;
   while (vcol < end_vcol && *ci.ptr != NUL) {
-    vcol += win_charsize(cstype, vcol, ci.ptr, ci.chr.value, &csarg).width;
+    ClusterInfo cli = utf_ClusterInfo(ci);
+    vcol += win_charsize(cstype, vcol, ci.ptr, ci.chr.value, &csarg, cli.cells).width;
     if (vcol > end_vcol) {
       break;
     }
-    ci = utfc_next(ci);
+    ci = cli.next;
   }
 
   int c = ci.chr.value < 0 ? (uint8_t)(*ci.ptr) : ci.chr.value;
@@ -4385,14 +4392,14 @@ static char *do_insert_char_pre(int c)
   char buf[MB_MAXBYTES + 1];
   const int save_State = State;
 
-  if (c == Ctrl_RSB) {
+  if (c == Ctrl_RSB  // i_CTRL-] only triggers abbreviations.
+      // Stuffed text was transformed when typed and appended to redobuf (redo_append_lit).
+      // Like abbreviations (vgetorpeek()), don't transform it again.
+      || KeyStuffed
+      || !has_event(EVENT_INSERTCHARPRE)) {
     return NULL;
   }
 
-  // Return quickly when there is nothing to do.
-  if (!has_event(EVENT_INSERTCHARPRE)) {
-    return NULL;
-  }
   size_t buflen = (size_t)utf_char2bytes(c, buf);
   buf[buflen] = NUL;
 

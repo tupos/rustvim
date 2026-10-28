@@ -61,22 +61,28 @@ To disable the built-in directory browser, set this before startup: >lua
     vim.g.loaded_nvim_dir_plugin = 1
 <
 
-GLOBAL MAPPINGS                                                 *dir-mappings*
-
-• - opens the parent directory of the current file or directory.
-• {count}- is like -, but a count of 1 opens the global working directory,
-  and a higher count goes up that many levels.
-
-BUFFER-LOCAL MAPPINGS                                    *dir-buffer-mappings*
+MAPPINGS                                                        *dir-mappings*
 
 • <CR> opens the file or directory under the cursor.
+• a opens the file or directory under the cursor in a vertical split.
+• o opens the file or directory under the cursor in a horizontal split.
 • - opens the parent directory.
+• {count}- is like -, but a count of 1 opens the global working directory,
+  and a higher count goes up that many levels.
 • R reloads the directory listing.
 
-These keys map to <Plug>(nvim-dir-open), <Plug>(nvim-dir-up), and
-<Plug>(nvim-dir-reload); map those to use different keys. Default mappings are
-skipped when the target <Plug> mapping is already mapped. The default global and
-directory-buffer "-" mappings are also skipped when "-" is already mapped.
+a and o are available for local directories and keep focus in the listing.
+'splitright' and 'splitbelow' control where the new window appears.
+
+These keys map to <Plug>(nvim-dir-open), <Plug>(nvim-dir-vsplit),
+<Plug>(nvim-dir-split), <Plug>(nvim-dir-up), and <Plug>(nvim-dir-reload); map those
+to use different keys. Default mappings are skipped when the target <Plug>
+mapping is already mapped. The default "-", "a", and "o" mappings are also
+skipped when their keys are already mapped.
+
+To make "-" open the parent directory from any buffer: >lua
+    vim.keymap.set('n', '-', '<Plug>(nvim-dir-up)')
+<
 
                                                                  *dir-config*
 Directory buffers follow the global 'hidden' option by default. To delete them
@@ -96,7 +102,7 @@ The buffer is writable for the duration, so a handler can sort or filter it
 with ordinary commands, and the cursor is placed afterwards.
 
 Handlers may reorder or remove lines, but each remaining line must still be an
-entry name: |dir-buffer-mappings| resolve the line under the cursor against the
+entry name: |dir-mappings| resolve the line under the cursor against the
 buffer name, so rewriting line text makes <CR> open a nonexistent path.
 
 Sort directories last: >vim
@@ -186,13 +192,7 @@ To enable the legacy "netrw" plugin: >vim
     :packadd netrw
 
 The plugin and its mappings remain loaded (it is a core component used by
-other features such as |zip|). Define replacement keymaps explicitly, for
-example: >lua
-
-    vim.keymap.set('n', '-', function()
-      require('my_browser').open_parent()
-    end)
-<
+other features such as |zip|).
 
 ==============================================================================
 Builtin plugin: difftool                                            *difftool*
@@ -320,7 +320,8 @@ max_line_length                                 *editorconfig.max_line_length*
 root                                                       *editorconfig.root*
     If "true", then stop searching for `.editorconfig` files in parent
     directories. This property must be at the top-level of the `.editorconfig`
-    file (i.e. it must not be within a glob section).
+    file (i.e. it must not be within a glob section). It only controls the
+    search and is excluded from property callbacks and |b:editorconfig|.
 
 spelling_language                             *editorconfig.spelling_language*
     A code of the format ss or ss-TT, where ss is an ISO 639 language code and
@@ -344,30 +345,32 @@ Asks the user to download missing spellfiles. The spellfile is written to
 The plugin can be disabled by setting `g:loaded_spellfile_plugin = 1`.
 
 
-*nvim.spellfile.Opts*
+nvim.spellfile.Config                                  *nvim.spellfile.Config*
     A table with the following fields:
 
     Fields: ~
-      • {confirm}?     (`boolean`, default: `true`) Whether to ask user to
-                       confirm download.
-      • {timeout_ms}?  (`integer`, default: 15000) Number of milliseconds
-                       after which the |vim.net.request()| times out.
-      • {url}?         (`string`) The base URL from where the spellfiles are
-                       downloaded. Uses `g:spellfile_URL` if it's set,
-                       otherwise https://ftp.nluug.nl/pub/vim/runtime/spell.
+      • {confirm}     (`boolean`, default: `true`) Whether to ask user to
+                      confirm download.
+      • {timeout_ms}  (`integer`, default: 15000) Number of milliseconds after
+                      which the |vim.net.request()| times out.
+      • {url}         (`string`) The base URL from where the spellfiles are
+                      downloaded. Uses `g:spellfile_URL` if it's set,
+                      otherwise https://ftp.nluug.nl/pub/vim/runtime/spell.
 
 
 config({opts})                                            *spellfile.config()*
-    Configure spellfile download options. For example: >lua
+    Configure spellfile download options. Omit {opts} to retrieve the current
+    configuration. Otherwise, update only the supplied fields.
+
+    For example: >lua
         require('nvim.spellfile').config({ url = '...' })
 <
 
     Parameters: ~
-      • {opts}  (`nvim.spellfile.Opts?`) When omitted or `nil`, retrieve the
-                current configuration. Otherwise, a configuration table.
+      • {opts}  (`Partial<nvim.spellfile.Config>?`)
 
     Return: ~
-        (`nvim.spellfile.Opts?`) Current config if {opts} is omitted.
+        (`nvim.spellfile.Config?`) Current config if {opts} is omitted.
 
 get({lang})                                                  *spellfile.get()*
     Download spellfiles for language {lang} if available.

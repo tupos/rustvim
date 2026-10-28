@@ -1,6 +1,8 @@
 --- @diagnostic disable: duplicate-doc-alias
 
----@param tbl table<string, string|number>
+---@generic T: string|number
+---@param tbl table<string, T>
+---@return T[]
 local function get_value_set(tbl)
   local value_set = {}
   for _, v in pairs(tbl) do
@@ -99,6 +101,7 @@ local constants = {
 
   -- Completion item tags are extra annotations that tweak the rendering of a
   -- completion item
+  ---@type table<string, lsp.CompletionItemTag>
   CompletionTag = {
     -- Render a completion as obsolete, usually using a strike-out.
     Deprecated = 1,
@@ -145,6 +148,7 @@ local constants = {
   },
 
   -- Extra annotations that tweak the rendering of a symbol.
+  ---@type table<string, lsp.SymbolTag>
   SymbolTag = {
     Deprecated = 1,
   },
@@ -616,6 +620,7 @@ function protocol.make_client_capabilities()
       workspaceFolders = true,
       applyEdit = true,
       workspaceEdit = {
+        documentChanges = true,
         resourceOperations = { 'rename', 'create', 'delete' },
         normalizesLineEndings = true,
         changeAnnotationSupport = { groupsOnLabel = true },

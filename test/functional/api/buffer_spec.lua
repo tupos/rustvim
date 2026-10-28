@@ -868,7 +868,7 @@ describe('api/buf', function()
       eq(3, fn.winnr())
     end)
 
-    it('set_lines on unloaded buffer #8659 #22670', function()
+    it('set_lines on unloaded buffer #8659 #22670 #42443', function()
       local bufnr = api.nvim_get_current_buf()
       lua_or_rpc.nvim_buf_set_lines(bufnr, 0, -1, false, { 'a', 'b', 'c' })
       lua_or_rpc.nvim_buf_set_name(bufnr, 'set_lines')
@@ -882,6 +882,12 @@ describe('api/buf', function()
       lua_or_rpc.nvim_buf_set_lines(new_bufnr, 0, -1, false, {})
       eq({ '' }, lua_or_rpc.nvim_buf_get_lines(new_bufnr, 0, -1, false))
       eq(true, api.nvim_buf_is_loaded(new_bufnr))
+
+      local wiped = fn.bufadd('Xwiped')
+      local au = 'au BufReadCmd <buffer=%d> ++once call nvim_buf_delete(%d, #{force: v:true})'
+      command(au:format(wiped, wiped))
+      eq('Failed to load buffer', pcall_err(lua_or_rpc.nvim_buf_set_lines, wiped, 0, -1, true, {}))
+      eq(false, api.nvim_buf_is_valid(wiped))
     end)
   end)
 
@@ -2617,6 +2623,30 @@ describe('api/buf', function()
       -- Original window is gone: stay in the nvim_buf_call window, but buffer is restored.
       eq(other_win, api.nvim_get_current_win())
       eq(other_buf, api.nvim_win_get_buf(other_win))
+    end)
+
+    it('restores curwin when called by expr eval for a window in non-current tabpage', function()
+      local buf1 = api.nvim_get_current_buf()
+      command('tabnew')
+      local t2win = api.nvim_get_current_win()
+      command('tabprevious')
+      local hidden = api.nvim_create_buf(false, true)
+      -- The expression for `t2win` makes it curwin, while curtab stays the same.
+      eq(
+        { t2win, t2win, t2win },
+        exec_lua(function()
+          local wins = {}
+          _G.test_stl = function()
+            for _, buf in ipairs({ 0, buf1, hidden }) do
+              vim.api.nvim_buf_call(buf, function() end)
+              table.insert(wins, vim.api.nvim_get_current_win())
+            end
+            return ''
+          end
+          vim.api.nvim_eval_statusline('%{v:lua.test_stl()}', { winid = t2win })
+          return wins
+        end)
+      )
     end)
 
     it('preserves visual-mode, unless the callback ended it', function()

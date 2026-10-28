@@ -600,7 +600,15 @@ describe('treesitter parser API', function()
   it('can run async parses with string parsers', function()
     local ret = exec_lua(function()
       local parser = vim.treesitter.get_string_parser('int foo = 42;', 'c')
-      return { parser:parse(nil, function() end)[1]:root():range() }
+      local trees ---@type table<integer, TSTree>?
+      parser:parse(nil, function(_, trees_)
+        trees = trees_
+      end)
+      -- Parse may exceed the 3ms time slice (slow CI), then it finishes in a scheduled callback.
+      vim.wait(1000, function()
+        return trees ~= nil
+      end)
+      return { assert(trees)[1]:root():range() }
     end)
 
     eq({ 0, 0, 0, 13 }, ret)
@@ -1051,6 +1059,43 @@ describe('treesitter parser API', function()
       },
     }
     eq(expected, result)
+  end)
+
+  it('ignores nested injections clipped away by the parent #42477', function()
+    local function get_nested_langs(lua_injections)
+      return exec_lua(function()
+        local parser = vim.treesitter.get_string_parser('`[[` `]]`', 'markdown_inline', {
+          injections = {
+            markdown_inline = [[
+              ((code_span) @injection.content
+                (#offset! @injection.content 0 1 0 -1)
+                (#set! injection.language "lua")
+                (#set! injection.combined))
+            ]],
+            lua = lua_injections,
+          },
+        })
+        parser:parse(true)
+
+        return vim.tbl_keys(parser:children().lua:children())
+      end)
+    end
+
+    eq(
+      {},
+      get_nested_langs([[
+        ((string content: (_) @injection.content)
+          (#set! injection.language "lua"))
+      ]])
+    )
+    eq(
+      {},
+      get_nested_langs([[
+        ((string content: (_) @injection.content)
+          (#set! injection.language "lua")
+          (#set! injection.combined))
+      ]])
+    )
   end)
 
   describe('when getting the language for a range', function()

@@ -52,10 +52,11 @@ function M.get_buf_by_name(name)
 end
 
 --- Edit a file in a specific window
---- @param winnr number
+--- @param winnr integer
 --- @param file string
 --- @return number buffer number of the edited buffer
 M.edit_in = function(winnr, file)
+  --- @param path string?
   local function resolved_path(path)
     if not path or path == '' then
       return ''
@@ -82,11 +83,9 @@ end
 --- @param file string
 --- @param mods string|vim.api.keyset.cmd_mods Modifier string ("vertical") or structured mods table.
 function M.wrapped_edit(file, mods)
-  assert(mods)
   if type(mods) == 'string' then
-    mods = vim.api.nvim_parse_cmd(mods .. ' edit').mods --[[@as vim.api.keyset.cmd_mods]]
+    mods = vim.api.nvim_parse_cmd(mods .. ' edit').mods
   end
-  --- @cast mods vim.api.keyset.cmd_mods
   if (mods.tab or 0) > 0 or (mods.split or '') ~= '' or mods.horizontal or mods.vertical then
     local buf = M.get_buf_by_name(file)
     if buf == nil then
@@ -99,7 +98,7 @@ end
 
 --- Read a chunk of data from a file
 --- @param file string
---- @param size number
+--- @param size integer
 --- @return string? chunk or nil on error
 function M.read_chunk(file, size)
   local fd = io.open(file, 'rb')
@@ -197,9 +196,12 @@ function M.cmd_errmsg(err)
   return (err:gsub('^Lua:%s*', ''))
 end
 
---- Utility function for displaying vim error codes (EXX)
+--- Display a Vim error code (EXX), or raise an error without editor APIs.
 --- @param msg string
 function M.echo_err(msg)
+  if not vim.api then
+    error(msg, 2)
+  end
   vim.api.nvim_echo({ { msg } }, true, { err = true })
 end
 

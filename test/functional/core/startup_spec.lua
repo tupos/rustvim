@@ -45,6 +45,13 @@ describe('startup', function()
 
     clear('--clean')
     ok(not api.nvim_get_option_value('runtimepath', {}):match(vim.pesc(fn.stdpath('config'))))
+    eq(true, api.nvim_get_option_value('loadplugins', {}))
+
+    for _, args in ipairs({ { '--clean', '--noplugin' }, { '--noplugin', '--clean' } }) do
+      clear({ args = args })
+      eq(false, api.nvim_get_option_value('loadplugins', {}))
+      eq(0, eval('get(g:, "loaded_nvim_dir_plugin", 0)'))
+    end
   end)
 
   it('prevents remote UI infinite loop', function()
@@ -160,7 +167,8 @@ describe('startup', function()
           nvim args: 7
           lua args: { "-arg1", "--exitcode", "73", "--arg2",
             [0] = "test/functional/fixtures/startup.lua"
-          }]],
+          }
+          ]],
         {},
         { '-arg1', '--exitcode', '73', '--arg2' }
       )
@@ -257,9 +265,27 @@ describe('startup', function()
       assert_l_out(('k'):rep(1234) .. '\n', nil, nil, '-', "print(('k'):rep(1234))")
     end)
 
-    it('does not add newline when unnecessary', function()
+    it('does add the expected number of newlines', function()
       assert_l_out('', nil, nil, '-', '')
-      assert_l_out('foobar\n', nil, nil, '-', [[print('foobar\n')]])
+
+      assert_l_out('\n', nil, nil, '-', [[print()]])
+      assert_l_out('\n\n', nil, nil, '-', [[print('\n')]])
+
+      assert_l_out('foobar\n', nil, nil, '-', [[print('foobar')]])
+      assert_l_out('foobar\n\n', nil, nil, '-', [[print('foobar\n')]])
+
+      assert_l_out('foo\nbar\n', nil, nil, '-', [[print('foo')print('bar')]])
+      assert_l_out('foo\n\nbar\n', nil, nil, '-', [[print('foo')print()print('bar')]])
+    end)
+
+    it('preserves escape sequences', function()
+      assert_l_out(
+        'this is \027[31mRED FOR AN AMAZING REASON\027[0m\n',
+        nil,
+        nil,
+        '-',
+        [[print('this is \027[31mRED FOR AN AMAZING REASON\027[0m')]]
+      )
     end)
 
     it('sets _G.arg', function()
@@ -376,7 +402,43 @@ describe('startup', function()
       '+q',
     })
 
-    eq(('A'):rep(1234) .. '\n' .. ('B'):rep(1234) .. '\n' .. ('C'):rep(1234), out)
+    eq(('A'):rep(1234) .. '\n' .. ('B'):rep(1234) .. '\n' .. ('C'):rep(1234) .. '\n', out)
+  end)
+
+  it('nvim_exec2 can capture Lua print() message with --headless', function()
+    local out = fn.system({
+      nvim_prog,
+      '-u',
+      'NONE',
+      '-i',
+      'NONE',
+      '--headless',
+      '-c',
+      [[let x = nvim_exec2("lua print 'hello:3'", #{output: v:true})]],
+      '-c',
+      "echomsg 'captured: <'.x.output.'>'",
+      '+q',
+    })
+
+    eq('captured: <hello:3>', out)
+  end)
+
+  it('screenstring() affected by Lua print() message with --headless', function()
+    local out = fn.system({
+      nvim_prog,
+      '-u',
+      'NONE',
+      '-i',
+      'NONE',
+      '--headless',
+      '-c',
+      'lua print "ö"',
+      '-c',
+      "echomsg 'screen at the time: '..screenstring(24,1)",
+      '+q',
+    })
+
+    eq('ö\nscreen at the time: ö', out)
   end)
 
   it('pipe at both ends: has("ttyin")==0 has("ttyout")==0', function()

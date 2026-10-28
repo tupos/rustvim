@@ -1,5 +1,11 @@
 #![allow(dead_code)]
 #![allow(static_mut_refs)]
+
+// Unit tests link libnvim directly and need its logging and OS entry points.
+// Linking rustvim_tracing also includes its rust_os dependency.
+#[cfg(test)]
+extern crate rustvim_tracing as _;
+
 mod context;
 pub mod defines;
 pub mod eval;

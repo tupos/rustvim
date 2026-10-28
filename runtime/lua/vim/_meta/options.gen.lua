@@ -269,6 +269,7 @@ vim.go.bg = vim.go.background
 --- Influences the working of <BS>, <Del>, CTRL-W and CTRL-U in Insert
 --- mode.  This is a list of items, separated by commas.  Each item allows
 --- a way to backspace over something:
+---
 --- value	effect	~
 --- indent	allow backspacing over autoindent
 --- eol	allow backspacing over line breaks (join lines)
@@ -307,11 +308,15 @@ vim.go.bk = vim.go.backup
 --- done.  This is a comma-separated list of words.
 ---
 --- The main values are:
+---
+--- Value	Meaning ~
 --- "yes"	make a copy of the file and overwrite the original one
 --- "no"	rename the file and write a new one
 --- "auto"	one of the previous, what works best
 ---
 --- Extra values that can be combined with the ones above are:
+---
+--- Value		Meaning ~
 --- "breaksymlink"	always break symlinks when writing
 --- "breakhardlink"	always break hardlinks when writing
 ---
@@ -482,31 +487,31 @@ vim.go.bsk = vim.go.backupskip
 --- mode to be silenced.
 --- You can also make it flash by using 'visualbell'.
 ---
---- item	    meaning when present	~
---- all	    All events.
---- backspace   When hitting <BS> or <Del> and deleting results in an
---- 	    error.
---- cursor	    Fail to move around using the cursor keys or
---- 	    <PageUp>/<PageDown> in `Insert-mode`.
---- complete    Error occurred when using `i_CTRL-X_CTRL-K` or
---- 	    `i_CTRL-X_CTRL-T`.
---- copy	    Cannot copy char from insert mode using `i_CTRL-Y` or
---- 	    `i_CTRL-E`.
---- ctrlg	    Unknown Char after <C-G> in Insert mode.
---- error	    Other Error occurred (e.g. try to join last line)
---- 	    (mostly used in `Normal-mode` or `Cmdline-mode`).
---- esc	    hitting <Esc> in `Normal-mode`.
---- hangul	    Ignored.
---- lang	    Calling the beep module for Lua/Mzscheme/TCL.
---- mess	    No output available for `g<`.
---- showmatch   Error occurred for 'showmatch' function.
---- operator    Empty region error `cpo-E`.
---- register    Unknown register after <C-R> in `Insert-mode`.
---- shell	    Bell from shell output `:!`.
---- spell	    Error happened on spell suggest.
---- term	    Bell from `:terminal` output.
---- wildmode    More matches in `cmdline-completion` available
---- 	    (depends on the 'wildmode' setting).
+--- item		meaning when present ~
+--- all		All events.
+--- backspace	When hitting <BS> or <Del> and deleting results in an
+--- 		error.
+--- cursor		Fail to move around using the cursor keys or
+--- 		<PageUp>/<PageDown> in `Insert-mode`.
+--- complete	Error occurred when using `i_CTRL-X_CTRL-K` or
+--- 		`i_CTRL-X_CTRL-T`.
+--- copy		Cannot copy char from insert mode using `i_CTRL-Y` or
+--- 		`i_CTRL-E`.
+--- ctrlg		Unknown Char after <C-G> in Insert mode.
+--- error		Other Error occurred (e.g. try to join last line)
+--- 		(mostly used in `Normal-mode` or `Cmdline-mode`).
+--- esc		hitting <Esc> in `Normal-mode`.
+--- hangul		Ignored.
+--- lang		Calling the beep module for Lua/Mzscheme/TCL.
+--- mess		No output available for `g<`.
+--- showmatch	Error occurred for 'showmatch' function.
+--- operator	Empty region error `cpo-E`.
+--- register	Unknown register after <C-R> in `Insert-mode`.
+--- shell		Bell from shell output `:!`.
+--- spell		Error happened on spell suggest.
+--- term		Bell from `:terminal` output.
+--- wildmode	More matches in `cmdline-completion` available
+--- 		(depends on the 'wildmode' setting).
 ---
 --- This is most useful to fine tune when in Insert mode the bell should
 --- be rung.  For Normal mode and Ex commands, the bell is often rung to
@@ -1201,6 +1206,11 @@ vim.go.cia = vim.go.completeitemalign
 --- 	    scores when "fuzzy" is enabled.  Candidates will appear
 --- 	    in their original order.
 ---
+---    pathopt  Additionally consult the 'path' option during filename
+--- 	    completion.  Depending on the patterns in 'path', setting
+--- 	    this option may result in performance degradation due to
+--- 	    path expansions `i_CTRL-X_CTRL-F`
+---
 ---    popup    Show extra information about the currently selected
 --- 	    completion in a popup window.  Only works in combination
 --- 	    with "menu" or "menuone".  Overrides "preview".
@@ -1358,7 +1368,7 @@ vim.bo.ci = vim.bo.copyindent
 --- To avoid problems with flags that are added in the future, use the
 --- "+=" and "-=" feature of ":set" `add-option-flags`.
 ---
----     contains	behavior	~
+---     contains    behavior        ~
 --- 							*cpo-a*
 --- 	a	When included, a ":read" command with a file name
 --- 		argument will set the alternate file name for the
@@ -1626,6 +1636,7 @@ vim.wo.cuc = vim.wo.cursorcolumn
 
 --- Highlighting used for the line the cursor is on:
 ---
+--- Group			Highlights ~
 --- CursorLine		the text line `hl-CursorLine`
 --- CursorLineFold		the fold column `hl-CursorLineFold`
 --- CursorLineSign		the sign column `hl-CursorLineSign`
@@ -2606,6 +2617,7 @@ vim.bo.ft = vim.bo.filetype
 --- double-width characters are not supported. `E1512`
 ---
 --- The highlighting used for these items:
+---
 ---   item		highlight group ~
 ---   stl		StatusLine		`hl-StatusLine`
 ---   stlnc		StatusLineNC		`hl-StatusLineNC`
@@ -2871,6 +2883,7 @@ vim.wo.fdn = vim.wo.foldnestmax
 --- 			Also for `[s` and `]s`.
 --- 	tag		jumping to a tag: ":ta", CTRL-T, etc.
 --- 	undo		undo or redo: "u" and CTRL-R
+---
 --- When a movement command is used for an operator (e.g., "dl" or "y%")
 --- this option is not used.  This means the operator will include the
 --- whole closed fold.
@@ -2907,6 +2920,14 @@ vim.o.foldtext = "foldtext()"
 vim.o.fdt = vim.o.foldtext
 vim.wo.foldtext = vim.o.foldtext
 vim.wo.fdt = vim.wo.foldtext
+
+--- Enables `multicursor` follow-mode: cursor-relative motions performed
+--- by the primary cursor, cascade to all cursors.  Toggled by `q=`
+--- (buffer-local).
+---
+--- @type boolean
+vim.o.follow = false
+vim.bo.follow = vim.o.follow
 
 --- Expression which is evaluated to format a range of lines for the `gq`
 --- operator or automatic formatting (see 'formatoptions').  When this
@@ -3460,6 +3481,8 @@ vim.bo.ims = vim.bo.imsearch
 --- type.
 ---
 --- Possible values:
+---
+--- 	Value	Meaning ~
 --- 	nosplit	Shows the effects of a command incrementally in the
 --- 		buffer.
 --- 	split	Like "nosplit", but also shows partial off-screen
@@ -3713,14 +3736,11 @@ vim.go.isfname = vim.o.isfname
 vim.go.isf = vim.go.isfname
 
 --- The characters given by this option are included in identifiers.
---- Identifiers are used in recognizing environment variables and after a
---- match of the 'define' option.  It is also used for "\i" in a
---- `pattern`.  See 'isfname' for a description of the format of this
---- option.  For '@' only characters up to 255 are used.
---- Careful: If you change this option, it might break expanding
---- environment variables.  E.g., when '/' is included and Vim tries to
---- expand "$HOME/.local/state/nvim/shada/main.shada".  Maybe you should
---- change 'iskeyword' instead.
+--- Identifiers are used after a match of the 'define' option.  It is also
+--- used for "\i" in a `pattern`.  See 'isfname' for a description of the
+--- format of this option.  For '@' only characters up to 255 are used.
+---
+--- Does not affect environment variable names `expr-env`.
 ---
 --- @type string
 vim.o.isident = "@,48-57,_,192-255"
@@ -3752,39 +3772,6 @@ vim.o.iskeyword = "@,48-57,_,192-255"
 vim.o.isk = vim.o.iskeyword
 vim.bo.iskeyword = vim.o.iskeyword
 vim.bo.isk = vim.bo.iskeyword
-
---- The characters given by this option are displayed directly on the
---- screen.  It is also used for "\p" in a `pattern`.  The characters from
---- space (ASCII 32) to '~' (ASCII 126) are always displayed directly,
---- even when they are not included in 'isprint' or excluded.  See
---- 'isfname' for a description of the format of this option.
----
---- Non-printable characters are displayed with two characters:
---- 	  0 -  31	"^@" - "^_"
---- 	 32 - 126	always single characters
---- 	   127		"^?"
---- 	128 - 159	"~@" - "~_"
---- 	160 - 254	"| " - "|~"
---- 	   255		"~?"
---- Illegal bytes from 128 to 255 (invalid UTF-8) are
---- displayed as <xx>, with the hexadecimal value of the byte.
---- When 'display' contains "uhex" all unprintable characters are
---- displayed as <xx>.
---- The SpecialKey highlighting will be used for unprintable characters.
---- `hl-SpecialKey`
----
---- Multi-byte characters 256 and above are always included, only the
---- characters up to 255 are specified with this option.  When a character
---- is printable but it is not available in the current font, a
---- replacement character will be shown.
---- Unprintable and zero-width Unicode characters are displayed as <xxxx>.
---- There is no option to specify these characters.
----
---- @type string
-vim.o.isprint = "@,161-255"
-vim.o.isp = vim.o.isprint
-vim.go.isprint = vim.o.isprint
-vim.go.isp = vim.go.isprint
 
 --- Insert two spaces after a '.', '?' and '!' with a join command.
 --- Otherwise only one space is inserted.
@@ -4636,6 +4623,8 @@ vim.go.more = vim.o.more
 --- the mouse.
 ---
 --- Mouse support can be enabled for different modes:
+---
+--- 	Flag	Mode ~
 --- 	n	Normal mode
 --- 	v	Visual mode
 --- 	i	Insert mode
@@ -4660,6 +4649,8 @@ vim.go.more = vim.o.more
 --- "* register if possible. See also 'clipboard'.
 ---
 --- Related options:
+---
+--- Option		Description ~
 --- 'mousefocus'	window focus follows mouse pointer
 --- 'mousemodel'	what mouse button does which action
 --- 'mousehide'	hide mouse pointer while typing text
@@ -5026,6 +5017,7 @@ vim.go.pm = vim.go.patchmode
 --- ```vim
 --- 	set path=.,c:/include
 --- ```
+---
 --- Don't forget "." or files won't even be found in the same directory as
 --- the file!
 --- The maximum length is limited.  How much depends on the system, mostly
@@ -5683,10 +5675,12 @@ vim.go.sect = vim.go.sections
 --- This option defines the behavior of the selection.  It is only used
 --- in Visual and Select mode.
 --- Possible values:
----    value	past line     inclusive ~
+---
+---    value		past line	inclusive ~
 ---    old		   no		yes
 ---    inclusive	   yes		yes
 ---    exclusive	   yes		no
+---
 --- "past line" means that the cursor is allowed to be positioned one
 --- character past the line.
 --- "inclusive" means that the last character of the selection is included
@@ -5728,6 +5722,7 @@ vim.go.slm = vim.go.selectmode
 --- Changes the effect of the `:mksession` command.  It is a comma-
 --- separated list of words.  Each word enables saving and restoring
 --- something:
+---
 ---    word		save and restore ~
 ---    blank	empty windows
 ---    buffers	hidden and unloaded buffers, not just those in windows
@@ -5777,6 +5772,7 @@ vim.go.ssop = vim.go.sessionoptions
 --- character is left out, then the default value is used for that
 --- parameter.  The following is a list of the identifying characters and
 --- the effect of their value.
+---
 --- CHAR	VALUE	~
 --- 						*shada-!*
 --- !	When included, save and restore global variables that start
@@ -5937,6 +5933,7 @@ vim.go.sdf = vim.go.shadafile
 ---    'a"b', '"a\b"' is the same as "a\b" again.
 --- 4. Outside of quotes backslash always means itself, it cannot be used
 ---    to escape quote: 'a\"b"' is the same as "a\b".
+---
 --- Note that such processing is done after `:set` did its own round of
 --- unescaping, so to keep yourself sane use `:let-&` like shown above.
 --- 						*shell-powershell*
@@ -6154,44 +6151,45 @@ vim.bo.sw = vim.bo.shiftwidth
 --- messages.
 ---
 --- It is a list of flags:
----  flag	meaning when present	~
----   l	use "999L, 888B" instead of "999 lines, 888 bytes"	*shm-l*
----   m	use "[+]" instead of "[Modified]"			*shm-m*
----   r	use "[RO]" instead of "[readonly]"			*shm-r*
----   w	use "[w]" instead of "written" for file write message	*shm-w*
---- 	and "[a]" instead of "appended" for ':w >> file' command
----   a	all of the above abbreviations				*shm-a*
 ---
----   o	overwrite message for writing a file with subsequent	*shm-o*
+---  flag	meaning when present	~
+---   l	use "999L, 888B" instead of "999 lines, 888 bytes"      *shm-l*
+---   m	use "[+]" instead of "[Modified]"                       *shm-m*
+---   r	use "[RO]" instead of "[readonly]"                      *shm-r*
+---   w	use "[w]" instead of "written" for file write message   *shm-w*
+--- 	and "[a]" instead of "appended" for ':w >> file' command
+---   a	all of the above abbreviations                          *shm-a*
+--- ----------------------------------------------------------------------
+---   o	overwrite message for writing a file with subsequent    *shm-o*
 --- 	message for reading a file (useful for ":wn" or when
 --- 	'autowrite' on)
----   O	message for reading a file overwrites any previous	*shm-O*
+---   O	message for reading a file overwrites any previous      *shm-O*
 --- 	message;  also for quickfix message (e.g., ":cn")
----   s	don't give "search hit BOTTOM, continuing at TOP" or	*shm-s*
+---   s	don't give "search hit BOTTOM, continuing at TOP" or    *shm-s*
 --- 	"search hit TOP, continuing at BOTTOM" messages; when using
 --- 	the search count do not show "W" before the count message
 --- 	(see `shm-S` below)
----   t	truncate file message at the start if it is too long	*shm-t*
+---   t	truncate file message at the start if it is too long    *shm-t*
 --- 	to fit on the command-line, "<" will appear in the left most
 --- 	column; ignored in Ex mode
----   T	truncate other messages in the middle if they are too	*shm-T*
+---   T	truncate other messages in the middle if they are too   *shm-T*
 --- 	long to fit on the command line; "..." will appear in the
 --- 	middle; ignored in Ex mode
----   W	don't give "written" or "[w]" when writing a file	*shm-W*
----   A	don't give the "ATTENTION" message when an existing	*shm-A*
+---   W	don't give "written" or "[w]" when writing a file       *shm-W*
+---   A	don't give the "ATTENTION" message when an existing     *shm-A*
 --- 	swap file is found
----   I	don't give the intro message when starting Vim,		*shm-I*
+---   I	don't give the intro message when starting Vim,         *shm-I*
 --- 	see `:intro`
----   c	don't give `ins-completion-menu` messages; for		*shm-c*
+---   c	don't give `ins-completion-menu` messages; for          *shm-c*
 --- 	example, "-- XXX completion (YYY)", "match 1 of 2", "The only
 --- 	match", "Pattern not found", "Back at original", etc.
----   C	don't give messages while scanning for ins-completion	*shm-C*
+---   C	don't give messages while scanning for ins-completion   *shm-C*
 --- 	items, for instance "scanning tags"
----   q	do not show "recording @a" when recording a macro	*shm-q*
----   F	don't give the file info when editing a file, like	*shm-F*
+---   q	do not show "recording @a" when recording a macro       *shm-q*
+---   F	don't give the file info when editing a file, like      *shm-F*
 --- 	`:silent` was used for the command; note that this also
 --- 	affects messages from 'autoread' reloading
----   S	do not show search count message when searching, e.g.	*shm-S*
+---   S	do not show search count message when searching, e.g.   *shm-S*
 --- 	"[1/5]".  When the "S" flag is not present (e.g. search count
 --- 	is shown), the "search hit BOTTOM, continuing at TOP" and
 --- 	"search hit TOP, continuing at BOTTOM" messages are only
@@ -6199,7 +6197,7 @@ vim.bo.sw = vim.bo.shiftwidth
 --- 	search count statistics.  The maximum limit can be set with
 --- 	the 'maxsearchcount' option, see also `searchcount()`
 --- 	function.
----   u	don't give undo and redo messages like			*shm-u*
+---   u	don't give undo and redo messages like                  *shm-u*
 --- 	"1 line less; before #1  1 second ago", "Already at oldest
 --- 	change" or "Already at newest change"
 ---
@@ -6650,8 +6648,10 @@ vim.bo.spo = vim.bo.spelloptions
 --- 		separated by a slash.  The first column contains the
 --- 		bad word, the second column the suggested good word.
 --- 		Example:
---- 			theribal/terrible ~
---- 		Use this for common mistakes that do not appear at the
+--- ```
+--- 			theribal/terrible
+--- ```
+--- Use this for common mistakes that do not appear at the
 --- 		top of the suggestion list with the internal methods.
 --- 		Lines without a slash are ignored, use this for
 --- 		comments.
@@ -6668,8 +6668,10 @@ vim.bo.spo = vim.bo.spelloptions
 --- 		must evaluate to a List of Lists, each with a
 --- 		suggestion and a score.
 --- 		Example:
---- 			[['the', 33], ['that', 44]] ~
---- 		Set 'verbose' and use `z=` to see the scores that the
+--- ```
+--- 			[['the', 33], ['that', 44]]
+--- ```
+--- Set 'verbose' and use `z=` to see the scores that the
 --- 		internal methods use.  A lower score is better.
 --- 		This may invoke `spellsuggest()` if you temporarily
 --- 		set 'spellsuggest' to exclude the "expr:" part.
@@ -6703,6 +6705,8 @@ vim.go.sb = vim.go.splitbelow
 --- closing or resizing horizontal splits.
 ---
 --- Possible values are:
+---
+---   Value		Meaning ~
 ---   cursor	Keep the same relative cursor position.
 ---   screen	Keep the text on the same screen line.
 ---   topline	Keep the topline the same.
@@ -6752,6 +6756,7 @@ vim.go.sol = vim.go.startofline
 --- Some of the items from the 'statusline' format are different for
 --- 'statuscolumn':
 ---
+--- Item	Meaning ~
 --- %l	line number column for currently drawn line
 --- %s	sign column for currently drawn line
 --- %C	fold column for currently drawn line
@@ -6839,7 +6844,7 @@ vim.wo.stc = vim.wo.statuscolumn
 --- is 2 or 3) is controlling the output of `CTRL-G`.
 ---
 --- field	    meaning ~
---- -	    Left justify the item.  The default is right justified
+--- `-`	    Left justify the item.  The default is right justified
 --- 	    when minwid is larger than the length of the item.
 --- 0	    Leading zeroes in numeric items.  Overridden by "-".
 --- minwid	    Minimum width of the item, padding as set by "-" & "0".
@@ -6978,6 +6983,9 @@ vim.wo.stc = vim.wo.statuscolumn
 ---       applied to StatusLineNC for the statusline of non-current
 ---       windows.
 ---       The number N must be between 1 and 9.  See `hl-User1..9`
+--- #( -  Start of a highlight scope.  The exact highlighting before the
+---       scope is reset at the end.  No width fields allowed.
+--- #) -  End of highlight scope.  No width fields allowed.
 ---
 --- When displaying a flag, Vim removes the leading comma, if any, when
 --- that flag comes right after plaintext.  This will make a nice display
@@ -7229,6 +7237,8 @@ vim.bo.syn = vim.bo.syntax
 --- `:tabclose`).  When empty Vim goes to the next (right) tabpage.
 ---
 --- Possible values (comma-separated list):
+---
+---    Value	Meaning ~
 ---    left		If included, go to the previous tabpage instead of
 --- 		the next one.
 ---    uselast	If included, go to the previously used tabpage if
@@ -7483,7 +7493,7 @@ vim.go.tgc = vim.go.termguicolors
 ---    C1	    Control characters 0x80...0x9F
 ---
 --- @type string
-vim.o.termpastefilter = "BS,HT,ESC,DEL"
+vim.o.termpastefilter = "BS,ESC,DEL"
 vim.o.tpf = vim.o.termpastefilter
 vim.go.termpastefilter = vim.o.termpastefilter
 vim.go.tpf = vim.go.termpastefilter
@@ -7876,8 +7886,7 @@ vim.bo.vts = vim.bo.vartabstop
 --- If greater than or equal to a given level, Nvim produces the following
 --- messages:
 ---
---- Level   Messages ~
---- ----------------------------------------------------------------------
+--- Level	Messages ~
 --- 1	Enables Lua tracing (see above). Does not produce messages.
 --- 2	When a file is ":source"'ed, or `shada` file is read or written.
 --- 3	UI info, terminal capabilities.
@@ -7926,6 +7935,7 @@ vim.go.vdir = vim.go.viewdir
 
 --- Changes the effect of the `:mkview` command.  It is a comma-separated
 --- list of words.  Each word enables saving and restoring something:
+---
 ---    word		save and restore ~
 ---    cursor	cursor position in file and in window
 ---    curdir	local current directory, if set with `:lcd`
@@ -7934,7 +7944,7 @@ vim.go.vdir = vim.go.viewdir
 ---    options	options and mappings local to a window or buffer (not
 ---                 global values for local options), except Lua functions
 --- 		`option-value-function`.
----    localoptions same as "options"
+---    localoptions	same as "options"
 ---    slash	`deprecated` Always enabled. Uses "/" in filenames.
 ---    unix		`deprecated` Always enabled. Uses "\n" line endings.
 ---
@@ -7997,6 +8007,7 @@ vim.go.warn = vim.o.warn
 --- Allow specified keys that move the cursor left/right to move to the
 --- previous/next line when the cursor is on the first/last character in
 --- the line.  Concatenate characters to allow this for these keys:
+---
 --- 	char   key	  mode	~
 --- 	 b    <BS>	 Normal and Visual
 --- 	 s    <Space>	 Normal and Visual
@@ -8007,6 +8018,7 @@ vim.go.warn = vim.o.warn
 --- 	 ~    "~"	 Normal
 --- 	 [    <Left>	 Insert and Replace
 --- 	 ]    <Right>	 Insert and Replace
+---
 --- For example:
 ---
 --- ```vim
@@ -8187,6 +8199,8 @@ vim.go.wmnu = vim.go.wildmenu
 --- "noinsert" is specified.
 ---
 --- Some useful combinations of colon-separated values:
+---
+--- Value			Meaning ~
 --- "longest:full"		Start with the longest common string and show
 --- 			'wildmenu' (if enabled).  Does not cycle
 --- 			through full matches.

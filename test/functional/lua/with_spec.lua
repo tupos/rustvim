@@ -442,14 +442,16 @@ describe('vim._with', function()
     it('discards ":bcd"/":lcd" that a `buf`/`win` context would keep', function()
       local out = exec_lua [[
         local other_buf, _ = setup_buffers()
-        local other_win, _ = setup_windows()
+        vim.cmd.tabnew() -- `win` in another tabpage.
+        local other_win = api.nvim_get_current_win()
+        vim.cmd.tabprevious()
         local cwd = fn.getcwd()
         local dir = vim.fs.joinpath(cwd, 'test')
         vim._with({ buf = other_buf, keepcwd = true }, function() vim.cmd.bcd(dir) end)
         vim._with({ win = other_win, keepcwd = true }, function() vim.cmd.lcd(dir) end)
         return {
           fn.haslocaldir(-1, -1, other_buf),
-          fn.haslocaldir(fn.win_id2win(other_win)),
+          fn.haslocaldir(1, 2),
           fn.getcwd() == cwd,
         }
       ]]
@@ -1590,15 +1592,20 @@ describe('vim._with', function()
     eq({ 7, 10 }, out)
   end)
 
-  it('can not work with conflicting `buf` and `win`', function()
+  it('`buf` and `win`: error if conflicting, else switches to `win` #42239', function()
     local out = exec_lua [[
       local other_buf, cur_buf = setup_buffers()
       local other_win, cur_win = setup_windows()
       assert(api.nvim_win_get_buf(other_win) ~= other_buf)
       local _, err = pcall(vim._with, { buf = other_buf, win = other_win }, function() end)
-      return err
+      local buf = api.nvim_win_get_buf(other_win)
+      local got = vim._with({ buf = buf, win = other_win }, function()
+        return { api.nvim_get_current_win() == other_win, api.nvim_get_current_buf() == buf }
+      end)
+      return { err, got }
     ]]
-    matches('Can not set both `buf` and `win`', out)
+    matches('Can not set both `buf` and `win`', out[1])
+    eq({ true, true }, out[2])
   end)
 
   it('works with several contexts at once', function()

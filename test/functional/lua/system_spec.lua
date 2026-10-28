@@ -14,6 +14,9 @@ describe('vim.system', function()
   for name, system in pairs { sync = n.system_sync, async = n.system_async } do
     describe('(' .. name .. ')', function()
       it('failure modes', function()
+        t.matches('cmd: expected non%-empty list of strings', t.pcall_err(system, {}))
+        t.matches('cmd: expected non%-empty list of strings', t.pcall_err(system, { 42 }))
+
         t.matches(
           "ENOENT%: no such file .* %(cmd%): 'non%-existent%-cmd'",
           t.pcall_err(system, { 'non-existent-cmd', 'arg1', 'arg2' }, { text = true })
@@ -75,6 +78,20 @@ describe('vim.system', function()
       end)
 
       it('supports timeout', function()
+        if name == 'sync' and not t.is_os('win') then
+          eq(
+            { code = 0, signal = 0, stdout = 'late', stderr = '' },
+            exec_lua(function()
+              -- The shell exits before its child closes the inherited output pipes.
+              local obj = vim.system({ 'sh', '-c', '(sleep 0.3; printf late) & exit 0' })
+              assert(vim.wait(1000, function()
+                return obj:is_closing()
+              end, nil, true))
+              return obj:wait(100) or obj:wait()
+            end)
+          )
+        end
+
         eq({
           code = 124,
           signal = 15,

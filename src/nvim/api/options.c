@@ -304,21 +304,106 @@ Object nvim_get_option_value(String name, Dict(option) *opts, Error *err)
   return value;
 }
 
+// Convert an already validated option value without reading or changing the option.
+// The returned Object is allocated in arena (scalar values are returned unchanged).
+/// @nodoc
+Object nvim__option_to_object(String name, Object value, Arena *arena, Error *err)
+  FUNC_API_LUA_ONLY
+{
+  OptIndex opt_idx = find_option(name.data);
+  if (opt_idx == kOptInvalid) {
+    api_set_error(err, kErrorTypeValidation, "Unknown option '%s'", name.data);
+    return NIL;
+  }
+
+  if (value.type != kObjectTypeString) {
+    return copy_object(value, arena);
+  }
+
+  vimoption_T *option = get_option(opt_idx);
+  const uint32_t flags = option->flags;
+  const OptSchemaItem *schema = option->schema;
+
+  // A dict option (`schema != NULL`) parses here like any comma "key:value" map: its stored value
+  // is already the canonical ":set" string.
+  char *str = value.data.string.data != NULL ? value.data.string.data : "";
+
+  Object rv;
+  // Plain string option: no list/map structure.
+  if (!(flags & (kOptFlagComma | kOptFlagFlagList))) {
+    rv = STRING_OBJ(CSTR_TO_ARENA_STR(arena, str));
+  } else if ((flags & kOptFlagFlagList) && !(flags & kOptFlagComma)) {
+    // Single-char flag list, e.g. 'shortmess': each character is a flag.
+    size_t n = strlen(str);
+    Dict d = arena_dict(arena, n);
+    for (size_t i = 0; i < n; i++) {
+      PUT_C(d, arena_memdupz(arena, &str[i], 1), BOOLEAN_OBJ(true));
+    }
+    rv = DICT_OBJ(d);
+  } else {
+    // Comma-separated list/map/set. Upper-bound the item count for arena sizing.
+    size_t nparts = 1;
+    for (char *p = str; *p != NUL; p++) {
+      nparts += (*p == ',');
+    }
+    const bool as_map = (flags & kOptFlagColon) || (flags & kOptFlagFlagList) || schema != NULL;
+    Dict d = as_map ? arena_dict(arena, nparts) : (Dict)ARRAY_DICT_INIT;
+    Array a = as_map ? (Array)ARRAY_DICT_INIT : arena_array(arena, nparts);
+    char *item = xmalloc(strlen(str) + 1);
+    for (char *p = str; *p != NUL;) {
+      copy_option_part(&p, item, strlen(str) + 1, ",");
+      if (*item == NUL) {
+        continue;  // skip empty parts, e.g. "a,,b"
+      }
+      if (!as_map) {
+        // Note: the raw string preserves the ",," literal-comma convention (e.g. 'isfname'); the
+        // structured view splits on every comma and does not reconstruct literal commas.
+        ADD_C(a, STRING_OBJ(CSTR_TO_ARENA_STR(arena, item)));
+        continue;
+      }
+      char *colon = strchr(item, ':');
+      char *val = NULL;
+      if (colon != NULL) {
+        *colon = NUL;
+        val = colon + 1;
+      }
+      String key = CSTR_TO_ARENA_STR(arena, item);
+      Object v;
+      if (flags & kOptFlagFlagList) {
+        v = BOOLEAN_OBJ(true);  // comma flag list ('whichwrap'): each item is a flag
+      } else if (val == NULL) {
+        v = BOOLEAN_OBJ(true);  // bare flag in a typed/colon map
+      } else {
+        // A key's value stays a string, even for a num/enum key: option sub-value types are not a
+        // stable contract (Vim options are "stringly typed"), so we expose structure, not types.
+        v = STRING_OBJ(CSTR_TO_ARENA_STR(arena, val));
+      }
+      PUT_C(d, key.data, v);
+    }
+    xfree(item);
+    rv = as_map ? DICT_OBJ(d) : ARRAY_OBJ(a);
+  }
+
+  return rv;
+}
+
 /// Sets the value of an option. The behavior of this function matches that of
 /// |:set|: for global-local options, both the global and local value are set
 /// unless otherwise specified with {scope}.
 ///
-/// Note the options {win} and {buf} cannot be used together.
+/// Note that `win` and `buf` cannot be used together.
 ///
 /// @param name      Option name
-/// @param value     New option value
+/// @param value     New option value. May be structured for dict/list options, e.g. 'formatoptions'
+///                  accepts `{ 'c', 'r' }`, 'listchars' accepts `{ eol = '~' }`.
 /// @param opts      Optional parameters
 ///                  - buf: Buffer number. Used for setting buffer local option.
-///                  - dry_run: (`boolean?`, default: false) If true, then the
-///                    option value won't be set.
-///                  - operation: One of "set", "append", "prepend", or "remove".
-///                    Corresponds to |:set=|, |:set+=|, |:set^=|, and |:set-=|.
-///                    Default is "set".
+///                  - dry_run: (`boolean?`, default: false) If true, validates the
+///                    option value without setting it.
+///                  - operation: (`string?`, default: "set") One of "set", "append", "prepend", or
+///                    "remove". Corresponds to |:set=|, |:set+=|, |:set^=|, and |:set-=|.
+///                    With "remove", each item in a structured `value` is removed regardless of
+///                    order/adjacency.
 ///                  - scope: One of "global" or "local". Analogous to
 ///                  |:setglobal| and |:setlocal|, respectively.
 ///                  - tab: |tab-ID| for tab-local options (currently only 'cmdheight'). Tabpage 0
@@ -354,71 +439,109 @@ Object nvim_set_option_value(uint64_t channel_id, String name, Object value, Dic
     }
   }
 
-  // Convert the incoming value into an Object.
-  bool error = false;
-  Object optval_right = optval_from_obj(opt_idx, value, operation, &error);
-
-  VALIDATE_EXP(!error, name.data, "a valid type", api_typename(value.type), {
-    return NIL;
-  });
-
   Object merged_val = NIL;
   const char *errmsg = NULL;
   vimoption_T *option = get_option(opt_idx);
+  const bool is_array = value.type == kObjectTypeArray;
+  const bool is_dict = value.type == kObjectTypeDict;
 
   // Need to use varp specific to buf/win to ensure that merges are handled
   // correctly when the supplied buf/win are different than curbuf/curwin.
   buf_T *buf = scope == kOptScopeBuf ? to : curbuf;
   win_T *win = scope == kOptScopeWin ? to : curwin;
   void *varp = get_varp_from(option, buf, win);
-  char *argp = NULL;
 
-  switch (optval_right.type) {
-  case kObjectTypeUnset:
-  case kObjectTypeNil:
-    break;
-  case kObjectTypeString: {
-    char *optval_escaped = escape_option_str_cmdline(optval_right.data.string.data);
-    // We need a leading equal sign because get_option_newval is used for
-    // cmdline stuff and expects an =
-    argp = arena_printf(arena, "=%s", optval_escaped).data;
-    XFREE_CLEAR(optval_escaped);
-    break;
-  }
-  case kObjectTypeInteger:
-    argp = arena_printf(arena, "=%" PRId64, optval_right.data.integer).data;
-    break;
-  case kObjectTypeBoolean:
-    merged_val = optval_right;
-    break;
-  case kObjectTypeLuaRef:
-    // Callback option: no ":set"-style merge; take an independent ref for the set below.
-    merged_val = copy_object(optval_right, NULL);
-    break;
-  default:
-    abort();
-  }
+  // |:set-=| matches a contiguous substring, so can't remove non-contiguous items.
+  // Instead, remove one item at a time instead, merging each onto the previous result.
+  const size_t nitems = is_array ? value.data.array.size : (is_dict ? value.data.dict.size : 0);
+  const bool per_item = operation == OP_REMOVING && nitems > 0;
 
-  optval_free(optval_right);
+  for (size_t i = 0; i < (per_item ? nitems : 1); i++) {
+    Object item = value;
+    if (per_item && is_array) {
+      item = ARRAY_OBJ(((Array){ .items = &value.data.array.items[i], .size = 1 }));
+    } else if (per_item) {
+      item = DICT_OBJ(((Dict){ .items = &value.data.dict.items[i], .size = 1 }));
+    }
 
-  if (optval_right.type == kObjectTypeInteger || optval_right.type == kObjectTypeString) {
-    Object oldval = optval_own(opt_idx, opt_from_varp(opt_idx, varp));
-    merged_val = get_option_newval(opt_idx, opt_flags, PREFIX_NONE, &argp, 0, operation,
-                                   option->flags, varp, &oldval, NULL, 0, &errmsg);
-    optval_free(oldval);
-    VALIDATE(errmsg == NULL, "%s", errmsg, {
+    // Convert the incoming value to Object.
+    bool error = false;
+    Object optval_right = optval_from_obj(opt_idx, item, operation, &error);
+
+    VALIDATE_EXP(!error, name.data, "a valid type", api_typename(value.type), {
+      optval_free(merged_val);
       return NIL;
     });
+
+    char *argp = NULL;
+
+    switch (optval_right.type) {
+    case kObjectTypeUnset:
+    case kObjectTypeNil:
+      break;
+    case kObjectTypeString: {
+      char *optval_escaped = escape_option_str_cmdline(optval_right.data.string.data);
+      // We need a leading equal sign because get_option_newval is used for
+      // cmdline stuff and expects an =
+      argp = arena_printf(arena, "=%s", optval_escaped).data;
+      XFREE_CLEAR(optval_escaped);
+      break;
+    }
+    case kObjectTypeInteger:
+      argp = arena_printf(arena, "=%" PRId64, optval_right.data.integer).data;
+      break;
+    case kObjectTypeBoolean:
+      merged_val = optval_right;
+      break;
+    case kObjectTypeLuaRef:
+      // Callback option: no ":set"-style merge; take an independent ref for the set below.
+      merged_val = copy_object(optval_right, NULL);
+      break;
+    default:
+      abort();
+    }
+
+    optval_free(optval_right);
+
+    if (optval_right.type == kObjectTypeInteger || optval_right.type == kObjectTypeString) {
+      // The first item merges onto the option's value, each later one onto the running result.
+      Object oldval = i == 0 ? optval_own(opt_idx, opt_from_varp(opt_idx, varp)) : merged_val;
+      merged_val = get_option_newval(opt_idx, opt_flags, PREFIX_NONE, &argp, 0, operation, varp,
+                                     &oldval, &errmsg);
+      optval_free(oldval);
+      VALIDATE(errmsg == NULL, "%s", errmsg, {
+        optval_free(merged_val);
+        return NIL;
+      });
+    }
   }
 
-  if (!dry_run) {
+  if (dry_run) {
+    const CharBuf errbuf = { (char[IOSIZE]){ 0 }, IOSIZE };
+    optset_T args = {
+      .os_idx = opt_idx,
+      .os_flags = opt_flags,
+      .os_newval = merged_val,
+      .os_errbuf = &errbuf,
+      .os_buf = buf,
+      .os_win = win,
+    };
+    errmsg = validate_and_prepare_option_value(&args);
+    merged_val = args.os_newval;
+    free_option_prepared(&args);
+    if (errmsg != NULL) {
+      api_set_error(err, kErrorTypeException, "%s", errmsg);
+      optval_free(merged_val);
+      return NIL;
+    }
+  } else {
     WITH_SCRIPT_CONTEXT(channel_id, {
-      set_option_value_for(name.data, opt_idx, merged_val, opt_flags, scope, to, err);
+      set_option_value_for(opt_idx, merged_val, opt_flags, scope, to, operation == OP_NONE, err);
     });
   }
 
   // Return the value in its structured (list/map/set) form.
-  Object rv = optval_to_obj(opt_idx, merged_val, arena);
+  Object rv = nvim__option_to_object(name, merged_val, arena, err);
   optval_free(merged_val);
   return rv;
 }

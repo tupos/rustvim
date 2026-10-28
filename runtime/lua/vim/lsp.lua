@@ -7,7 +7,6 @@ local lsp = vim._defer_require('vim.lsp', {
   _changetracking = ..., --- @module 'vim.lsp._changetracking'
   _folding_range = ..., --- @module 'vim.lsp._folding_range'
   _snippet_grammar = ..., --- @module 'vim.lsp._snippet_grammar'
-  _tagfunc = ..., --- @module 'vim.lsp._tagfunc'
   _watchfiles = ..., --- @module 'vim.lsp._watchfiles'
   buf = ..., --- @module 'vim.lsp.buf'
   client = ..., --- @module 'vim.lsp.client'
@@ -24,6 +23,9 @@ local lsp = vim._defer_require('vim.lsp', {
   protocol = ..., --- @module 'vim.lsp.protocol'
   rpc = ..., --- @module 'vim.lsp.rpc'
   semantic_tokens = ..., --- @module 'vim.lsp.semantic_tokens'
+  -- Work around EmmyLuaLs/emmylua-analyzer-rust#1238 for function exports.
+  --- @type fun(pattern: string, flags: string): table[]|vim.NIL
+  tagfunc = ..., --- @module 'vim.lsp.tagfunc'
   util = ..., --- @module 'vim.lsp.util'
 })
 
@@ -82,6 +84,7 @@ end
 local client_errors_base = table.maxn(lsp.rpc.client_errors)
 local client_errors_offset = 0
 
+---@param name string
 local function client_error(name)
   client_errors_offset = client_errors_offset + 1
   local index = client_errors_base + client_errors_offset
@@ -342,7 +345,8 @@ lsp.config = setmetatable({ _configs = {} }, {
       -- Calls to vim.lsp.config in lsp/* have a lower precedence than calls from other sites.
       local rtp_config --- @type vim.lsp.Config?
       for _, v in ipairs(api.nvim_get_runtime_file(('lsp/%s.lua'):format(name), true)) do
-        local config = assert(loadfile(v))() ---@type any?
+        local chunk, err = loadfile(v)
+        local config = assert(chunk, err)() ---@type any?
         if type(config) == 'table' then
           --- @type vim.lsp.Config?
           rtp_config = vim.tbl_deep_extend('force', rtp_config or {}, config)
@@ -394,19 +398,17 @@ lsp.config = setmetatable({ _configs = {} }, {
 local function get_config_names()
   local config_names = vim
     .iter(api.nvim_get_runtime_file('lsp/*.lua', true))
-    --- @param path string
     :map(function(path)
-      local file_name = path:match('[^/]*.lua$')
+      local file_name = assert(path:match('[^/]*.lua$'))
       return file_name:sub(0, #file_name - 4)
     end)
-    :totable()
+    :totable() --[[@as string[] ]]
 
   vim.list_extend(config_names, vim.tbl_keys(lsp.config._configs))
 
   return vim
     .iter(config_names)
     :unique()
-    --- @param name string
     :filter(function(name)
       return name ~= '*'
     end)
@@ -464,6 +466,7 @@ end
 
 local lsp_enable_autocmd_id --- @type integer?
 
+--- @param v any
 local function validate_cmd(v)
   if type(v) == 'table' then
     if vim.fn.executable(v[1]) == 0 then
@@ -490,7 +493,6 @@ end
 --- @param config vim.lsp.Config
 --- @param logging boolean
 local function can_start(bufnr, config, logging)
-  assert(config)
   if
     type(config.filetypes) == 'table'
     and not vim.tbl_contains(config.filetypes, vim.bo[bufnr].filetype)
@@ -560,10 +562,15 @@ local function lsp_enable_callback(bufnr)
       config = vim.deepcopy(config)
 
       if type(config.root_dir) == 'function' then
-        ---@param root_dir string
+        local fname = vim.fs.basename(api.nvim_buf_get_name(bufnr))
+        ---@param root_dir string?
         config.root_dir(bufnr, function(root_dir)
           config.root_dir = root_dir
           vim.schedule(function()
+            if not api.nvim_buf_is_valid(bufnr) then
+              log.info(('lsp.enable: buffer disappeared, skipping: %d "%s"'):format(bufnr, fname))
+              return
+            end
             start_config(bufnr, config)
           end)
         end)
@@ -687,11 +694,13 @@ end
 --- Buffer handle to attach to if starting or re-using a client (0 for current).
 --- @field bufnr? integer
 ---
---- Whether to attach the client to a buffer (default true).
+--- Whether to attach the client to a buffer.
 --- If set to `false`, `reuse_client` and `bufnr` will be ignored.
+--- (default: true)
 --- @field attach? boolean
 ---
---- Suppress error reporting if the LSP server fails to start (default false).
+--- Suppress error reporting if the LSP server fails to start.
+--- (default: false)
 --- @field silent? boolean
 ---
 --- @field package _root_markers? (string|string[])[]
@@ -803,10 +812,11 @@ function lsp.status()
       --- @cast progress {token: lsp.ProgressToken, value: lsp.LSPAny}
       local value = progress.value
       if type(value) == 'table' and value.kind then
-        local message = value.message and (value.title .. ': ' .. value.message) or value.title
+        -- Progress handlers carry the title over to report and end messages.
+        local message = value.message and (value.title .. ': ' .. value.message) or value.title --[[@as string?]]
         messages[#messages + 1] = message
-        if value.percentage then
-          percentage = math.max(percentage or 0, value.percentage)
+        if type(value.percentage) == 'number' then
+          percentage = math.max(percentage or 0, value.percentage --[[@as number]])
         end
       end
       -- else: Doesn't look like work done progress and can be in any format
@@ -960,6 +970,7 @@ local function buf_attach(bufnr)
           client:notify('textDocument/didClose', params, bufnr)
         end
       end
+      util.buf_versions[bufnr] = api.nvim_buf_get_changedtick(bufnr)
       for _, client in ipairs(clients) do
         client:_text_document_did_open_handler(bufnr)
       end
@@ -1096,7 +1107,7 @@ end
 ---@param force? boolean|integer See |Client:stop()|
 function lsp.stop_client(client_id, force)
   vim.deprecate('vim.lsp.stop_client()', 'vim.lsp.Client:stop()', '0.13')
-  --- @type integer[]|vim.lsp.Client[]
+  --- @type (integer|vim.lsp.Client)[]
   local ids = type(client_id) == 'table' and client_id or { client_id }
   for _, id in ipairs(ids) do
     if type(id) == 'table' then
@@ -1104,7 +1115,6 @@ function lsp.stop_client(client_id, force)
         id:stop(force)
       end
     else
-      --- @cast id -vim.lsp.Client
       local client = lsp.get_client_by_id(id)
       if client then
         client:stop(force)
@@ -1374,7 +1384,7 @@ end
 ---
 --- The timeout period for the formatting request.
 --- (default: 500ms).
---- @field timeout_ms integer
+--- @field timeout_ms? integer
 
 --- Provides an interface between the built-in client and a `formatexpr` function.
 ---
@@ -1410,7 +1420,7 @@ function lsp.formatexpr(opts)
     local params = util.make_formatting_params()
     local method ---@type vim.lsp.protocol.Method.ClientToServer.Request?
     if client:supports_method('textDocument/rangeFormatting') then
-      local end_line = vim.fn.getline(end_lnum) --[[@as string]]
+      local end_line = vim.fn.getline(end_lnum)
       local end_col = vim.str_utfindex(end_line, client.offset_encoding)
       --- @cast params +lsp.DocumentRangeFormattingParams
       params.range = {
@@ -1439,23 +1449,6 @@ function lsp.formatexpr(opts)
 
   -- do not run builtin formatter.
   return 0
-end
-
---- Provides an interface between the built-in client and 'tagfunc'.
----
---- When used with normal mode commands (e.g. |CTRL-]|) this will invoke
---- the "textDocument/definition" LSP method to find the tag under the cursor.
---- Otherwise, uses "workspace/symbol". If no results are returned from
---- any LSP servers, falls back to using built-in tags.
----
----@param pattern string Pattern used to find a workspace symbol
----@param flags string See |tag-function|
----
----@return table[]|vim.NIL tags A list of matching tags, or `vim.NIL` to use the built-in tags.
-function lsp.tagfunc(pattern, flags)
-  -- EmmyLua incorrectly treats function exports referenced by @module as non-callable.
-  --- @diagnostic disable-next-line:call-non-callable EmmyLuaLs/emmylua-analyzer-rust#1238
-  return vim.lsp._tagfunc(pattern, flags)
 end
 
 --- Provides an interface between the built-in client and a `foldexpr` function.
@@ -1529,7 +1522,7 @@ end
 ---@return boolean stopped true if client is stopped, false otherwise.
 function lsp.client_is_stopped(client_id)
   vim.deprecate('vim.lsp.client_is_stopped()', 'vim.lsp.get_client_by_id()', '0.14')
-  assert(client_id, 'missing client_id param')
+  validate('client_id', client_id, 'number')
   return not lsp.get_client_by_id(client_id)
 end
 

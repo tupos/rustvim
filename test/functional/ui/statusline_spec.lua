@@ -764,21 +764,21 @@ describe('statusline', function()
     screen:expect(s2)
     feed('v')
     screen:expect([[
-      ^                                        |
+      {17:^ }                                       |
       {1:~                                       }|*5
       {3:v                                       }|
       {5:-- VISUAL --}                            |
     ]])
     feed('V')
     screen:expect([[
-      ^                                        |
+      {17:^ }                                       |
       {1:~                                       }|*5
       {3:V                                       }|
       {5:-- VISUAL LINE --}                       |
     ]])
     feed('<C-V>')
     screen:expect([[
-      ^                                        |
+      {17:^ }                                       |
       {1:~                                       }|*5
       {3:^V                                      }|
       {5:-- VISUAL BLOCK --}                      |
@@ -795,14 +795,14 @@ describe('statusline', function()
     ]])
     feed('iabc<Esc>v')
     screen:expect([[
-      ab^c                                     |
+      ab{17:^c}                                     |
       {1:~                                       }|*5
       {3:v 3 3                                   }|
       {5:-- VISUAL --}                            |
     ]])
     feed('iw')
     screen:expect([[
-      {17:ab}^c                                     |
+      {17:ab^c}                                     |
       {1:~                                       }|*5
       {3:v 1 3                                   }|
       {5:-- VISUAL --}                            |
@@ -1122,6 +1122,62 @@ describe('statusline', function()
       {1:~                                       }|*4
       {2:All 1                                   }|
       --No lines in buffer--                  |
+    ]])
+  end)
+
+  it('works with highlight scopes', function()
+    screen:add_extra_attr_ids({
+      [131] = {
+        bold = true,
+        reverse = true,
+        background = Screen.colors.Green,
+      },
+      [132] = {
+        bold = true,
+        reverse = true,
+        background = Screen.colors.Green,
+        foreground = Screen.colors.Red,
+      },
+      [133] = {
+        bold = true,
+        reverse = true,
+        background = Screen.colors.Green,
+        foreground = Screen.colors.Red,
+        underline = true,
+      },
+      [134] = {
+        bold = true,
+        reverse = true,
+        background = Screen.colors.Green,
+        underline = true,
+      },
+    })
+    command('hi User1 guibg=green')
+    command('hi User2 guifg=red')
+    command('hi User3 gui=underline')
+    command('set laststatus=2')
+    command('set statusline=a%#User1#b%$User2$c%#(%$User3$d%#)e')
+    screen:expect([[
+      ^                                        |
+      {1:~                                       }|*5
+      {3:a}{131:b}{132:c}{133:d}{132:e                                   }|
+                                              |
+    ]])
+    command('set statusline=a%$User1$b%$User2$c%#(%$User3$d%#)e')
+    screen:expect_unchanged()
+    command('set statusline=a%#(%#User1#b%#(%$User2$c%#(%$User3$d%#)e%#)f%#)g')
+    screen:expect([[
+      ^                                        |
+      {1:~                                       }|*5
+      {3:a}{131:b}{132:c}{133:d}{132:e}{131:f}{3:g                                 }|
+                                              |
+    ]])
+    command('set statusline=a%#(%#User1#b%#(%$User2$c%#)d%#(%$User3$e%#)f%#)g')
+    screen:expect([[
+      ^                                        |
+      {1:~                                       }|*5
+      {3:a}{131:b}{132:c}{131:d}{134:e}{131:f}{3:g                                 }|
+                                              |
     ]])
   end)
 end)

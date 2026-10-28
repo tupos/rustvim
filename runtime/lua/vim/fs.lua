@@ -44,8 +44,8 @@ local uv = vim.uv
 
 local M = {}
 
-local iswin = vim.fn.has('win32') == 1
-local os_sep = iswin and '\\' or '/'
+local os_sep = package.config:sub(1, 1)
+local iswin = os_sep == '\\'
 
 --- Iterate over all the parents of the given path (not expanded/resolved, the caller must do that).
 ---
@@ -94,6 +94,7 @@ function M.dirname(file)
     return nil
   end
   vim.validate('file', file, 'string')
+  --- @cast file string
   local dir = vim.fn.fnamemodify(file, ':h')
   if iswin then
     return (dir:gsub(os_sep, '/'))
@@ -112,6 +113,7 @@ function M.basename(file)
     return nil
   end
   vim.validate('file', file, 'string')
+  --- @cast file string
   local name = vim.fn.fnamemodify(file, ':t')
   if iswin then
     return (name:gsub(os_sep, '/'))
@@ -237,7 +239,9 @@ function M.slug(path, opts)
     return hash8
   end
   local head_len = math.floor(budget / 3)
-  local h = s:sub(1, head_len):match('^.*()-') or head_len -- byte position where {head} ends
+  local h = (
+    s:sub(1, head_len):match('^.*()-') --[[@as integer?]]
+  ) or head_len -- byte position where {head} ends
   if h == head_len and h >= 1 then
     -- No "-" found in prefix: ensure we don't split a UTF-8 character.
     -- `vim.str_utf_start` returns an offset (<= 0) from the byte position to the character start.
@@ -276,7 +280,7 @@ local function fs_scandir_next(fs, path)
   end
 
   if etype == nil then
-    local stat = vim.uv.fs_lstat(M.joinpath(path, name))
+    local stat = uv.fs_lstat(M.joinpath(path, name))
     -- Workaround #39612 https://github.com/luvit/luv/issues/660
     etype = stat and stat.type or 'unknown'
   end
@@ -366,6 +370,7 @@ function M.dir(path, opts)
 
   --- @async
   return coroutine.wrap(function()
+    ---@type [string, integer, uv.uv_fs_t][]
     local dirs = { { path, 1, rootfs } }
     while #dirs > 0 do
       --- @type string, integer, any
@@ -412,7 +417,8 @@ end
 --- Stop searching when this directory is reached. The directory itself is not searched.
 --- @field stop? string
 ---
---- Find only items of the given type. If omitted, all items that match {names} are included.
+--- Find only items of the given type. If omitted, all items that match `names` are included.
+--- With `follow`, a symlink has the type of its target.
 --- @field type? string
 ---
 --- Stop searching after this many matches. Use `math.huge` for "unlimited".
@@ -455,7 +461,7 @@ end
 ---             Must be base names, paths and globs are not supported when {names} is a string or a table.
 ---             If {names} is a function, it is called for each traversed item with args:
 ---             - name: base name of the current item
----             - path: full path of the current item
+---             - path: full path of the directory containing the current item
 ---
 ---             The function should return `true` if the given item is considered a match.
 ---
@@ -483,6 +489,7 @@ function M.find(names, opts)
   local matches = {} --- @type string[]
   local errors = {} --- @type string[]
 
+  --- @param match string
   local function add(match)
     matches[#matches + 1] = M.normalize(match)
     if #matches == limit then
@@ -491,12 +498,20 @@ function M.find(names, opts)
   end
 
   if opts.upward then
+    if path == stop then
+      return matches, errors
+    end
+
     local test --- @type fun(p: string): string[]
 
     if type(names) == 'function' then
+      --- @param p string
       test = function(p)
         local t = {}
         for name, type, err in M.dir(p, { err = true }) do
+          if type == 'link' and opts.follow then
+            type = (uv.fs_stat(M.joinpath(p, name)) or {}).type or type
+          end
           if err ~= nil then
             table.insert(errors, err)
           elseif (not opts.type or opts.type == type) and names(name, p) then
@@ -506,6 +521,7 @@ function M.find(names, opts)
         return t
       end
     else
+      --- @param p string
       test = function(p)
         local t = {} --- @type string[]
         local ok, aerr = uv.fs_access(p, 'R') -- Check if the root dir is readable.
@@ -551,31 +567,32 @@ function M.find(names, opts)
       end
 
       for other, type_, err in M.dir(dir, { err = true }) do
+        if type_ == 'link' and opts.follow then
+          type_ = (uv.fs_stat(M.joinpath(dir, other)) or {}).type or type_
+        end
         if err ~= nil then
           table.insert(errors, err)
         else
-          local f = M.joinpath(dir, other)
+          -- Keep joinpath() calls inside the match and traversal branches. Joining paths for rejected
+          -- entries can account for up to ~25% of the total search time.
           if type(names) == 'function' then
             if (not opts.type or opts.type == type_) and names(other, dir) then
-              if add(f) then
+              if add(M.joinpath(dir, other)) then
                 return matches, errors
               end
             end
           else
             for _, name in ipairs(names) do
               if name == other and (not opts.type or opts.type == type_) then
-                if add(f) then
+                if add(M.joinpath(dir, other)) then
                   return matches, errors
                 end
               end
             end
           end
 
-          if
-            type_ == 'directory'
-            or (type_ == 'link' and opts.follow and (uv.fs_stat(f) or {}).type == 'directory')
-          then
-            dirs[#dirs + 1] = f
+          if type_ == 'directory' then
+            dirs[#dirs + 1] = M.joinpath(dir, other)
           end
         end
       end
@@ -622,8 +639,8 @@ end
 --- @return string? # Directory path containing one of the given markers, or nil if no directory was
 ---                   found.
 function M.root(source, marker)
-  assert(source, 'missing required argument: source')
-  assert(marker, 'missing required argument: marker')
+  vim.validate('source', source, { 'number', 'string' })
+  vim.validate('marker', marker, { 'string', 'table', 'function' })
 
   local path ---@type string
   if type(source) == 'string' then

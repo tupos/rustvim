@@ -1682,11 +1682,8 @@ static void set_context_for_wildcard_arg(exarg_T *eap, const char *arg, bool use
 
   // Check for environment variable.
   if (*xp->xp_pattern == '$') {
-    for (p = xp->xp_pattern + 1; *p != NUL; p++) {
-      if (!vim_isIDc((uint8_t)(*p))) {
-        break;
-      }
-    }
+    p = xp->xp_pattern + 1;
+    p += env_name_len(p);
     if (*p == NUL) {
       xp->xp_context = EXPAND_ENV_VARS;
       xp->xp_pattern++;
@@ -2656,6 +2653,9 @@ void set_cmd_context(expand_T *xp, char *str, int len, int col, int use_ccline)
     str[col] = NUL;
   }
   const char *nextcomm = str;
+
+  filetype_expand_what = EXP_FILETYPECMD_ALL;
+  breakpt_expand_what = EXP_BREAKPT_ADD;
 
   if (use_ccline && ccline->cmdfirstc == '=') {
     // pass CMD_SIZE because there is no real command
@@ -4128,6 +4128,10 @@ void f_getcompletion(typval_T *argvars, typval_T *rettv, EvalFuncData fptr)
 
   case EXPAND_FILETYPECMD:
     filetype_expand_what = EXP_FILETYPECMD_ALL;
+    break;
+
+  case EXPAND_BREAKPOINT:
+    breakpt_expand_what = EXP_BREAKPT_ADD;
     break;
 
   default:
