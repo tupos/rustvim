@@ -1264,7 +1264,7 @@ static void print_cell_at_pos(TUIData *tui, int row, int col, UCell *cell, bool 
   cursor_goto(tui, row, col);
 
   char buf[MAX_SCHAR_SIZE];
-  schar_get(buf, cell->data);
+  size_t len = schar_get(buf, cell->data);
   int c = utf_ptr2char(buf);
   bool is_ambiwidth = utf_ambiguous_width(buf);
   if (is_doublewidth && (is_ambiwidth || utf_char2cells(c) == 1)) {
@@ -1280,8 +1280,9 @@ static void print_cell_at_pos(TUIData *tui, int row, int col, UCell *cell, bool 
 
   print_cell(tui, buf, cell->attr);
 
-  if (is_ambiwidth) {
-    // Force repositioning cursor after printing an ambiguous-width char.
+  if (is_ambiwidth || (size_t)utf_ptr2len(buf) < len) {
+    // Terminals may advance differently for compound clusters or ambiguous-width
+    // characters. Force an explicit cursor position before the next output.
     grid->row = -1;
   }
 }
