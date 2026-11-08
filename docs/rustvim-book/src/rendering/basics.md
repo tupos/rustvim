@@ -1,14 +1,22 @@
 # Cells, rows, and grids
 
-A screen cell is one position identified by a row and column.
-It contains a displayed character, a highlight identifier, and a virtual
-column used for mouse and cursor mapping.
+A screen cell is one position in a grid, identified by a row and column.
+It contains displayed text, a highlight identifier, and virtual-column
+metadata used for mouse and cursor mapping.
 
-A cell is not the same thing as a source byte or Unicode codepoint:
+A glyph is a displayed character, possibly with combining marks. Glyphs,
+Unicode codepoints, source bytes, and screen cells are different:
 
-- A wide character occupies two cells.
-- A character with combining marks can contain several codepoints.
-- A tab can produce several cells.
+- A wide glyph such as `界` occupies two cells. The first stores the glyph;
+  the second is marked as its continuation.
+- A base character and its combining marks can occupy one cell.
+- A tab expands to several cells to reach the next tab stop.
+- A non-printable byte can produce several cells, such as `^G`.
+
+A virtual column measures a position along the displayed buffer line before
+wrapping. A screen column measures a position within one screen row.
+Some cells, such as fold markers, use special metadata instead of a
+buffer-text position.
 
 For example, with `tabstop=4`:
 
@@ -26,21 +34,35 @@ One buffer line can occupy several screen rows when wrapping is enabled.
 A closed fold can represent several buffer lines in one displayed row.
 Virtual lines introduce screen rows without corresponding buffer text.
 
+Each row can contain more than buffer text: fold, sign, and number columns,
+continuation prefixes, virtual text, and unused space also occupy cells.
+
 ## The temporary row and the stored grid
 
-`LineBuffer` holds the screen row currently being built.
-`ScreenGrid` stores the contents of all rows in a rectangular screen area.
+`LineBuffer` is temporary storage for the screen row currently being built.
+It is reused as rendering moves from one row to the next; it does not hold
+all wrapped rows of a buffer line.
 
-The current drawing sequence is:
+`ScreenGrid` retains the rendered contents of a rectangular screen area
+between updates. A window can draw into its own grid or into a region of
+the shared default grid.
 
-1. Build a screen row in `LineBuffer`.
-2. Call `grid_put_window_line()` through C's `wlv_put_linebuf()`.
-3. Compare the completed row with the stored grid and update changed cells.
-4. Produce UI updates for the changes.
-5. Reset the temporary buffer when starting another screen row.
+During window-line rendering:
 
-The compositor combines grids according to their positions and layer order.
-The UI output path delivers the resulting updates to UI clients.
+1. Reset the visible part of `LineBuffer`.
+2. Fill it with the row's columns, text, and decorations.
+3. Submit the row through C's `wlv_put_linebuf()`, which calls Rust's
+   `grid_put_window_line()`.
+4. Prepare the submitted range, including right-to-left mirroring and any
+   smooth-scroll marker.
+5. Update the target `ScreenGrid` and produce UI updates for visual changes.
+
+Submission also updates virtual-column metadata, even when the displayed
+text and highlighting have not changed.
+
+For UIs that receive a single composed grid, the compositor combines grids
+according to their positions and layer order. UIs using `ext_multigrid`
+receive separate grids and arrange them themselves.
 
 ## What column width means
 

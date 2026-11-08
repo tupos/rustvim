@@ -36,12 +36,14 @@ The marker identifies the coordinate system, not a particular grid.
 
 Regions use half-open ranges: `2..5` includes 2, 3, and 4.
 
-`GridSize::try_new()` rejects negative dimensions.
-Region construction rejects reversed ranges.
-Translation methods reject integer overflow.
+`GridSize::try_new()` rejects negative dimensions; zero dimensions are valid.
+Region construction rejects reversed ranges and accepts empty ranges.
+Translation methods return `None` on integer overflow.
 
 Position construction preserves signed coordinates, and region construction
 can accept negative boundaries. These types do not check whether coordinates
-lie inside a particular grid; that requires its dimensions elsewhere.
+lie inside a particular grid; callers validate or clip against its dimensions.
+For example, a negative composed position can describe a grid placed partly
+outside the visible screen.
 
 Tests cover translations, reversed ranges, negative sizes, and overflow.

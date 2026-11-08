@@ -115,9 +115,10 @@ A trailing separator produces an empty tail, and dot components stay literal:
 `dir/.` yields `.`, while `dir/..` yields `..`.
 
 Unix recognizes only `/`; backslashes and colons remain filename characters.
-Windows recognizes both slash forms and skips an initial drive prefix and
-leading separators, including colons. For example, `C:server` yields
-`server` on Windows and stays `C:server` on Unix.
+Windows recognizes both slash forms and skips an initial alphabetic drive
+prefix such as `C:`. Other colons remain part of the filename: `:server`
+stays `:server`, and `dir/server:stream` yields `server:stream`.
+`C:server` yields `server` on Windows and stays `C:server` on Unix.
 
 Tracing uses this helper for parent and server names in log headers.
 

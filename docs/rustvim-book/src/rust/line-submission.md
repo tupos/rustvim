@@ -3,6 +3,8 @@
 Source: `src/nvim/rustvim_core/src/grid/line_submission.rs`.
 
 This file prepares a finished screen row for copying into the stored grid.
+`LineSubmission` records validated ranges and direction; the cell contents
+remain in the caller's `LineBuffer`.
 
 `LineSubmission::prepare()` receives the row buffer, the end of the prepared
 text, the available row width, and options for clearing, right-to-left display,
@@ -33,9 +35,10 @@ right-to-left convention.
 `SmoothScrollMarker` specifies the marker's highlighting and whether leading
 line-number digits must be preserved.
 
-When requested, preparation writes `<<<` into the buffer after mirroring.
-For example, the test transforms `12xyzw` into `12<<<w` while preserving the
-leading digits.
+When requested, preparation writes up to three `<` characters into the buffer
+after mirroring. The marker is limited by the available width after any
+preserved leading digits. For example, the test transforms `12xyzw` into
+`12<<<w` while preserving those digits.
 
 The caller decides whether a marker is needed; this file applies that request.
 
@@ -46,7 +49,9 @@ Its accessors return those values. Their interpretation follows the direction
 convention used by the grid API.
 
 The C-facing `grid_put_window_line()` calls preparation, then passes the
-result and buffer to `ScreenGrid::put_line_buffer()`.
+result and buffer to `ScreenGrid::put_line_buffer()`. That boundary selects the
+target grid and translates the window-relative row and columns through its
+view offset.
 
 Tests cover write/clear boundaries, right-to-left mirroring, marker placement,
 and rejecting invalid boundaries without changing the buffer.

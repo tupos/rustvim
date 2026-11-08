@@ -19,6 +19,8 @@ pub(crate) struct MessageSurface<'context> {
 It coordinates grid storage and screen placement. The actual cells belong to
 `GridContext`; the compositor determines how the message grid appears over
 other grids. `MessageSurface` borrows those subsystems for an operation.
+The persistent message view and scroll counters also belong to `GridContext`;
+constructing another surface object retains that same state.
 
 ## Placement and scrolling
 
@@ -42,7 +44,8 @@ The main methods handle these operations:
 
 Delaying output matters when a command produces many message lines.
 Storage still changes, but several small scroll operations can be combined
-before notifying the UI.
+before notifying the UI. This is called throttling: scroll counters and dirty
+columns record the pending work, and `flush_scroll()` publishes it.
 
 When removing the message grid, `update()` removes its compositor layer before
 releasing its cell storage. This lets the compositor restore the screen area
@@ -71,7 +74,8 @@ a grid view, using `LineGrid` and the shared line buffer. It returns the UI
 updates for the caller to send.
 
 The entry path starts in C's `message.c`, passes through
-`grid/ffi/message.rs`, and reaches this coordinator.
+`grid/ffi/message.rs`, obtains the surface from `RustVimContext`, and reaches
+this coordinator.
 
 Message text formatting and character writes happen elsewhere. This file
 manages the message area's storage, placement, scrolling, and UI notifications.

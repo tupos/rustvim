@@ -3,7 +3,8 @@
 Source: `src/nvim/rustvim_core/src/grid/line_buffer.rs`.
 
 This file implements the temporary screen row built before it is copied into
-a stored grid.
+a stored grid. `GridContext` owns one shared `LineBuffer`, reused for
+successive rows by window, message, and other grid drawing operations.
 
 ```rust
 pub struct LineBuffer {
@@ -20,16 +21,21 @@ Construction/resizing allocates the arrays; ordinary cell writes reuse them.
 ## Writing characters and strings
 
 `put_rendered_glyph()` writes a prepared character into one or two cells.
-A wide character receives an empty continuation cell.
+A wide character receives an empty continuation cell. Both cells receive the
+same highlighting and consecutive virtual columns.
 
 `put_text_glyph()` writes a prepared `TextGlyph` and its virtual-column
 metadata. It also handles the continuation cells affected by overwriting
 wide characters.
 
-`render_text()` reads successive characters from a string, expands tabs,
-assigns highlighting and virtual columns, and stops at the specified column
-limit or when an input cannot be rendered.
-It uses `TextGlyph` from `grid.rs`.
+`render_text()` reads a byte slice using Neovim's text-cluster rules, expands
+tabs, assigns highlighting and virtual columns, and stops at the specified
+column limit or when an input cannot be rendered. It uses `TextGlyph` from
+`grid.rs`; input need not be a Rust UTF-8 string.
+
+If a glyph is too wide for the remaining space, `TextGlyph` supplies a space
+without consuming that glyph's input bytes. Output still advances toward the
+column limit.
 
 `LineTextRenderOptions` supplies the start/end boundaries, highlight,
 tab stops, and virtual-column policy.
@@ -59,6 +65,9 @@ Other helpers:
 - Place the `<<<` smooth-scroll marker.
 - Mirror the row while retaining wide-character pairs.
 - Release or reset working storage.
+
+Cell storage is reused during rendering. Encoding a previously unseen glyph
+that exceeds the inline byte capacity can add an entry to `GlyphMapping`.
 
 This file writes within a screen row. Choosing buffer lines, deciding when to
 wrap, and obtaining syntax/search/spell highlighting still happen elsewhere.

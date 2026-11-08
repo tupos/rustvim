@@ -1,66 +1,127 @@
 # The current C win_line
 
-Source: `src/nvim/drawline.c`.
+Source: `src/nvim/drawline.c`; caller: `win_update()` in
+`src/nvim/drawscreen.c`.
 
-This chapter records the initial overview. The detailed walkthrough of the
-function is still in progress.
+`win_update()` chooses which buffer lines need redrawing. `win_line()` turns
+one buffer-line entry into screen rows, including wrapped text and associated
+diff filler or virtual lines. A closed fold represents several buffer lines
+in one text row.
 
-`win_update()` in `drawscreen.c` chooses which buffer lines need updating.
-It calls `win_line()` to draw one buffer-line entry into the available
-screen rows.
+It builds one row at a time in `LineBuffer` and submits completed rows to the
+window's target `ScreenGrid`. The same temporary buffer is reused for the
+next row.
 
-## Three uses of the function
+## Inputs and drawing modes
 
-| Use | Relevant input |
+The caller supplies the window, the one-based buffer line number `lnum`,
+the window-relative row range `[startrow, endrow)`, fold information, and
+spelling state retained between calls.
+
+| Mode | Input |
 | --- | --- |
-| Draw a buffer line and its associated rows | `col_rows == 0` |
-| Update only the left-side columns of an already displayed line | `col_rows > 0` |
-| Draw associated filler/virtual rows without buffer text | Concealed line or the line beyond EOF |
+| Draw text and associated rows | `col_rows == 0`, with buffer text visible |
+| Update information columns while preserving existing text | `col_rows > 0`, giving the line's existing screen height |
+| Draw associated rows without buffer text | `concealed`, or `lnum` is one past the last buffer line |
 
-The caller provides the window, buffer line number, available screen-row
-range, fold information, and spell state retained between calls.
+For a concealed line, the remaining virtual rows belong to the preceding
+line. The call beyond EOF draws filler below the last buffer line.
 
-## Work performed in C
+A normal completed draw returns the row immediately after its output. If a
+line continues below the available area, the return value can be
+`endrow + 1`, signalling that it did not fit.
 
-Before entering the main loop, the function prepares selection boundaries,
-diff and virtual rows, line highlighting, spelling context, the first visible
-source position, decoration providers, and search highlighting.
+## Building the rows
 
-The main loop combines several jobs:
+Setup prepares selection boundaries, diff and virtual rows, highlighting,
+spelling context, decoration providers, search matches, and the first visible
+source position. Horizontal scrolling and smooth scrolling can make that
+position fall inside a tab or another multi-cell expansion.
 
-- Start a screen row and draw its fold, sign, number, or status column.
-- Draw breakindent, showbreak, and filler content.
-- Read buffer text or continue previously generated display text.
-- Obtain search, syntax, spelling, and decoration information.
-- Expand tabs and non-printable characters, apply list characters and concealment.
-- Write or skip the resulting screen cells.
-- Finish a row, wrap onto another row, or finish the buffer line.
+The main loop interleaves these operations:
 
-`n_extra`, `p_extra`, `sc_extra`, and `sc_final` describe display text still
-waiting to be emitted. A tab or inline virtual text can therefore take several
-iterations while the buffer position remains unchanged.
+1. Start a row with the built-in fold, sign, and number columns, or evaluate
+   and draw `'statuscolumn'`.
+2. Add continuation prefixes (`'breakindent'` and `'showbreak'`) or filler.
+3. Read buffer text or continue pending display text.
+4. Resolve highlighting, expand tabs and non-printable characters, apply
+   `'listchars'`, and decide whether concealment replaces or hides text.
+5. Write cells and their virtual-column metadata, or account for skipped
+   cells. Correct cursor geometry when the cursor position is reached.
+6. At a row boundary or end of text, draw the applicable virtual text and
+   submit the completed row through `wlv_put_linebuf()`.
 
-The counters also measure different things:
+Wrapping starts another row while retaining the source position and pending
+output. Reaching the end of buffer text finishes the last row, including
+highlighting and virtual-column metadata for space after the text.
+
+## Pending display text
+
+Reading one source character can produce several output cells. A tab, for
+example, is one source byte but may require several spaces. Inline virtual
+text also adds output without consuming buffer bytes.
+
+| Field | Meaning |
+| --- | --- |
+| `p_extra` | NUL-terminated text still being emitted |
+| `sc_extra` | A glyph to repeat instead of reading `p_extra` |
+| `sc_final` | An optional different glyph for the final repetition |
+| `n_extra` | Remaining bytes for text, or remaining emissions for repeated glyphs |
+
+These fields let output continue across loop iterations and wrapped rows
+without reading another source character. The associated attributes remain
+active until that output is exhausted.
+
+## Positions and concealment
+
+`winlinevars_T` (`wlv`) holds state shared with the drawing helpers. Its
+position counters measure different things:
 
 | Value | Meaning |
 | --- | --- |
-| `ptr - line` | Byte position in buffer text |
-| `wlv.row` | Current screen row within the window |
-| `wlv.off` | Position being written in the temporary row buffer |
+| `ptr - line` | Byte offset in the buffer line |
+| `wlv.row` | Current screen row relative to the window |
+| `wlv.off` | Next cell to write in `LineBuffer` |
 | `wlv.col` | Column used for layout and wrapping |
-| `wlv.vcol` | Virtual display column across wrapped rows |
+| `wlv.vcol` | Virtual-column progress across wrapped rows |
+| `wlv.vcol_off_co` | Hidden cells tracked by the legacy concealment path |
+| `wlv.extconceal_off` | Source-versus-displayed cell offset for persistent extmark concealment |
 
-Concealment can advance layout without writing a cell, so `col` and `off`
-can differ. `boguscols` records that fictitious column advance.
+A multibyte glyph advances the source pointer by several bytes but occupies
+one or two cells. A tab advances it by one byte and can occupy several cells.
+Concealment can consume source text without writing any cells.
 
-## Existing Rust calls
+The legacy concealment path, used by syntax and match concealment, can
+advance `col` without advancing `off` to preserve wrapping positions.
+`boguscols` tracks this fictitious layout advance, while `vcol_off_co` is
+used to correct displayed positions.
 
-C already uses Rust to write prepared glyphs, draw complete strings,
-generate fold indicators, draw virtual-text items, and update stored grids.
+Persistent extmark concealment behaves differently when text wraps: hidden
+cells are removed from the wrapped layout. `extconceal_off` tracks the
+difference so tabs can still be sized using source columns. It can be
+negative when a replacement is wider than the text it replaces.
 
-Inline virtual text goes through the C character loop. Overlay, end-of-line,
-right-aligned virtual text, and virtual-line contents use the Rust
-virtual-text renderer.
+## The C and Rust boundary
 
-Some editor operations can invalidate a borrowed memline pointer. The C code
-reacquires `line` and restores `ptr` from its byte offset after such operations.
+C controls source traversal, layout, highlighting decisions, and editor
+callbacks. It calls these Rust operations to construct and submit cells:
+
+| Operation | Rust entry point |
+| --- | --- |
+| Write a prepared glyph | `linebuf_put_rendered_glyph()` |
+| Render a complete text run | `linebuf_render_text()` |
+| Generate and write fold indicators | `linebuf_render_fold_column()` |
+| Render virtual-text chunks | `linebuf_render_virtual_text()` |
+| Submit a row to its stored grid | `grid_put_window_line()` |
+
+Inline virtual text goes through the C character loop because it affects
+layout alongside buffer text. Overlay, end-of-line, right-aligned virtual
+text, and virtual-line contents use the Rust virtual-text renderer.
+
+## Borrowed buffer text
+
+`line` points into Neovim's memline storage, and `ptr` points within that
+line. Editor operations such as spelling queries, decoration callbacks, and
+`'statuscolumn'` or `'foldtext'` evaluation can invalidate those pointers.
+The code saves the byte offset, reacquires `line`, and restores `ptr` after
+such calls. The offset survives the call; the borrowed pointer may not.

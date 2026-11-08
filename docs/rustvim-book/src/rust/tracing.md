@@ -209,8 +209,10 @@ Regular supplied streams transfer ownership; standard streams are flushed
 and retained. Libuv handle diagnostics use its native printer while the
 logger holds the output lock.
 
-The special `Logger::fatal()` path writes a UTF-8 cleanup diagnostic to
-standard error and aborts, independently of normal output state.
+During `EXITFREE` cleanup, C marks log messages as fatal. They still pass the
+severity check. An accepted fatal message uses a separate formatting buffer,
+then `Logger::fatal()` writes the UTF-8 diagnostic to standard error and
+aborts, bypassing the normal recursion guard and output locks.
 
 `ffi.rs` still adapts native calendar time, `v:servername`, the UI-client
 flag, skipped-log statistics, scheduled errors, environment publication, and

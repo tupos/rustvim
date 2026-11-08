@@ -18,7 +18,8 @@ pub(crate) struct GridRow<'grid> {
 ```
 
 These slices refer directly to the grid's arrays. Creating the view does not
-allocate or copy the row.
+allocate or copy the row. The grid remains immutably borrowed for as long as
+the view is used.
 
 `try_from_grid()` finds the row through `line_offset`. This matters because
 scrolling can rearrange row offsets instead of moving the cells.
@@ -53,8 +54,9 @@ A segment ending just after `界` would contain only the first half of that
 wide character. `is_followed_by_continuation()` detects this because the next
 cell contains the continuation marker, zero.
 
-The compositor uses that information to repair a character cut by an overlap
-or clipping boundary.
+The segment reports the boundary condition; it keeps the stored row unchanged.
+The compositor uses that information when constructing output to repair a
+character cut by an overlap or clipping boundary.
 
 These views carry characters and highlighting. Virtual-column metadata stays
 in the grid.

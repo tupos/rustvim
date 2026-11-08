@@ -17,7 +17,9 @@ pub(crate) struct PopupMenuSurface<'context> {
 ```
 
 `GridContext` owns the cells. The compositor places that rectangular grid over
-the editor's other grids.
+the editor's other grids. The surface object holds references to those
+subsystems; its methods operate on the registered grid identified by the
+request.
 
 ## Updating and hiding the menu
 
@@ -54,7 +56,9 @@ an offset.
 
 Position publication is separate because the compositor's layer order can
 change even when the menu itself stays in place. The caller can also force
-publication.
+publication. Normal publication requires a drawn internal menu, a registered
+grid, and `ext_multigrid`. A forced publication bypasses those eligibility
+checks, but still needs valid grid and anchor geometry.
 
 ## Requests, output, and the C boundary
 
@@ -68,3 +72,5 @@ interface for grid resize, destruction, and composed screen updates.
 
 The entire module forbids unsafe code. C representations, exported entry
 points, and calls into the C UI functions live in `grid/ffi/popup.rs`.
+Those entry points obtain the surface from `RustVimContext`. UI events are
+emitted after the storage and compositor borrows used to prepare them end.
