@@ -395,7 +395,7 @@ newwindow:
       if (Prenum) {  // go to specified window
         win_T *last_focusable = firstwin;
         for (wp = firstwin; --Prenum > 0;) {
-          if (!wp->w_floating || (!wp->w_config.hide && wp->w_config.focusable)) {
+          if (!wp->w_floating || win_is_focusable(wp)) {
             last_focusable = wp;
           }
           if (wp->w_next == NULL) {
@@ -403,8 +403,7 @@ newwindow:
           }
           wp = wp->w_next;
         }
-        while (wp != NULL && wp->w_floating
-               && (wp->w_config.hide || !wp->w_config.focusable)) {
+        while (wp != NULL && wp->w_floating && !win_is_focusable(wp)) {
           wp = wp->w_next;
         }
         if (wp == NULL) {  // went past the last focusable window
@@ -416,14 +415,12 @@ newwindow:
           if (wp == NULL) {
             wp = lastwin;  // wrap around
           }
-          while (wp != NULL && wp->w_floating
-                 && (wp->w_config.hide || !wp->w_config.focusable)) {
+          while (wp != NULL && wp->w_floating && !win_is_focusable(wp)) {
             wp = wp->w_prev;
           }
         } else {  // go to next window
           wp = curwin->w_next;
-          while (wp != NULL && wp->w_floating
-                 && (wp->w_config.hide || !wp->w_config.focusable)) {
+          while (wp != NULL && wp->w_floating && !win_is_focusable(wp)) {
             wp = wp->w_next;
           }
           if (wp == NULL) {
@@ -503,7 +500,7 @@ newwindow:
   // cursor to last accessed (previous) window
   case 'p':
   case Ctrl_P:
-    if (!win_valid(prevwin) || prevwin->w_config.hide || !prevwin->w_config.focusable) {
+    if (!win_valid(prevwin) || !win_is_focusable(prevwin)) {
       beep_flush();
     } else {
       win_goto(prevwin);
@@ -996,7 +993,8 @@ void ui_ext_win_viewport(win_T *wp)
         lnume = cur_botline;
         vcole = 0;
       }
-      delta -= win_text_height(wp, cur_topline, wp->w_skipcol, &lnume, &vcole, NULL, INT64_MAX);
+      delta -= win_text_height(wp, cur_topline, wp->w_skipcol, &lnume, &vcole, NULL, INT64_MAX,
+                               true);
     } else if (cur_topline > last_topline
                || (cur_topline == last_topline && wp->w_skipcol > last_skipcol)) {
       int64_t vcole = wp->w_skipcol;
@@ -1007,7 +1005,8 @@ void ui_ext_win_viewport(win_T *wp)
         lnume = last_botline;
         vcole = 0;
       }
-      delta += win_text_height(wp, last_topline, last_skipcol, &lnume, &vcole, NULL, INT64_MAX);
+      delta += win_text_height(wp, last_topline, last_skipcol, &lnume, &vcole, NULL, INT64_MAX,
+                               true);
     }
     delta += last_topfill;
     delta -= wp->w_topfill;
@@ -3010,7 +3009,7 @@ int win_close(win_T *win, bool free_buf, bool force)
           break;
         }
         if (!wp->w_p_pvw && !bt_quickfix(wp->w_buffer)
-            && !(wp->w_floating && (wp->w_config.hide || !wp->w_config.focusable))) {
+            && !(wp->w_floating && !win_is_focusable(wp))) {
           curwin = wp;
           break;
         }
@@ -5021,8 +5020,6 @@ void tabpage_move(int nr)
 /// position to keep the same Visual area.
 void win_goto(win_T *wp)
 {
-  win_T *owp = curwin;
-
   if (text_or_buf_locked()) {
     beep_flush();
     return;
@@ -5041,14 +5038,6 @@ void win_goto(win_T *wp)
   }
 
   win_enter(wp, true);
-
-  // Conceal cursor line in previous window, unconceal in current window.
-  if (win_valid(owp) && owp->w_p_cole > 0 && !msg_scrolled) {
-    redrawWinline(owp, owp->w_cursor.lnum);
-  }
-  if (curwin->w_p_cole > 0 && !msg_scrolled) {
-    redrawWinline(curwin, curwin->w_cursor.lnum);
-  }
 }
 
 // Find the tabpage for window "win".
@@ -5338,6 +5327,15 @@ static void win_enter_ext(win_T *const wp, const int flags)
   // set window width to desired minimal value
   if (curwin->w_width < p_wiw && !curwin->w_p_wfw && !curwin->w_floating) {
     win_setwidth((int)p_wiw);
+  }
+
+  // Conceal cursor line in previous window, unconceal in current window.
+  if (!curwin_invalid && win_valid(prevwin) && prevwin->w_p_cole > 0
+      && !conceal_cursor_line(prevwin)) {
+    conceal_redraw_cursor_line(prevwin);
+  }
+  if (curwin->w_p_cole > 0 && !conceal_cursor_line(curwin)) {
+    conceal_redraw_cursor_line(curwin);
   }
 
   setmouse();                   // in case jumped to/from help buffer
@@ -7978,4 +7976,9 @@ win_T *lastwin_nofloating(tabpage_T *tp)
     res = res->w_prev;
   }
   return res;
+}
+
+bool win_is_focusable(const win_T *wp)
+{
+  return wp->w_config.focusable && !wp->w_config.hide;
 }

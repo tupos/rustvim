@@ -1535,7 +1535,7 @@ impl ScreenGrid {
             .height
             .checked_sub(request.view_origin.row)?
             .min(request.view_size.height);
-        if visible_width < 0
+        if visible_width <= 0
             || visible_height < 0
             || request.row.checked_add(line_count)? >= visible_height
         {
@@ -3806,6 +3806,18 @@ mod tests {
             })
             .is_none()
         );
+        for column in [6, 7] {
+            for line_count in [-1, 1] {
+                assert!(
+                    grid.scroll_window_lines(WindowLineScrollRequest {
+                        line_count,
+                        view_origin: GridPosition::new(1, column),
+                        ..request
+                    })
+                    .is_none()
+                );
+            }
+        }
     }
 
     #[test]

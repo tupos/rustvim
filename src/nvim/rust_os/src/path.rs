@@ -5,7 +5,7 @@
 ///
 /// A trailing separator produces an empty tail; "." and ".." remain literal.
 /// Windows accepts both slash forms and skips an initial drive prefix and
-/// leading separators, including colons, matching native path_tail().
+/// leading slash separators, matching native path_tail().
 pub fn tail(path: &str) -> &str {
     #[cfg(windows)]
     let path = {
@@ -15,7 +15,7 @@ pub fn tail(path: &str) -> &str {
         } else {
             path
         };
-        path.trim_start_matches(['/', '\\', ':'])
+        path.trim_start_matches(['/', '\\'])
     };
 
     path.rsplit(std::path::is_separator)
@@ -66,9 +66,9 @@ mod tests {
             (r"dir\", ""),
             ("C:server", "server"),
             ("C:", ""),
-            (":server", "server"),
-            ("/:server", "server"),
-            ("C::server", "server"),
+            (":server", ":server"),
+            ("/:server", ":server"),
+            ("C::server", ":server"),
             ("dir/server:stream", "server:stream"),
             (r"\\.\pipe\nvim", "nvim"),
         ] {

@@ -723,6 +723,8 @@ struct LayerState {
     disabled: bool,
     accepts_mouse_input: bool,
     publication_pending: bool,
+    /// Layer ordering changed and its pixels must be recomposed on placement.
+    recompose_pending: bool,
 }
 
 impl LayerState {
@@ -742,6 +744,7 @@ impl LayerState {
             disabled: false,
             accepts_mouse_input,
             publication_pending: true,
+            recompose_pending: false,
         }
     }
 
@@ -956,11 +959,20 @@ impl Compositor {
                 return Err(CompositorError::DefaultLayerMutation);
             }
             let plan = {
+                let recompose_pending = layers
+                    .get(target.layer_index)
+                    .ok_or(CompositorError::InvalidLayerState)?
+                    .recompose_pending;
                 let resolved_layers = layers.layer_stack(grids)?;
                 let layer = resolved_layers
                     .layer(target.layer_index)
                     .ok_or(CompositorError::InvalidLayerState)?;
-                layer.try_plan_placement(request.placement, request.valid, should_draw)?
+                let mut plan =
+                    layer.try_plan_placement(request.placement, request.valid, should_draw)?;
+                if recompose_pending && should_draw {
+                    plan.redraw_area = Some(request.placement.allocated_area(layer.grid)?);
+                }
+                plan
             };
 
             let layer = layers
@@ -973,6 +985,7 @@ impl Compositor {
             layer.z_index = request.z_index;
             layer.blending = request.blending;
             layer.publication_pending = true;
+            layer.recompose_pending = false;
             let deferred_completion = if should_draw {
                 layer.disabled = true;
                 Some(CompositorGridPlacementCompletion {
@@ -1076,6 +1089,7 @@ impl Compositor {
             layer.z_index = z_index;
             layer.blending = blending;
             layer.accepts_mouse_input = accepts_mouse_input;
+            layer.recompose_pending |= z_index != previous_z_index;
         }
         let adjustment = if z_index > previous_z_index {
             CompositorLayerAdjustment::Raise
@@ -3871,6 +3885,45 @@ mod tests {
                 .grid_publication_pending(equal_grid_id)
                 .unwrap()
         );
+    }
+
+    /// Repainting survives repeated policy updates without requiring movement.
+    #[test]
+    fn z_index_change_recomposes_a_stationary_grid() {
+        let default_grid = grid_with_size(4, 4);
+        let moving_grid = grid_with_size(2, 2);
+        let grid_id = moving_grid.id();
+        let (grid_store, _registry) =
+            register_test_compositor_layers(vec![default_grid, moving_grid]);
+        let _compositor = attach_test_compositor();
+        let mut compositor = lock_compositor();
+        let placement = CompositorGridPlacement::try_new(0, 0, 2, 2).unwrap();
+
+        for z_index in [30, 30, 10] {
+            compositor
+                .update_layer_policy(grid_id, z_index, false, true)
+                .unwrap();
+        }
+        let target = compositor.grid_placement_target(grid_id, true).unwrap();
+        let request = CompositorGridPlacementRequest::new(placement, 10, false, true, false, true);
+        let preparation = compositor
+            .prepare_grid_placement(&grid_store, target, None, request)
+            .unwrap();
+        assert!(!preparation.plan.moved);
+        assert_eq!(
+            preparation.plan.redraw_area,
+            Some(CompositorRecomposeArea {
+                rows: 0..2,
+                columns: 0..2,
+            })
+        );
+        compositor
+            .finish_grid_placement(preparation.deferred_completion.unwrap())
+            .unwrap();
+        let preparation = compositor
+            .prepare_grid_placement(&grid_store, target, None, request)
+            .unwrap();
+        assert_eq!(preparation.plan.redraw_area, None);
     }
 
     #[test]
