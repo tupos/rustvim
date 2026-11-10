@@ -1,5 +1,5 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
 while (($# > 0)); do
   case $1 in
@@ -16,7 +16,7 @@ if [[ $OS == Linux ]]; then
   sudo apt-get update
   sudo apt-get install -y build-essential cmake curl gettext ninja-build
 
-  if [[ $CC == clang ]]; then
+  if [[ ${CC:-} == clang ]]; then
     DEFAULT_CLANG_VERSION=$(echo |  clang -dM -E - | grep __clang_major | awk '{print $3}')
     CLANG_VERSION=21
     if ((DEFAULT_CLANG_VERSION >= CLANG_VERSION)); then
@@ -35,7 +35,7 @@ if [[ $OS == Linux ]]; then
     sudo update-alternatives --set clang-tidy /usr/bin/clang-tidy-$CLANG_VERSION
   fi
 
-  if [[ -n $TEST ]]; then
+  if [[ -n ${TEST:-} ]]; then
     sudo apt-get install -y locales-all cpanminus attr libattr1-dev fish gdb inotify-tools xdg-utils
 
     # Use default CC to avoid compilation problems when installing Python modules
@@ -49,7 +49,7 @@ if [[ $OS == Linux ]]; then
     fi
   fi
 elif [[ $OS == Darwin ]]; then
-  if [[ -n $TEST ]]; then
+  if [[ -n ${TEST:-} ]]; then
     brew untap aws/tap
     brew install cpanminus fish fswatch
 
@@ -59,4 +59,11 @@ elif [[ $OS == Darwin ]]; then
     # Use default CC to avoid compilation problems when installing Python modules
     CC=cc python3 -m pip -q install --user --upgrade --break-system-packages pynvim
   fi
+elif [[ $OS == MINGW* || $OS == MSYS* ]]; then
+  choco install make --yes --no-progress
 fi
+
+# Install the project compiler, components, and nightly formatter.
+make rust-toolchains
+rustc --version
+cargo --version

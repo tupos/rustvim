@@ -152,8 +152,15 @@ functionaltest-lua: | nvim
 FORMAT=formatc formatlua formatquery format
 RUSTFMT_TOOLCHAIN ?= nightly-2026-08-18
 
+# Install the compiler and components selected by rust-toolchain.toml.
+rust-toolchain:
+	rustup toolchain install --no-self-update
+
 rustfmt-toolchain:
 	rustup toolchain install $(RUSTFMT_TOOLCHAIN) --profile minimal --component rustfmt
+
+# Install the compiler toolchain and the nightly formatter.
+rust-toolchains: rust-toolchain rustfmt-toolchain
 
 formatrust:
 	rustup run $(RUSTFMT_TOOLCHAIN) cargo fmt --all
@@ -206,4 +213,5 @@ appimage:
 appimage-%:
 	bash scripts/genappimage.sh $*
 
+.PHONY: rust-toolchain rust-toolchains
 .PHONY: test clean distclean nvim libnvim rvim_libs cmake deps install appimage checkprefix benchmark rustfmt-toolchain formatrust $(FORMAT) $(LINT) $(TEST)
