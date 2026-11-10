@@ -11,14 +11,14 @@ module.exports = async ({ github, context }) => {
   const owner = context.repo.owner;
   const repo = context.repo.repo;
 
-  const issues = await github.rest.issues.listForRepo({
+  const issues = await github.paginate(github.rest.issues.listForRepo, {
     owner: owner,
     repo: repo,
+    state: "open",
     labels: "needs:response",
   });
-  const numbers = issues.data.map((e) => e.number);
 
-  for (const number of numbers) {
+  for (const { number } of issues) {
     const events = await github.paginate(
       github.rest.issues.listEventsForTimeline,
       {
@@ -37,7 +37,7 @@ module.exports = async ({ github, context }) => {
     const diffDays = diff / (1000 * 60 * 60 * 24);
 
     if (diffDays > numberOfDaysLimit) {
-      github.rest.issues.update({
+      await github.rest.issues.update({
         owner: owner,
         repo: repo,
         issue_number: number,
@@ -45,7 +45,7 @@ module.exports = async ({ github, context }) => {
         state: "closed",
       });
 
-      github.rest.issues.createComment({
+      await github.rest.issues.createComment({
         owner: owner,
         repo: repo,
         issue_number: number,
