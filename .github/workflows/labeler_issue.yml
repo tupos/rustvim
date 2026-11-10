@@ -22,6 +22,7 @@ jobs:
               'image',
               'lsp',
               'multicursor',
+              'rust',
               'treesitter',
               'ui',
               'ui2'
@@ -35,7 +36,7 @@ jobs:
             }
 
             // Special cases.
-            if (titleSplit.includes('vim.pack')) {
+            if (/\bvim\.pack\b/i.test(title)) {
               labels.add('packages')
             }
             if (titleSplit.includes('cmdatom')) {
