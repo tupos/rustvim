@@ -208,9 +208,12 @@ jobs:
           cmake --build build
 
       - if: ${{ matrix.test == 'unittest' }}
-        name: unittest
+        name: Unit tests (C and Rust)
         timeout-minutes: 20
-        run: cmake --build build --target unittest
+        env:
+          # Rust tests share the editor's global grid state.
+          RUST_TEST_THREADS: '1'
+        run: cmake --build build --target unittest rusttest -- -k 0
 
       - if: ${{ matrix.test == 'functionaltest' }}
         name: functionaltest
