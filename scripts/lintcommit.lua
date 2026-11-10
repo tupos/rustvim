@@ -62,6 +62,11 @@ local function validate_commit(commit_message)
     return [[Commit message is too long, a maximum of 80 characters is allowed.]]
   end
 
+  -- RustVim subjects use "[rust] " instead of a conventional-commit type.
+  if commit_message:match('^%[rust%] %S') then
+    return nil
+  end
+
   local before_colon = commit_split[1]
 
   local after_idx = 2
@@ -162,6 +167,9 @@ function M.main(opt)
   -- TODO(justinmk): check $GITHUB_REF
   local ancestor = run({ 'git', 'merge-base', 'origin/master', branch })
   if not ancestor then
+    ancestor = run({ 'git', 'merge-base', 'master', branch })
+  end
+  if not ancestor then
     ancestor = run({ 'git', 'merge-base', 'upstream/master', branch })
   end
   local commits_str = run({ 'git', 'rev-list', ancestor .. '..' .. branch }, true)
@@ -216,6 +224,14 @@ end
 function M._test()
   -- message:expected_result
   local test_cases = {
+    ['[rust] Enable issue labeling'] = true,
+    ['[rust] Fix foo: preserve bar'] = true,
+    ['[rust] ' .. string.rep('x', 73)] = true,
+    ['[rust]'] = false,
+    ['[rust] '] = false,
+    ['[rust]  description'] = false,
+    ['[rust]\tdescription'] = false,
+    ['[rust] ' .. string.rep('x', 74)] = false,
     ['ci: normal message'] = true,
     ['build: normal message'] = true,
     ['build: version bump'] = true,
