@@ -23,10 +23,14 @@ jobs:
 
       - name: Build
         run: |
+          set -eu
           cmake -S cmake.deps --preset ci
-          cmake --build .deps
+          cmake --build .deps -j"$(nproc)"
           cmake --preset ci
-          cmake --build build
+          cmake --build build -j"$(nproc)"
+
+      - name: Test commit-message rules
+        run: build/bin/nvim --clean -l scripts/lintcommit.lua _test
 
       - name: lintcommit
         run: cmake --build build --target lintcommit
