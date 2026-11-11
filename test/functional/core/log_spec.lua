@@ -146,13 +146,22 @@ describe('log', function()
 
   it('writes the complete native header and printf arguments through Rust', function()
     setup_native()
-    eq(true, exec_lua(function()
-      local ffi = require('ffi')
-      return ffi.C.logmsg(
-        3, 'ctx: ', 'lua_log_test', 123, true,
-        'value=%d text=%s', ffi.new('int', 42), 'héllo'
-      )
-    end))
+    eq(
+      true,
+      exec_lua(function()
+        local ffi = require('ffi')
+        return ffi.C.logmsg(
+          3,
+          'ctx: ',
+          'lua_log_test',
+          123,
+          true,
+          'value=%d text=%s',
+          ffi.new('int', 42),
+          'héllo'
+        )
+      end)
+    )
     local timestamp = '%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d:%d%d%.%d%d%d'
     matches(
       '^WRN ' .. timestamp .. ' [^\n]+ ctx: lua_log_test:123: value=42 text=héllo\n$',
@@ -162,18 +171,21 @@ describe('log', function()
 
   it('uses the current Rust-owned severity threshold', function()
     setup_native()
-    eq({ false, false, true, true }, exec_lua(function()
-      local ffi = require('ffi')
-      local saved = ffi.C.log_set_level(3)
-      local emitted = {
-        ffi.C.logmsg(1, nil, 'level_test', 1, true, 'skip-debug'),
-        ffi.C.logmsg(2, nil, 'level_test', 2, true, 'skip-info'),
-        ffi.C.logmsg(3, nil, 'level_test', 3, true, 'keep-warning'),
-        ffi.C.logmsg(4, nil, 'level_test', 4, true, 'keep-error'),
-      }
-      ffi.C.log_set_level(saved)
-      return emitted
-    end))
+    eq(
+      { false, false, true, true },
+      exec_lua(function()
+        local ffi = require('ffi')
+        local saved = ffi.C.log_set_level(3)
+        local emitted = {
+          ffi.C.logmsg(1, nil, 'level_test', 1, true, 'skip-debug'),
+          ffi.C.logmsg(2, nil, 'level_test', 2, true, 'skip-info'),
+          ffi.C.logmsg(3, nil, 'level_test', 3, true, 'keep-warning'),
+          ffi.C.logmsg(4, nil, 'level_test', 4, true, 'keep-error'),
+        }
+        ffi.C.log_set_level(saved)
+        return emitted
+      end)
+    )
     assert_nolog('skip%-debug', testlog)
     assert_nolog('skip%-info', testlog)
     assert_log('WRN .-level_test:3: keep%-warning', testlog)
@@ -182,49 +194,66 @@ describe('log', function()
 
   it('restores severity after nested Lua scopes and callback errors', function()
     setup_native()
-    eq({ false, { true, false, true, false, true }, false }, exec_lua(function()
-      local ffi = require('ffi')
-      local saved = ffi.C.log_set_level(3)
-      ---Returns whether INFO passes the current scoped threshold.
-      local function info()
-        return ffi.C.logmsg(2, nil, 'scope_test', 1, true, 'scoped-info')
-      end
+    eq(
+      { false, { true, false, true, false, true }, false },
+      exec_lua(function()
+        local ffi = require('ffi')
+        local saved = ffi.C.log_set_level(3)
+        ---Returns whether INFO passes the current scoped threshold.
+        local function info()
+          return ffi.C.logmsg(2, nil, 'scope_test', 1, true, 'scoped-info')
+        end
 
-      local before = info()
-      local scoped = vim._with({ log_level = 2 }, function()
-        local outer = info()
-        local inner = vim._with({ log_level = 4 }, info)
-        local restored = info()
-        local ok = pcall(vim._with, { log_level = 5 }, function()
-          error('expected callback failure')
+        local before = info()
+        local scoped = vim._with({ log_level = 2 }, function()
+          local outer = info()
+          local inner = vim._with({ log_level = 4 }, info)
+          local restored = info()
+          local ok = pcall(vim._with, { log_level = 5 }, function()
+            error('expected callback failure')
+          end)
+          return { outer, inner, restored, ok, info() }
         end)
-        return { outer, inner, restored, ok, info() }
+        local after = info()
+        ffi.C.log_set_level(saved)
+        return { before, scoped, after }
       end)
-      local after = info()
-      ffi.C.log_set_level(saved)
-      return { before, scoped, after }
-    end))
+    )
   end)
 
   it('preserves missing source metadata and the newline flag', function()
     setup_native()
-    eq(true, exec_lua(function()
-      return require('ffi').C.logmsg(3, nil, nil, -1, false, 'no-newline')
-    end))
+    eq(
+      true,
+      exec_lua(function()
+        return require('ffi').C.logmsg(3, nil, nil, -1, false, 'no-newline')
+      end)
+    )
     matches(' %?:no%-newline$', read_file(testlog))
     eq(false, read_file(testlog):sub(-1) == '\n')
   end)
 
   it('retries long printf messages and accepts a following message', function()
     setup_native()
-    eq({ true, true }, exec_lua(function()
-      local ffi = require('ffi')
-      return {
-        ffi.C.logmsg(3, nil, 'long_test', 1, true, '%s %d',
-                     string.rep('é', 4096), ffi.new('int', 42)),
-        ffi.C.logmsg(3, nil, 'long_test', 2, true, 'after-long'),
-      }
-    end))
+    eq(
+      { true, true },
+      exec_lua(function()
+        local ffi = require('ffi')
+        return {
+          ffi.C.logmsg(
+            3,
+            nil,
+            'long_test',
+            1,
+            true,
+            '%s %d',
+            string.rep('é', 4096),
+            ffi.new('int', 42)
+          ),
+          ffi.C.logmsg(3, nil, 'long_test', 2, true, 'after-long'),
+        }
+      end)
+    )
     local contents = read_file(testlog)
     eq(true, contents:find(string.rep('é', 4096) .. ' 42\n', 1, true) ~= nil)
     matches('long_test:2: after%-long\n$', contents)
@@ -232,12 +261,22 @@ describe('log', function()
 
   it('replaces invalid native UTF-8 in context, source, and payload', function()
     setup_native()
-    eq(true, exec_lua(function()
-      local ffi = require('ffi')
-      local invalid = string.char(255)
-      return ffi.C.logmsg(3, 'ctx' .. invalid .. ': ', 'fn' .. invalid, 9, true,
-                          '%s', 'a' .. invalid .. 'b')
-    end))
+    eq(
+      true,
+      exec_lua(function()
+        local ffi = require('ffi')
+        local invalid = string.char(255)
+        return ffi.C.logmsg(
+          3,
+          'ctx' .. invalid .. ': ',
+          'fn' .. invalid,
+          9,
+          true,
+          '%s',
+          'a' .. invalid .. 'b'
+        )
+      end)
+    )
     local contents = read_file(testlog)
     matches(' ctx�: fn�:9: a�b\n$', contents)
     eq(nil, contents:find(string.char(255), 1, true))
@@ -245,13 +284,19 @@ describe('log', function()
 
   it('reopens the destination after log rotation', function()
     setup_native()
-    eq(true, exec_lua(function()
-      return require('ffi').C.logmsg(3, nil, 'rotation_test', 1, true, 'before-rotate')
-    end))
+    eq(
+      true,
+      exec_lua(function()
+        return require('ffi').C.logmsg(3, nil, 'rotation_test', 1, true, 'before-rotate')
+      end)
+    )
     assert(os.rename(testlog, testlog .. '.old'))
-    eq(true, exec_lua(function()
-      return require('ffi').C.logmsg(3, nil, 'rotation_test', 2, true, 'after-rotate')
-    end))
+    eq(
+      true,
+      exec_lua(function()
+        return require('ffi').C.logmsg(3, nil, 'rotation_test', 2, true, 'after-rotate')
+      end)
+    )
     matches('rotation_test:1: before%-rotate', read_file(testlog .. '.old'))
     matches('rotation_test:2: after%-rotate', read_file(testlog))
     assert_nolog('before%-rotate', testlog)
@@ -259,13 +304,15 @@ describe('log', function()
 
   it('captures a C caller with external symbolizers unavailable', function()
     setup_native({ PATH = '', RUST_BACKTRACE = '0', RUST_LIB_BACKTRACE = '0' })
-    if not exec_lua(function()
-      local ffi = require('ffi')
-      local ok = pcall(function()
-        return ffi.C.log_callstack
+    if
+      not exec_lua(function()
+        local ffi = require('ffi')
+        local ok = pcall(function()
+          return ffi.C.log_callstack
+        end)
+        return ok
       end)
-      return ok
-    end) then
+    then
       pending('N/A: native stack logging is unavailable')
     end
     exec_lua(function()
