@@ -105,13 +105,12 @@ describe('ffi.cdef', function()
 
         ffi.cdef [[
         typedef unsigned int schar_T;
-        schar_T utfc_ptr2schar(const char *p, int *firstc);
+        schar_T schar_from_str(const char *str);
         int schar_cells(schar_T sc);
       ]]
 
         local function cells(text)
-          local firstc = ffi.new('int[1]')
-          local sc = ffi.C.utfc_ptr2schar(text, firstc)
+          local sc = ffi.C.schar_from_str(text)
           return ffi.C.schar_cells(sc)
         end
 
