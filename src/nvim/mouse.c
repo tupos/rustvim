@@ -1501,7 +1501,8 @@ retnomove:
         col -= curwin->w_wincol;
       }
     }
-    if (grid != DEFAULT_GRID_HANDLE) {
+    // Headless windows can receive mouse input before their grid view is registered.
+    if (grid != DEFAULT_GRID_HANDLE && grid_view_has_target(curwin->w_grid_handle)) {
       bool translated = grid_view_translate_to_local(curwin->w_grid_handle, &row, &col);
       assert(translated);
     }
@@ -1869,9 +1870,9 @@ static win_T *mouse_find_grid_win(int *gridp, int *rowp, int *colp)
     if (!found && ui_has(kUIMultigrid)) {
       FOR_ALL_WINDOWS_IN_TAB(wp, curtab) {
         if (wp->w_config.mouse
-            && ui_comp_grid_hit_at_coord(
-              wp->w_grid_handle, wp->w_winrow, wp->w_wincol, *rowp, *colp,
-              &hit)) {
+            && ui_comp_grid_hit_at_coord(wp->w_grid_handle, wp->w_winrow, wp->w_wincol, *rowp,
+                                         *colp,
+                                         &hit)) {
           found = true;
           break;
         }
