@@ -76,12 +76,8 @@ jobs:
           wget --directory-prefix="$BIN_DIR" https://github.com/ribru17/ts_query_ls/releases/latest/download/ts_query_ls-aarch64-unknown-linux-gnu.tar.gz
           (cd "$BIN_DIR"; tar -xzvf ts_query_ls-aarch64-unknown-linux-gnu.tar.gz)
 
-      - name: Build third-party deps
-        run: |
-          cmake -S cmake.deps -B .deps -G Ninja
-          cmake --build .deps
-
-      - run: cmake -B build -G Ninja -D CI_LINT=ON
+      - name: Configure lint build
+        run: make -j"$(nproc)" build/.ran-cmake CMAKE_EXTRA_FLAGS=-DCI_LINT=ON
 
       - if: "!cancelled()"
         name: Determine if run should be aborted
@@ -105,6 +101,10 @@ jobs:
       - if: success() || failure() && steps.abort_job.outputs.status == 'success'
         name: lintquery
         run: cmake --build build --target lintquery
+
+      - if: success() || failure() && steps.abort_job.outputs.status == 'success'
+        name: Clippy
+        run: make lintrust
 
   clang-analyzer:
     runs-on: ubuntu-24.04-arm

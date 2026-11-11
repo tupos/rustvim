@@ -167,6 +167,10 @@ formatrust:
 
 format: formatrust
 
+lintrust: | build/.ran-cmake
+	cargo clippy --workspace --all-targets --locked --keep-going \
+		--target-dir build/rust_target -- -D warnings
+
 LINT=lintlua lintsh lintc clang-analyzer lintcommit lintdoc lintdocurls lint emmylua-check lintquery linterrcodes
 TEST=functionaltest unittest rusttest
 generated-sources benchmark $(FORMAT) $(LINT) $(TEST) doc: | build/.ran-cmake
@@ -213,5 +217,5 @@ appimage:
 appimage-%:
 	bash scripts/genappimage.sh $*
 
-.PHONY: rust-toolchain rust-toolchains
+.PHONY: rust-toolchain rust-toolchains lintrust
 .PHONY: test clean distclean nvim libnvim rvim_libs cmake deps install appimage checkprefix benchmark rustfmt-toolchain formatrust $(FORMAT) $(LINT) $(TEST)
