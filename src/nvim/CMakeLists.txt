@@ -841,6 +841,11 @@ set(RUST_LIB_NAME
   "${CMAKE_STATIC_LIBRARY_PREFIX}rustvim_lib${CMAKE_STATIC_LIBRARY_SUFFIX}")
 add_library(rustvim_lib STATIC IMPORTED GLOBAL)
 
+if(WIN32)
+  # Rust's standard library uses NT I/O APIs on Windows.
+  target_link_libraries(rustvim_lib INTERFACE ntdll)
+endif()
+
 if(isMultiConfig)
   set(RUST_DEBUG_LIB_PATH "${RUST_TARGET_OUTPUT_DIR}/debug/${RUST_LIB_NAME}")
   set(RUST_RELEASE_LIB_PATH
