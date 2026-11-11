@@ -79,6 +79,7 @@ fn cmake_cache_enabled(contents: &str, key: &str) -> bool {
     )
 }
 
+/// Derives the linker library name from a CMake-selected library path.
 fn library_link_name(path: &Path) -> Option<&str> {
     let file_name = path.file_name()?.to_str()?;
     let file_name = file_name.strip_prefix("lib").unwrap_or(file_name);
@@ -86,6 +87,7 @@ fn library_link_name(path: &Path) -> Option<&str> {
     [".a", ".so", ".dylib", ".tbd", ".lib"]
         .into_iter()
         .find_map(|suffix| file_name.strip_suffix(suffix))
+        .or_else(|| file_name.split_once(".so.").map(|(name, _)| name))
 }
 
 fn link_cmake_library(cache: &str, key: &str) {
@@ -189,5 +191,29 @@ fn main() {
         if cmake_cache_enabled(&cache, cache_key) {
             println!("cargo::rustc-link-lib={library}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::library_link_name;
+
+    /// Checks library filenames, including OpenBSD and Linux version suffixes.
+    #[test]
+    fn library_link_names() {
+        for (path, expected) in [
+            ("/usr/local/lib/libintl.so.8.2", "intl"),
+            ("/usr/lib/libuv.so.1", "uv"),
+            ("/usr/lib/libluv.a", "luv"),
+            ("/usr/lib/libuv.so", "uv"),
+            ("/usr/lib/libiconv.dylib", "iconv"),
+            ("libSystem.tbd", "System"),
+            ("nvim.lib", "nvim"),
+        ] {
+            assert_eq!(library_link_name(Path::new(path)), Some(expected), "{path}");
+        }
+        assert_eq!(library_link_name(Path::new("library.txt")), None);
     }
 }
