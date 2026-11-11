@@ -189,9 +189,8 @@ int win_border_width(win_T *wp)
 }
 
 /// Draws a grid border using floating-window configuration.
-void win_grid_draw_border(handle_T grid_handle, const WinConfig *config,
-                          const int *adjustments, int winblend,
-                          const int *highlight_attributes, int normal_highlight)
+void win_grid_draw_border(handle_T grid_handle, const WinConfig *config, const int *adjustments,
+                          int winblend, const int *highlight_attributes, int normal_highlight)
 {
   const int *active_hl_attr =
     highlight_attributes == NULL ? hl_attr_active : highlight_attributes;

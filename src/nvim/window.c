@@ -924,30 +924,29 @@ void ui_ext_win_position(win_T *wp, bool validate)
 
     // TODO(bfredl): ideally, compositor should work like any multigrid UI
     // and use standard win_pos events.
-    WindowFloatSurfaceUpdate update = grid_update_window_float_surface(
-      (WindowFloatSurfaceRequest){
-        .grid_handle = wp->w_grid_handle,
-        .window_handle = wp->handle,
-        .anchor_row = row,
-        .anchor_column = col,
-        .rows = wp->w_height_outer,
-        .columns = wp->w_width_outer,
-        .screen_rows = Rows,
-        .screen_columns = Columns,
-        .reserved_rows = c.zindex < kZIndexMessages ? (int)p_ch : 0,
-        .z_index = c.zindex,
-        .blending = wp->w_p_winbl > 0 || c.shadow,
-        .valid = valid,
-        .accepts_mouse_input = c.mouse,
-        .current_window_grid_handle = curwin ? curwin->w_grid_handle : 0,
-        .anchor = c.anchor,
-        .anchor_window_grid_handle = anchor_window_grid_handle,
-        .anchor_window_row = anchor_window_row,
-        .anchor_window_column = anchor_window_col,
-        .fixed = c.fixed,
-        .hidden = c.hide,
-        .multigrid_enabled = ui_has(kUIMultigrid),
-      });
+    WindowFloatSurfaceUpdate update = grid_update_window_float_surface((WindowFloatSurfaceRequest){
+      .grid_handle = wp->w_grid_handle,
+      .window_handle = wp->handle,
+      .anchor_row = row,
+      .anchor_column = col,
+      .rows = wp->w_height_outer,
+      .columns = wp->w_width_outer,
+      .screen_rows = Rows,
+      .screen_columns = Columns,
+      .reserved_rows = c.zindex < kZIndexMessages ? (int)p_ch : 0,
+      .z_index = c.zindex,
+      .blending = wp->w_p_winbl > 0 || c.shadow,
+      .valid = valid,
+      .accepts_mouse_input = c.mouse,
+      .current_window_grid_handle = curwin ? curwin->w_grid_handle : 0,
+      .anchor = c.anchor,
+      .anchor_window_grid_handle = anchor_window_grid_handle,
+      .anchor_window_row = anchor_window_row,
+      .anchor_window_column = anchor_window_col,
+      .fixed = c.fixed,
+      .hidden = c.hide,
+      .multigrid_enabled = ui_has(kUIMultigrid),
+    });
     wp->w_winrow = update.screen_row;
     wp->w_wincol = update.screen_column;
     if (update.republish_cursor) {
@@ -5671,8 +5670,7 @@ void win_free_grid(win_T *wp, bool reinit)
 {
   // If a float is turned into a split, a new grid identity is returned for
   // the reused window structure.
-  wp->w_grid_handle = grid_destroy_window_surface(
-    wp->w_grid_handle, ui_has(kUIMultigrid), reinit);
+  wp->w_grid_handle = grid_destroy_window_surface(wp->w_grid_handle, ui_has(kUIMultigrid), reinit);
 }
 
 /// (Re)allocates a window grid if its required storage changed.
@@ -5701,17 +5699,16 @@ bool win_grid_alloc(win_T *wp)
     col_offset += wp->w_wincol;
   }
 
-  WindowSurfaceUpdate update = grid_configure_window_surface(
-    (WindowSurfaceRequest){
-      .grid_handle = wp->w_grid_handle,
-      .rows = total_rows,
-      .columns = total_cols,
-      .use_dedicated_grid = use_dedicated_grid,
-      .row_offset = row_offset,
-      .column_offset = col_offset,
-      .force_dimensions_publication = resizing_screen,
-      .bordered_float = wp->w_floating && wp->w_config.border,
-    });
+  WindowSurfaceUpdate update = grid_configure_window_surface((WindowSurfaceRequest){
+    .grid_handle = wp->w_grid_handle,
+    .rows = total_rows,
+    .columns = total_cols,
+    .use_dedicated_grid = use_dedicated_grid,
+    .row_offset = row_offset,
+    .column_offset = col_offset,
+    .force_dimensions_publication = resizing_screen,
+    .bordered_float = wp->w_floating && wp->w_config.border,
+  });
   wp->w_grid_handle = update.grid_handle;
   if (wp->w_grid_handle == 0) {
     return update.row_offset_changed;
@@ -7964,9 +7961,9 @@ static void ui_ext_win_position_by_grid(handle_T grid_handle, bool validate)
 void win_ui_flush(bool validate)
 {
   FOR_ALL_TAB_WINDOWS(tp, wp) {
-    if (grid_flush_window_surface_position(
-          wp->w_grid_handle, wp->w_pos_changed, tp == curtab, validate,
-          ui_ext_win_position_by_grid)) {
+    if (grid_flush_window_surface_position(wp->w_grid_handle, wp->w_pos_changed, tp == curtab,
+                                           validate,
+                                           ui_ext_win_position_by_grid)) {
       wp->w_pos_changed = false;
     }
     if (tp == curtab) {
