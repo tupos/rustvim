@@ -28,18 +28,25 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Build
+      - name: Build and test
         uses: vmactions/freebsd-vm@c46abacb49f09938ca4e1702d15d836285d694cc # v1.5.9
         with:
           usesh: true
           cache-after-prepare: true
           prepare: |
-            pkg install -y cmake gmake ninja unzip wget gettext python git
+            set -eu
+            pkg install -y cmake gmake ninja unzip wget gettext python git rustup-init
+            rustup-init -y --no-modify-path --default-toolchain none
           run: |
-            set -e
+            set -eu
+            . "$HOME/.cargo/env"
+            gmake rust-toolchain
+            rustc --version
+            cargo --version
             gmake deps
             gmake CMAKE_EXTRA_FLAGS="-DCI_BUILD=ON" nvim
             ./build/bin/nvim --version
+            RUST_TEST_THREADS=1 gmake rusttest
 
   openbsd:
     name: OpenBSD
@@ -50,15 +57,19 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Build
+      - name: Build and test
         uses: vmactions/openbsd-vm@5f7b2c933b8846a138361d6843c52af4bef5d945 # v1.4.8
         with:
           usesh: true
           cache-after-prepare: true
           prepare: |
-            pkg_add -I cmake gmake ninja gettext-tools gettext-runtime git
+            set -eu
+            pkg_add -I cmake gmake ninja gettext-tools gettext-runtime git rust
           run: |
-            set -e
+            set -eu
+            rustc --version
+            cargo --version
             gmake deps
             gmake CMAKE_EXTRA_FLAGS="-DCI_BUILD=ON" nvim
             ./build/bin/nvim --version
+            RUST_TEST_THREADS=1 gmake rusttest
