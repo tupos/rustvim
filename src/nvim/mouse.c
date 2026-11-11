@@ -1505,6 +1505,7 @@ retnomove:
     if (grid != DEFAULT_GRID_HANDLE && grid_view_has_target(curwin->w_grid_handle)) {
       bool translated = grid_view_translate_to_local(curwin->w_grid_handle, &row, &col);
       assert(translated);
+      (void)translated;
     }
 
     // When clicking beyond the end of the window, scroll the screen.
@@ -1860,6 +1861,7 @@ static win_T *mouse_find_grid_win(int *gridp, int *rowp, int *colp)
         && !(wp->w_floating && !wp->w_config.mouse)) {
       bool translated = grid_view_translate_to_local(wp->w_grid_handle, rowp, colp);
       assert(translated);
+      (void)translated;
       *rowp = MIN(*rowp, wp->w_view_height - 1);
       *colp = MIN(*colp, wp->w_view_width - 1);
       return wp;
@@ -1895,6 +1897,7 @@ static win_T *mouse_find_grid_win(int *gridp, int *rowp, int *colp)
         *colp = hit.column;
         bool translated = grid_view_translate_to_local(wp->w_grid_handle, rowp, colp);
         assert(translated);
+        (void)translated;
         return wp;
       }
     }
