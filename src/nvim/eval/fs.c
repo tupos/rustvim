@@ -213,8 +213,8 @@ repeat:
 
   FileInfo file_info;
   os_fileinfo2(*fnamep, &file_info);
+  s = *fnamep + file_info.rest_off;
   if (src[*usedlen] == ':' && src[*usedlen + 1] == 'h') {
-    s = *fnamep + file_info.rest_off;
     *fnamep = *fnamep + file_info.prefix_off;
   }
 

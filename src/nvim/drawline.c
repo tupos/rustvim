@@ -1348,7 +1348,7 @@ int win_line(win_T *wp, linenr_T lnum, int startrow, int endrow, int col_rows, b
   // Not drawing text when line is concealed or drawing filler lines beyond last line.
   const bool draw_text = !concealed && (lnum != buf->b_ml.ml_line_count + 1);
 
-  int decor_provider_end_col;
+  int decor_provider_end_col = MAXCOL;
   bool check_decor_providers = false;
 
   if (col_rows == 0 && draw_text) {

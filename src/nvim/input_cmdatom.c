@@ -1038,12 +1038,8 @@ CmdAtom atom_visual_span(void)
   }
 
   // Prefix with "gv".
-  StringBuilder keys = KV_INITIAL_VALUE;
-  kv_concat(keys, "gv");
-  kv_concat_len(keys, tail.data, tail.size);
-  kv_push(keys, NUL);
+  span.keys = concat_str("gv", tail.data);
   api_free_string(tail);
-  span.keys = keys.items;
   return span;
 }
 
