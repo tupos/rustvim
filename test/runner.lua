@@ -42,8 +42,9 @@ if _G.arg[1] and vim.startswith(_G.arg[1], '-X') then
   if vim.fn.has('win32') == 0 then
     -- Keep temporary and socket paths short, even with a long checkout path.
     run_dir = ('/tmp/nvim_%d'):format(vim.uv.os_getpid())
-    vim.env.XDG_RUNTIME_DIR = run_dir
     vim.fn.mkdir(run_dir, 'p')
+    run_dir = assert(uv.fs_realpath(run_dir))
+    vim.env.XDG_RUNTIME_DIR = run_dir
     vim.env.TMPDIR = run_dir .. '/Xtest_tmpdir'
     vim.fn.mkdir(vim.env.TMPDIR, 'p')
   end
