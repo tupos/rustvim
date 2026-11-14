@@ -46,6 +46,44 @@ describe('runtime:', function()
     exec('set rtp+=' .. plug_dir)
   end)
 
+  it('retains active runtime paths through nested cache rebuilds', function()
+    local outer = { plug_dir .. '/outer_a', plug_dir .. '/outer_b' }
+    local middle = { plug_dir .. '/middle_a', plug_dir .. '/middle_b' }
+    local inner = plug_dir .. '/inner'
+    for _, dir in ipairs({ outer[1], outer[2], middle[1], middle[2], inner }) do
+      mkdir_p(dir)
+    end
+    write_file(
+      outer[1] .. '/cache_outer.vim',
+      [[
+        call add(g:runtime_trace, 'outer_a')
+        let &runtimepath = g:middle_path
+        runtime! cache_middle.vim
+      ]]
+    )
+    write_file(outer[2] .. '/cache_outer.vim', "call add(g:runtime_trace, 'outer_b')")
+    write_file(
+      middle[1] .. '/cache_middle.vim',
+      [[
+        call add(g:runtime_trace, 'middle_a')
+        let &runtimepath = g:inner_path
+        runtime! cache_inner.vim
+      ]]
+    )
+    write_file(middle[2] .. '/cache_middle.vim', "call add(g:runtime_trace, 'middle_b')")
+    write_file(inner .. '/cache_inner.vim', "call add(g:runtime_trace, 'inner')")
+    api.nvim_set_var('runtime_trace', {})
+    api.nvim_set_var('middle_path', table.concat(middle, ','))
+    api.nvim_set_var('inner_path', inner)
+    api.nvim_set_option_value('runtimepath', table.concat(outer, ','), {})
+
+    exec('runtime! cache_outer.vim')
+    eq({ 'outer_a', 'middle_a', 'inner', 'middle_b', 'outer_b' }, eval('g:runtime_trace'))
+
+    exec('runtime! cache_inner.vim')
+    eq({ 'outer_a', 'middle_a', 'inner', 'middle_b', 'outer_b', 'inner' }, eval('g:runtime_trace'))
+  end)
+
   describe('colors', function()
     local colorscheme_folder = ('%s/colors'):format(plug_dir)
     before_each(function()

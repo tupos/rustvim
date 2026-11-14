@@ -1036,13 +1036,9 @@ String atom_visual_span(void)
   }
 
   // Prefix with "gv".
-  StringBuilder keys = KV_INITIAL_VALUE;
-  kv_concat(keys, "gv");
-  kv_concat_len(keys, tail.data, tail.size);
-  size_t len = kv_size(keys);
-  kv_push(keys, NUL);
+  String span = { .data = concat_str("gv", tail.data), .size = tail.size + 2 };
   api_free_string(tail);
-  return (String){ .data = keys.items, .size = len };
+  return span;
 }
 
 /// Cascades the Visual session's uncascaded subatoms as a span, if one of them edited the buffer.

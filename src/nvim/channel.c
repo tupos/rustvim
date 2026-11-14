@@ -30,6 +30,7 @@
 #include "nvim/globals.h"
 #include "nvim/log.h"
 #include "nvim/lua/executor.h"
+#include "nvim/macros_defs.h"
 #include "nvim/main.h"
 #include "nvim/mbyte.h"
 #include "nvim/memory.h"
@@ -1035,6 +1036,8 @@ Dict channel_info(uint64_t id, Arena *arena)
   case kChannelStreamSocket:
     stream_desc = "socket";
     break;
+  default:
+    UNREACHABLE;
   }
   PUT_C(info, "stream", CSTR_AS_OBJ(stream_desc));
   if (chan->addr) {

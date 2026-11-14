@@ -1,5 +1,6 @@
 #include <assert.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "nvim/vterm/parser.h"
@@ -149,6 +150,8 @@ size_t vterm_input_write(VTerm *vt, const char *bytes, size_t len)
   case SOS:
     string_start = bytes;
     break;
+  default:
+    abort();
   }
 
 #define ENTER_STATE(st)        do { vt->parser.state = st; string_start = NULL; } while (0)

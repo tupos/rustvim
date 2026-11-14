@@ -4999,7 +4999,8 @@ bool callback_call(Callback *const callback, const int argcount_in, typval_T *co
 
   case kCallbackNone:
     return false;
-    break;
+  default:
+    UNREACHABLE;
   }
 
   funcexe_T funcexe = FUNCEXE_INIT;

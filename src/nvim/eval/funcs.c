@@ -4965,6 +4965,7 @@ static void f_getreginfo(typval_T *argvars, typval_T *rettv, EvalFuncData fptr)
     buflen = vim_snprintf_safelen(buf, sizeof(buf), "%c%d", Ctrl_V, reglen + 1);
     break;
   case kMTUnknown:
+  default:
     abort();
   }
   tv_dict_add_str_len(dict, S_LEN("regtype"), buf, (int)buflen);
