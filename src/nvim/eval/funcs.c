@@ -5603,8 +5603,8 @@ static bool screenchar_get_cell(int row, int col, GridCell *cell)
 
   FOR_ALL_WINDOWS_IN_TAB(wp, curtab) {
     if (!wp->w_config.hide
-        && ui_comp_grid_get_cell_at(
-          wp->w_grid_handle, wp->w_winrow, wp->w_wincol, row, col, cell)) {
+        && ui_comp_grid_get_cell_at(wp->w_grid_handle, wp->w_winrow, wp->w_wincol, row, col,
+                                    cell)) {
       return true;
     }
   }

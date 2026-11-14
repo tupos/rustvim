@@ -1987,10 +1987,9 @@ bool valid_name(const char *val, const char *allowed)
 
 void check_blending(win_T *wp)
 {
-  ui_comp_update_grid_layer(
-    wp->w_grid_handle, wp->w_config.zindex,
-    wp->w_p_winbl > 0 || (wp->w_floating && wp->w_config.shadow),
-    wp->w_config.mouse);
+  ui_comp_update_grid_layer(wp->w_grid_handle, wp->w_config.zindex,
+                            wp->w_p_winbl > 0 || (wp->w_floating && wp->w_config.shadow),
+                            wp->w_config.mouse);
 }
 
 /// Handle setting `winhighlight' in window "wp"
