@@ -398,12 +398,15 @@ void fill_foldcolumn(win_T *wp, foldinfo_T foldinfo, linenr_T lnum, int attr, in
   // The remaining foldinfo fields are invalid when fi_level is zero.
   const bool has_fold = foldinfo.fi_level != 0;
   const int lowest_level = has_fold ? foldinfo.fi_low_level : 0;
-  const int end_col = linebuf_render_fold_column(
-    start_col, attr, fdc, foldinfo.fi_level, lowest_level,
-    has_fold && foldinfo.fi_lnum == lnum, has_fold && foldinfo.fi_lines > 0,
-    is_virt, wp->w_p_fcs_chars.foldopen, wp->w_p_fcs_chars.foldclosed,
-    wp->w_p_fcs_chars.foldsep, wp->w_p_fcs_chars.foldinner,
-    out_vcol, out_buffer);
+  const int end_col = linebuf_render_fold_column(start_col, attr, fdc, foldinfo.fi_level,
+                                                 lowest_level,
+                                                 has_fold && foldinfo.fi_lnum == lnum,
+                                                 has_fold && foldinfo.fi_lines > 0,
+                                                 is_virt, wp->w_p_fcs_chars.foldopen,
+                                                 wp->w_p_fcs_chars.foldclosed,
+                                                 wp->w_p_fcs_chars.foldsep,
+                                                 wp->w_p_fcs_chars.foldinner,
+                                                 out_vcol, out_buffer);
 
   if (wlv_off != NULL) {
     *wlv_off = end_col;
@@ -3159,7 +3162,7 @@ end_check:
                         && lcs_eol_todo                 // Haven't printed the lcs_eol character.
                         && wlv.row != endrow - 1        // Not the last line being displayed.
                         && grid_view_width_matches_target(wp->w_grid_handle, view_width)
-                                                        // Window spans the width of its grid.
+                        // Window spans the width of its grid.
                         && !wp->w_p_rl;                 // Not right-to-left.
 
       int draw_col = wlv.col - wlv.boguscols;

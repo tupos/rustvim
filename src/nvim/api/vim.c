@@ -2065,8 +2065,8 @@ Array nvim__inspect_cell(Integer grid, Integer row, Integer col, Arena *arena, E
   handle_T window_grid_handle = wp == NULL ? 0 : wp->w_grid_handle;
 
   GridCell cell;
-  GridCellInspectionResult inspection = grid_inspect_cell(
-    pum_grid_handle, window_grid_handle, grid, row, col, &cell);
+  GridCellInspectionResult inspection = grid_inspect_cell(pum_grid_handle, window_grid_handle, grid,
+                                                          row, col, &cell);
   VALIDATE_INT(inspection != kGridCellInspectionInvalidGrid, "grid handle", grid, {
     return ret;
   });

@@ -176,8 +176,7 @@ static MessageGridPositionConfig message_grid_position_config(void)
 }
 
 static void ui_ext_msg_set_pos(handle_T grid_handle, int row, bool scrolled,
-                               schar_T separator_character, int z_index,
-                               int compositor_index)
+                               schar_T separator_character, int z_index, int compositor_index)
 {
   char buf[MAX_SCHAR_SIZE];
   size_t size = schar_get(buf, separator_character);
@@ -201,23 +200,22 @@ bool msg_use_grid(void)
 void msg_grid_validate(void)
 {
   bool should_alloc = msg_use_grid();
-  MessageSurfaceUpdate update = grid_update_message_surface(
-    (MessageSurfaceRequest){
-      .grid_handle = msg_grid_handle,
-      .screen_rows = Rows,
-      .screen_columns = Columns,
-      .should_allocate = should_alloc,
-      .scrolled_lines = msg_scrolled,
-      .pager_active = (State & MODE_ASKMORE) != 0,
-      .command_height = (int)p_ch,
-      .current_position = msg_grid_pos,
-      .position = message_grid_position_config(),
-      .blending = should_alloc
-                  && syn_attr2entry(highlight_attr[HLF_MSG]).hl_blend > -1,
-      .current_window_grid_handle = curwin ? curwin->w_grid_handle : 0,
-      .clear_attribute = HL_ATTR(HLF_MSG),
-    },
-    ui_ext_msg_set_pos);
+  MessageSurfaceUpdate update = grid_update_message_surface((MessageSurfaceRequest){
+    .grid_handle = msg_grid_handle,
+    .screen_rows = Rows,
+    .screen_columns = Columns,
+    .should_allocate = should_alloc,
+    .scrolled_lines = msg_scrolled,
+    .pager_active = (State & MODE_ASKMORE) != 0,
+    .command_height = (int)p_ch,
+    .current_position = msg_grid_pos,
+    .position = message_grid_position_config(),
+    .blending = should_alloc
+                && syn_attr2entry(highlight_attr[HLF_MSG]).hl_blend > -1,
+    .current_window_grid_handle = curwin ? curwin->w_grid_handle : 0,
+    .clear_attribute = HL_ATTR(HLF_MSG),
+  },
+                                                            ui_ext_msg_set_pos);
 
   msg_grid_handle = update.grid_handle;
   msg_grid_pos = update.position;
@@ -2658,19 +2656,18 @@ bool msg_do_throttle(void)
 /// Scroll the screen up one line for displaying the next message line.
 void msg_scroll_up(bool may_throttle, bool zerocmd, bool discount_first_scroll)
 {
-  msg_grid_pos = grid_scroll_message_surface_up(
-    (MessageSurfaceScrollRequest){
-      .grid_handle = msg_grid_handle,
-      .current_position = msg_grid_pos,
-      .screen_rows = Rows,
-      .screen_columns = Columns,
-      .enable_throttling = may_throttle && msg_do_throttle(),
-      .zero_cmdheight = zerocmd,
-      .discount_first_scroll = discount_first_scroll,
-      .position = message_grid_position_config(),
-      .clear_attribute = HL_ATTR(HLF_MSG),
-    },
-    ui_ext_msg_set_pos);
+  msg_grid_pos = grid_scroll_message_surface_up((MessageSurfaceScrollRequest){
+    .grid_handle = msg_grid_handle,
+    .current_position = msg_grid_pos,
+    .screen_rows = Rows,
+    .screen_columns = Columns,
+    .enable_throttling = may_throttle && msg_do_throttle(),
+    .zero_cmdheight = zerocmd,
+    .discount_first_scroll = discount_first_scroll,
+    .position = message_grid_position_config(),
+    .clear_attribute = HL_ATTR(HLF_MSG),
+  },
+                                                ui_ext_msg_set_pos);
 }
 
 /// Send throttled message output to UI clients
@@ -2692,17 +2689,16 @@ void msg_scroll_up(bool may_throttle, bool zerocmd, bool discount_first_scroll)
 /// redraw_later code paths.
 void msg_scroll_flush(void)
 {
-  grid_flush_message_scroll(
-    msg_grid_handle,
-    (MessageGridScrollFlushRequest){
-      .position = msg_grid_pos,
-      .scrolled_lines = msg_scrolled,
-      .screen_rows = Rows,
-      .screen_columns = Columns,
-      .clear_attribute = HL_ATTR(HLF_MSG),
-    },
-    message_grid_position_config(),
-    ui_ext_msg_set_pos);
+  grid_flush_message_scroll(msg_grid_handle,
+                            (MessageGridScrollFlushRequest){
+    .position = msg_grid_pos,
+    .scrolled_lines = msg_scrolled,
+    .screen_rows = Rows,
+    .screen_columns = Columns,
+    .clear_attribute = HL_ATTR(HLF_MSG),
+  },
+                            message_grid_position_config(),
+                            ui_ext_msg_set_pos);
 }
 
 void msg_reset_scroll(void)
@@ -2714,9 +2710,8 @@ void msg_reset_scroll(void)
   // we should properly disentangle message clear with full screen redraw.
   // TODO(bfredl): risk for extra flicker i e with
   // "nvim -o has_swap also_has_swap"
-  msg_grid_pos = grid_reset_message_scroll(
-    msg_grid_handle, Rows - (int)p_ch, msg_scrollsize(),
-    message_grid_position_config(), ui_ext_msg_set_pos);
+  msg_grid_pos = grid_reset_message_scroll(msg_grid_handle, Rows - (int)p_ch, msg_scrollsize(),
+                                           message_grid_position_config(), ui_ext_msg_set_pos);
   clear_cmdline = true;
   msg_scrolled = 0;
 }

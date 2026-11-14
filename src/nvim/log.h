@@ -74,7 +74,7 @@ void log_callstack(const char *func_name, int line_num);
 
 /// Native formatter using vsnprintf's length convention; it retains no pointers.
 typedef int (*LogFormatter)(char *buffer, size_t capacity, const char *format, void *arguments)
-  REAL_FATTR_PRINTF(3, 0);
+REAL_FATTR_PRINTF(3, 0);
 
 /// Borrows native arguments synchronously while Rust formats and writes a message.
 bool rustvim_logmsg(int log_level, const char *context, const char *func_name, int line_num,

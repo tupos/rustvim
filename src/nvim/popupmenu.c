@@ -664,18 +664,17 @@ void pum_redraw(void)
 
   int grid_height = pum_height + border_width;
   int grid_columns = grid_width + border_width;
-  pum_grid_handle = grid_update_popup_menu_surface(
-    (PopupMenuSurfaceRequest){
-      .grid_handle = pum_grid_handle,
-      .row = pum_row,
-      .column = pum_left_col,
-      .rows = grid_height,
-      .columns = grid_columns,
-      .z_index = pum_zindex,
-      .blending = blending,
-      .contents_invalid = contents_invalid,
-      .current_window_grid_handle = curwin ? curwin->w_grid_handle : 0,
-    });
+  pum_grid_handle = grid_update_popup_menu_surface((PopupMenuSurfaceRequest){
+    .grid_handle = pum_grid_handle,
+    .row = pum_row,
+    .column = pum_left_col,
+    .rows = grid_height,
+    .columns = grid_columns,
+    .z_index = pum_zindex,
+    .blending = blending,
+    .contents_invalid = contents_invalid,
+    .current_window_grid_handle = curwin ? curwin->w_grid_handle : 0,
+  });
   if (ui_has(kUIMultigrid)) {
     pum_pos_ui_flush(true);
   }
@@ -1668,20 +1667,19 @@ void pum_make_popup(const char *path_name, int use_mouse_pos)
 
 void pum_pos_ui_flush(bool force)
 {
-  grid_publish_popup_menu_surface_position(
-    (PopupMenuSurfacePositionRequest){
-      .grid_handle = pum_grid_handle,
-      .force = force,
-      .multigrid_enabled = ui_has(kUIMultigrid),
-      .drawn = pum_is_drawn,
-      .external = pum_external,
-      .above = pum_above,
-      .height = pum_height,
-      .anchor_grid_handle = pum_anchor_grid,
-      .row = pum_row,
-      .column = pum_left_col,
-      .window_row_offset = pum_win_row_offset,
-      .window_column_offset = pum_win_col_offset,
-      .z_index = pum_zindex,
-    });
+  grid_publish_popup_menu_surface_position((PopupMenuSurfacePositionRequest){
+    .grid_handle = pum_grid_handle,
+    .force = force,
+    .multigrid_enabled = ui_has(kUIMultigrid),
+    .drawn = pum_is_drawn,
+    .external = pum_external,
+    .above = pum_above,
+    .height = pum_height,
+    .anchor_grid_handle = pum_anchor_grid,
+    .row = pum_row,
+    .column = pum_left_col,
+    .window_row_offset = pum_win_row_offset,
+    .window_column_offset = pum_win_col_offset,
+    .z_index = pum_zindex,
+  });
 }

@@ -12,7 +12,7 @@
 
 /// Formats one attempt without consuming the enclosing logmsg() argument list.
 static int REAL_FATTR_PRINTF(3, 0) log_format(char *buffer, size_t capacity, const char *format,
-                                           void *arguments)
+                                              void *arguments)
 {
   va_list copy;
   va_copy(copy, *(va_list *)arguments);
