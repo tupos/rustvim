@@ -14,6 +14,7 @@
 #include "nvim/event/wstream.h"
 #include "nvim/globals.h"
 #include "nvim/log.h"
+#include "nvim/macros_defs.h"
 #include "nvim/main.h"
 #include "nvim/memory_defs.h"
 #include "nvim/os/proc.h"
@@ -76,6 +77,8 @@ int proc_spawn(Proc *proc, bool in, bool out, bool err)
   case kProcTypePty:
     status = pty_proc_spawn((PtyProc *)proc);
     break;
+  default:
+    UNREACHABLE;
   }
 
   if (status) {

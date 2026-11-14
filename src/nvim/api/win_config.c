@@ -801,6 +801,8 @@ static void config_put_bordertext(Dict(win_config) *config, WinConfig *fconfig,
     vt = fconfig->footer_chunks;
     align = fconfig->footer_pos;
     break;
+  default:
+    UNREACHABLE;
   }
 
   Array bordertext = virt_text_to_array(vt, true, arena);
@@ -816,6 +818,8 @@ static void config_put_bordertext(Dict(win_config) *config, WinConfig *fconfig,
   case kAlignRight:
     pos = "right";
     break;
+  default:
+    UNREACHABLE;
   }
 
   switch (bordertext_type) {

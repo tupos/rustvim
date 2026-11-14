@@ -295,7 +295,7 @@ void f_getstacktrace(typval_T *argvars, typval_T *rettv, EvalFuncData fptr)
 
 static bool runtime_search_path_valid = false;
 static bool runtime_search_path_valid_thread = false;
-static int *runtime_search_path_ref = NULL;
+static bool runtime_search_path_has_ref = false;
 static RuntimeSearchPath runtime_search_path;
 static RuntimeSearchPath runtime_search_path_thread;
 static uv_mutex_t runtime_search_path_mutex;
@@ -514,18 +514,14 @@ int do_in_path(const char *path, const char *prefix, char *name, int flags,
   return did_one ? OK : FAIL;
 }
 
-static RuntimeSearchPath runtime_search_path_get_cached(int *ref)
+static RuntimeSearchPath runtime_search_path_get_cached(bool *ref)
   FUNC_ATTR_NONNULL_ALL
 {
   runtime_search_path_validate();
 
-  *ref = 0;
-  if (runtime_search_path_ref == NULL) {
-    // cached path was unreferenced. keep a ref to
-    // prevent runtime_search_path() to freeing it too early
-    (*ref)++;
-    runtime_search_path_ref = ref;
-  }
+  // The outermost lookup retains this allocation through nested cache rebuilds.
+  *ref = !runtime_search_path_has_ref;
+  runtime_search_path_has_ref = true;
   return runtime_search_path;
 }
 
@@ -541,12 +537,12 @@ static RuntimeSearchPath copy_runtime_search_path(const RuntimeSearchPath src)
   return dst;
 }
 
-static void runtime_search_path_unref(RuntimeSearchPath path, const int *ref)
-  FUNC_ATTR_NONNULL_ALL
+static void runtime_search_path_unref(RuntimeSearchPath path, bool ref)
 {
-  if (*ref) {
-    if (runtime_search_path_ref == ref) {
-      runtime_search_path_ref = NULL;
+  if (ref) {
+    // A nested lookup may have replaced the cache with a different allocation.
+    if (path.items == runtime_search_path.items) {
+      runtime_search_path_has_ref = false;
     } else {
       runtime_search_path_free(path);
     }
@@ -573,7 +569,7 @@ static int do_in_cached_path(char *name, int flags, DoInRuntimepathCB callback, 
     verbose_leave();
   }
 
-  int ref;
+  bool ref;
   RuntimeSearchPath path = runtime_search_path_get_cached(&ref);
 
   bool do_all = (flags & DIP_ALL) != 0;
@@ -633,7 +629,7 @@ static int do_in_cached_path(char *name, int flags, DoInRuntimepathCB callback, 
     }
   }
 
-  runtime_search_path_unref(path, &ref);
+  runtime_search_path_unref(path, ref);
 
   return did_one ? OK : FAIL;
 }
@@ -665,13 +661,13 @@ Array runtime_inspect(Arena *arena)
 
 ArrayOf(String) runtime_get_named(bool lua, Array pat, bool all, Arena *arena)
 {
-  int ref;
+  bool ref;
   RuntimeSearchPath path = runtime_search_path_get_cached(&ref);
   static char buf[MAXPATHL];
 
   ArrayOf(String) rv = runtime_get_named_common(lua, pat, all, path, buf, sizeof buf, arena);
 
-  runtime_search_path_unref(path, &ref);
+  runtime_search_path_unref(path, ref);
   return rv;
 }
 
@@ -933,13 +929,13 @@ void runtime_search_path_validate(void)
     return;
   }
   if (!runtime_search_path_valid) {
-    if (!runtime_search_path_ref) {
+    if (!runtime_search_path_has_ref) {
       msg_ext_ui_flush();  // avoid recursion due to UI callback
       runtime_search_path_free(runtime_search_path);
     }
     runtime_search_path = runtime_search_path_build();
     runtime_search_path_valid = true;
-    runtime_search_path_ref = NULL;  // initially unowned
+    runtime_search_path_has_ref = false;  // initially unowned
     update_runtime_search_path_thread(true);
   }
 }
@@ -1190,7 +1186,7 @@ static int add_pack_dir_to_rtp(char *fname, bool is_pack)
   // from scratch is needlessly slow. splice in the package and its afterdir instead.
   // But don't do this for "pack/*/start/*" (is_pack=true):
   // we want properly expand wildcards in a "start" bundle.
-  if (was_valid && !is_pack && !runtime_search_path_ref) {
+  if (was_valid && !is_pack && !runtime_search_path_has_ref) {
     runtime_search_path_valid = true;
     runtime_search_path_valid_thread = false;
     kv_pushp(runtime_search_path);
