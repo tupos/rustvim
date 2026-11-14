@@ -4114,6 +4114,7 @@ void intro_message(bool colon)
     "││╲╲││",
     "││ ╲ │",
     "",
+    // NOLINTNEXTLINE(bugprone-suspicious-missing-comma): version macros form one string.
     N_(NVIM_VERSION_LONG),
     "────────────────────────────────────────────",
     N_("Rustvim is open source and freely distributable"),
