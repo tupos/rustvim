@@ -200,134 +200,137 @@ typedef void (*MessageGridPositionEmitter)(handle_T grid_handle, int row, bool s
 
 typedef void (*WindowPositionEmitter)(handle_T grid_handle, bool validate);
 
-extern bool grid_is_allocated(handle_T grid_handle);
-extern bool grid_requires_compositor_invalidation(handle_T grid_handle, bool clear_requested);
-extern void grid_revalidate_for_redraw(handle_T grid_handle);
-extern void grid_require_full_redraw(handle_T grid_handle);
-extern bool grid_view_has_target(handle_T window_grid_handle);
-extern bool grid_view_targets_default(handle_T window_grid_handle);
-extern bool grid_view_requires_redraw(handle_T window_grid_handle);
-extern bool grid_view_width_matches_target(handle_T window_grid_handle, int width);
-extern void grid_view_cursor_goto(handle_T window_grid_handle, int row, int col);
-extern void grid_message_view_cursor_goto(int row, int col);
-extern bool grid_configure_default(int rows, int columns);
-extern WindowSurfaceUpdate grid_configure_window_surface(WindowSurfaceRequest request);
-extern WindowFloatSurfaceUpdate grid_update_window_float_surface(WindowFloatSurfaceRequest request);
-extern WindowFloatToSplitUpdate grid_convert_window_float_to_split(handle_T grid_handle,
-                                                                   bool multigrid_enabled);
-extern void grid_hide_window_surface(handle_T grid_handle, bool publish_hide);
-extern void grid_close_window_surface(handle_T grid_handle, bool floating, bool publish_close);
-extern handle_T grid_destroy_window_surface(handle_T grid_handle, bool publish_destroy,
-                                            bool create_replacement);
-extern bool grid_flush_window_surface_position(handle_T grid_handle, bool position_changed,
-                                               bool current_tab, bool validate,
-                                               WindowPositionEmitter emit_position);
-extern handle_T grid_update_popup_menu_surface(PopupMenuSurfaceRequest request);
-extern void grid_hide_popup_menu_surface(handle_T grid_handle, bool publish_ui_events);
-extern void grid_recompose_popup_menu_surface(handle_T grid_handle);
-extern void grid_publish_popup_menu_surface_position(PopupMenuSurfacePositionRequest request);
-extern MessageGridTransition grid_prepare_for_messages(handle_T grid_handle, int rows, int columns,
-                                                       bool should_allocate, int scrolled_lines);
-extern void grid_release_message(handle_T grid_handle);
-extern void grid_activate_message_view(handle_T grid_handle);
-extern void grid_reset_message_view(void);
-extern MessageSurfaceUpdate grid_update_message_surface(MessageSurfaceRequest request,
-                                                        MessageGridPositionEmitter emit_position);
-extern void grid_set_message_position(handle_T grid_handle, int row, bool scrolled,
-                                      MessageGridPositionConfig config,
-                                      MessageGridPositionEmitter emit_position);
-extern int grid_scroll_message_surface_up(MessageSurfaceScrollRequest request,
-                                          MessageGridPositionEmitter emit_position);
-extern void grid_prepare_message_redraw(handle_T grid_handle, int rows_to_clear, int valid_rows);
-extern int grid_reset_message_scroll(handle_T grid_handle, int position, int rows_to_clear,
-                                     MessageGridPositionConfig config,
-                                     MessageGridPositionEmitter set_position);
-extern void grid_flush_message_scroll(handle_T grid_handle, MessageGridScrollFlushRequest request,
-                                      MessageGridPositionConfig config,
-                                      MessageGridPositionEmitter emit_position);
-extern void grid_refresh_message_ui(handle_T grid_handle, int position, bool scrolled,
-                                    MessageGridPositionConfig config,
-                                    MessageGridPositionEmitter emit_position);
-extern bool grid_clear_default(bool valid);
-extern void grid_clear_default_rows(int start_row, int end_row, bool valid);
-extern void grid_scroll_window_lines(handle_T window_grid_handle, int row, int line_count,
-                                     int view_height, int view_width);
-extern handle_T grid_view_translate(handle_T window_grid_handle, int *row_off, int *col_off);
-extern handle_T grid_message_view_translate(int *row_off, int *col_off);
-extern bool grid_view_translate_to_local(handle_T window_grid_handle, int *row, int *col);
-extern void grid_invalidate(handle_T grid_handle);
-extern void grid_view_invalidate_row(handle_T window_grid_handle, int row);
-extern schar_T schar_from_str(const char *str);
-extern schar_T schar_from_buf(const char *buf, size_t len);
-extern bool schar_cache_clear_if_full(void);
-extern void schar_cache_clear(void);
-extern bool schar_high(schar_T sc);
-extern size_t schar_get(char *buf_out, schar_T sc);
-extern int schar_get_first_codepoint(schar_T sc);
-extern size_t schar_get_adv(char **buf_out, schar_T sc);
-extern size_t schar_len(schar_T sc);
-extern char schar_get_ascii(schar_T sc);
-extern int schar_cells(schar_T sc);
-extern bool grid_view_get_cell(handle_T window_grid_handle, handle_T expected_grid, int row,
-                               int col, GridCell *cell);
-extern GridCellInspectionResult grid_inspect_cell(handle_T popup_grid_handle,
-                                                  handle_T window_grid_handle,
-                                                  int64_t requested_grid, int64_t row, int64_t col,
-                                                  GridCell *cell);
-extern schar_T schar_from_char(int c);
+DLLEXPORT bool grid_is_allocated(handle_T grid_handle);
+DLLEXPORT bool grid_requires_compositor_invalidation(handle_T grid_handle, bool clear_requested);
+DLLEXPORT void grid_revalidate_for_redraw(handle_T grid_handle);
+DLLEXPORT void grid_require_full_redraw(handle_T grid_handle);
+DLLEXPORT bool grid_view_has_target(handle_T window_grid_handle);
+DLLEXPORT bool grid_view_targets_default(handle_T window_grid_handle);
+DLLEXPORT bool grid_view_requires_redraw(handle_T window_grid_handle);
+DLLEXPORT bool grid_view_width_matches_target(handle_T window_grid_handle, int width);
+DLLEXPORT void grid_view_cursor_goto(handle_T window_grid_handle, int row, int col);
+DLLEXPORT void grid_message_view_cursor_goto(int row, int col);
+DLLEXPORT bool grid_configure_default(int rows, int columns);
+DLLEXPORT WindowSurfaceUpdate grid_configure_window_surface(WindowSurfaceRequest request);
+DLLEXPORT WindowFloatSurfaceUpdate grid_update_window_float_surface(
+                                                                   WindowFloatSurfaceRequest request);
+DLLEXPORT WindowFloatToSplitUpdate grid_convert_window_float_to_split(handle_T grid_handle,
+                                                                      bool multigrid_enabled);
+DLLEXPORT void grid_hide_window_surface(handle_T grid_handle, bool publish_hide);
+DLLEXPORT void grid_close_window_surface(handle_T grid_handle, bool floating, bool publish_close);
+DLLEXPORT handle_T grid_destroy_window_surface(handle_T grid_handle, bool publish_destroy,
+                                               bool create_replacement);
+DLLEXPORT bool grid_flush_window_surface_position(handle_T grid_handle, bool position_changed,
+                                                  bool current_tab, bool validate,
+                                                  WindowPositionEmitter emit_position);
+DLLEXPORT handle_T grid_update_popup_menu_surface(PopupMenuSurfaceRequest request);
+DLLEXPORT void grid_hide_popup_menu_surface(handle_T grid_handle, bool publish_ui_events);
+DLLEXPORT void grid_recompose_popup_menu_surface(handle_T grid_handle);
+DLLEXPORT void grid_publish_popup_menu_surface_position(PopupMenuSurfacePositionRequest request);
+DLLEXPORT MessageGridTransition grid_prepare_for_messages(handle_T grid_handle, int rows,
+                                                          int columns, bool should_allocate,
+                                                          int scrolled_lines);
+DLLEXPORT void grid_release_message(handle_T grid_handle);
+DLLEXPORT void grid_activate_message_view(handle_T grid_handle);
+DLLEXPORT void grid_reset_message_view(void);
+DLLEXPORT MessageSurfaceUpdate grid_update_message_surface(MessageSurfaceRequest request,
+                                                           MessageGridPositionEmitter emit_position);
+DLLEXPORT void grid_set_message_position(handle_T grid_handle, int row, bool scrolled,
+                                         MessageGridPositionConfig config,
+                                         MessageGridPositionEmitter emit_position);
+DLLEXPORT int grid_scroll_message_surface_up(MessageSurfaceScrollRequest request,
+                                             MessageGridPositionEmitter emit_position);
+DLLEXPORT void grid_prepare_message_redraw(handle_T grid_handle, int rows_to_clear, int valid_rows);
+DLLEXPORT int grid_reset_message_scroll(handle_T grid_handle, int position, int rows_to_clear,
+                                        MessageGridPositionConfig config,
+                                        MessageGridPositionEmitter set_position);
+DLLEXPORT void grid_flush_message_scroll(handle_T grid_handle,
+                                         MessageGridScrollFlushRequest request,
+                                         MessageGridPositionConfig config,
+                                         MessageGridPositionEmitter emit_position);
+DLLEXPORT void grid_refresh_message_ui(handle_T grid_handle, int position, bool scrolled,
+                                       MessageGridPositionConfig config,
+                                       MessageGridPositionEmitter emit_position);
+DLLEXPORT bool grid_clear_default(bool valid);
+DLLEXPORT void grid_clear_default_rows(int start_row, int end_row, bool valid);
+DLLEXPORT void grid_scroll_window_lines(handle_T window_grid_handle, int row, int line_count,
+                                        int view_height, int view_width);
+DLLEXPORT handle_T grid_view_translate(handle_T window_grid_handle, int *row_off, int *col_off);
+DLLEXPORT handle_T grid_message_view_translate(int *row_off, int *col_off);
+DLLEXPORT bool grid_view_translate_to_local(handle_T window_grid_handle, int *row, int *col);
+DLLEXPORT void grid_invalidate(handle_T grid_handle);
+DLLEXPORT void grid_view_invalidate_row(handle_T window_grid_handle, int row);
+EXTERN_EXPORT(schar_T, schar_from_str)(const char *str);
+DLLEXPORT schar_T schar_from_buf(const char *buf, size_t len);
+DLLEXPORT bool schar_cache_clear_if_full(void);
+DLLEXPORT void schar_cache_clear(void);
+DLLEXPORT bool schar_high(schar_T sc);
+DLLEXPORT size_t schar_get(char *buf_out, schar_T sc);
+DLLEXPORT int schar_get_first_codepoint(schar_T sc);
+DLLEXPORT size_t schar_get_adv(char **buf_out, schar_T sc);
+DLLEXPORT size_t schar_len(schar_T sc);
+DLLEXPORT char schar_get_ascii(schar_T sc);
+EXTERN_EXPORT(int, schar_cells)(schar_T sc);
+DLLEXPORT bool grid_view_get_cell(handle_T window_grid_handle, handle_T expected_grid, int row,
+                                  int col, GridCell *cell);
+DLLEXPORT GridCellInspectionResult grid_inspect_cell(handle_T popup_grid_handle,
+                                                     handle_T window_grid_handle,
+                                                     int64_t requested_grid, int64_t row,
+                                                     int64_t col, GridCell *cell);
+DLLEXPORT schar_T schar_from_char(int c);
 
-extern void grid_window_line_start(handle_T window_grid_handle, int row);
-extern void grid_line_start_grid(handle_T grid_handle, int row, int col);
-extern void grid_message_view_line_start(int row);
-extern schar_T grid_line_getchar(int col, int *attr);
-extern void grid_line_put_schar(int col, schar_T schar, int attr);
-extern void grid_line_put_truncation(int start_col, int width, schar_T marker, int attr,
-                                     bool right_to_left);
-extern int grid_line_puts(int col, const char *text, int textlen, int attr);
-extern int grid_line_fill(int start_col, int end_col, schar_T sc, int attr);
-extern void grid_line_clear_end(int start_col, int end_col, int bg_attr, int clear_attr);
-extern void grid_line_cursor_goto(int col);
-extern void grid_line_mirror(int width);
-extern void linebuf_reset(int width);
-extern int linebuf_fill_chars_and_attrs(int start_col, int width, schar_T sc, int attr);
-extern int linebuf_put_cell(int col, schar_T sc, int attr, colnr_T vcol);
-extern int linebuf_put_rendered_glyph(int col, schar_T sc, int attr, colnr_T vcol);
-extern LinebufRenderTextResult linebuf_render_text(int col, const char *text, size_t text_len,
-                                                   int max_col, int attr, bool inc_vcol,
-                                                   colnr_T first_vcol, const colnr_T *vcols,
-                                                   size_t vcols_len, const colnr_T *color_cols,
-                                                   size_t color_cols_len, int color_col_attr,
-                                                   OptInt tabstop,
-                                                   const colnr_T *variable_tabstops);
-extern int linebuf_render_fold_column(int start_col, int attr, int width, int level,
-                                      int lowest_level, bool starts_here, bool is_closed,
-                                      bool virtual_line, schar_T open, schar_T closed,
-                                      schar_T separator, schar_T inner, colnr_T *out_vcols,
-                                      schar_T *out_chars);
-extern int linebuf_render_virtual_text(int col, VirtText virtual_text, int hl_mode, int max_col,
-                                       colnr_T vcol, int skip_cells, bool eol_hl, OptInt tabstop,
-                                       const colnr_T *variable_tabstops);
-extern int linebuf_update_cell(int col, schar_T sc, bool replace_char, int attr, colnr_T vcol);
-extern void linebuf_put_char_pair(int col, schar_T first, schar_T second);
-extern void linebuf_fill_vcols(int start_col, int width, colnr_T vcol);
-extern void linebuf_fill_vcols_from(int start_col, int width, colnr_T first_vcol);
-extern void grid_line_flush(void);
-extern void grid_flush_message_line(bool right_left);
-extern void grid_clear_region(handle_T grid_handle, int start_row, int end_row, int start_col,
-                              int end_col, int attr);
-extern void grid_message_view_clear(int start_row, int end_row, int start_col, int end_col,
-                                    int attr);
-extern void grid_put_window_line(handle_T window_grid_handle,
-                                 const GridLineSubmissionConfig *config);
-extern void grid_draw_border(handle_T grid_handle, const GridBorderConfig *config, const int *adj,
-                             int winbl, int win_hl_attr_normal);
+DLLEXPORT void grid_window_line_start(handle_T window_grid_handle, int row);
+DLLEXPORT void grid_line_start_grid(handle_T grid_handle, int row, int col);
+DLLEXPORT void grid_message_view_line_start(int row);
+DLLEXPORT schar_T grid_line_getchar(int col, int *attr);
+DLLEXPORT void grid_line_put_schar(int col, schar_T schar, int attr);
+DLLEXPORT void grid_line_put_truncation(int start_col, int width, schar_T marker, int attr,
+                                        bool right_to_left);
+DLLEXPORT int grid_line_puts(int col, const char *text, int textlen, int attr);
+DLLEXPORT int grid_line_fill(int start_col, int end_col, schar_T sc, int attr);
+DLLEXPORT void grid_line_clear_end(int start_col, int end_col, int bg_attr, int clear_attr);
+DLLEXPORT void grid_line_cursor_goto(int col);
+DLLEXPORT void grid_line_mirror(int width);
+DLLEXPORT void linebuf_reset(int width);
+DLLEXPORT int linebuf_fill_chars_and_attrs(int start_col, int width, schar_T sc, int attr);
+DLLEXPORT int linebuf_put_cell(int col, schar_T sc, int attr, colnr_T vcol);
+DLLEXPORT int linebuf_put_rendered_glyph(int col, schar_T sc, int attr, colnr_T vcol);
+DLLEXPORT LinebufRenderTextResult linebuf_render_text(int col, const char *text, size_t text_len,
+                                                      int max_col, int attr, bool inc_vcol,
+                                                      colnr_T first_vcol, const colnr_T *vcols,
+                                                      size_t vcols_len, const colnr_T *color_cols,
+                                                      size_t color_cols_len, int color_col_attr,
+                                                      OptInt tabstop,
+                                                      const colnr_T *variable_tabstops);
+DLLEXPORT int linebuf_render_fold_column(int start_col, int attr, int width, int level,
+                                         int lowest_level, bool starts_here, bool is_closed,
+                                         bool virtual_line, schar_T open, schar_T closed,
+                                         schar_T separator, schar_T inner, colnr_T *out_vcols,
+                                         schar_T *out_chars);
+DLLEXPORT int linebuf_render_virtual_text(int col, VirtText virtual_text, int hl_mode, int max_col,
+                                          colnr_T vcol, int skip_cells, bool eol_hl, OptInt tabstop,
+                                          const colnr_T *variable_tabstops);
+DLLEXPORT int linebuf_update_cell(int col, schar_T sc, bool replace_char, int attr, colnr_T vcol);
+DLLEXPORT void linebuf_put_char_pair(int col, schar_T first, schar_T second);
+DLLEXPORT void linebuf_fill_vcols(int start_col, int width, colnr_T vcol);
+DLLEXPORT void linebuf_fill_vcols_from(int start_col, int width, colnr_T first_vcol);
+DLLEXPORT void grid_line_flush(void);
+DLLEXPORT void grid_flush_message_line(bool right_left);
+DLLEXPORT void grid_clear_region(handle_T grid_handle, int start_row, int end_row, int start_col,
+                                 int end_col, int attr);
+DLLEXPORT void grid_message_view_clear(int start_row, int end_row, int start_col, int end_col,
+                                       int attr);
+DLLEXPORT void grid_put_window_line(handle_T window_grid_handle,
+                                    const GridLineSubmissionConfig *config);
+DLLEXPORT void grid_draw_border(handle_T grid_handle, const GridBorderConfig *config,
+                                const int *adj, int winbl, int win_hl_attr_normal);
 
-extern handle_T grid_assign_handle(void);
+DLLEXPORT handle_T grid_assign_handle(void);
 
-extern void grid_ins_lines(handle_T grid_handle, int row, int line_count, int end, int col,
-                           int width);
+DLLEXPORT void grid_ins_lines(handle_T grid_handle, int row, int line_count, int end, int col,
+                              int width);
 
-extern void alloc_initial_line_buffer(void);
+DLLEXPORT void alloc_initial_line_buffer(void);
 
 /// Put a ASCII character in a screen cell.
 ///
@@ -341,8 +344,8 @@ static const schar_T braille_space = 0xe2a08000;
 static const schar_T braille_space = 0x0080a0e2;
 #endif
 
-extern schar_T schar_from_cluster_impl(const char *buf, size_t len, bool first_compose);
-extern schar_T unittest_schar_from_cluster(const char *buf, int *firstc);
+DLLEXPORT schar_T schar_from_cluster_impl(const char *buf, size_t len, bool first_compose);
+DLLEXPORT schar_T unittest_schar_from_cluster(const char *buf, int *firstc);
 
 /// Get the screen char from a valid cluster
 ///

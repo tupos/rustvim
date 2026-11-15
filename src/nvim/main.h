@@ -2,12 +2,13 @@
 
 #include <stdbool.h>
 
+#include "nvim/macros_defs.h"
 #include "nvim/types_defs.h"
 
 // Maximum number of commands from + or -c arguments.
 #define MAX_ARG_CMDS 10
 
-extern Loop main_loop;
+DLLEXPORT extern Loop main_loop;
 
 // Struct for various parameters passed between main() and other functions.
 typedef struct {
