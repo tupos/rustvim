@@ -150,7 +150,7 @@ functionaltest-lua: | nvim
 	$(CMAKE) --build build --target functionaltest
 
 FORMAT=formatc formatlua formatquery format
-RUSTFMT_TOOLCHAIN ?= nightly-2026-08-18
+RUSTFMT_TOOLCHAIN ?= nightly-2026-11-15
 
 # Install the compiler and components selected by rust-toolchain.toml.
 rust-toolchain:

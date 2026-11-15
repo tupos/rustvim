@@ -442,7 +442,7 @@ impl GridHandleAllocator {
         // unique values; access to each grid is synchronized separately.
         let previous = self
             .last
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |last| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |last| {
                 last.checked_add(1)
             })
             .expect("grid handle space exhausted");
@@ -1304,9 +1304,9 @@ impl ScreenGrid {
             }
         }
 
-        if bg_attr != 0 {
-            for c in col as usize..endcol as usize {
-                let cell = &mut lb.cells[c];
+        if bg_attr != 0 && col < endcol {
+            for cell in &mut lb.cells[col as usize..endcol as usize] {
+                // SAFETY: Highlight state is accessed on Neovim's main thread.
                 cell.attribute = unsafe { hl_combine_attr(bg_attr, cell.attribute) };
             }
         }
