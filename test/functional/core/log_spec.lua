@@ -356,6 +356,8 @@ describe('log', function()
       -- uv_loop_t is the first member of Neovim's struct loop.
       ffi.C.log_uv_handles(ffi.C.main_loop)
     end)
-    matches('%[[R%-][A%-][I%-]%] +async +0x%x+', read_file(testlog))
+    -- libuv uses C's %p, which has no 0x prefix on Windows.
+    local pointer_pattern = t.is_os('win') and '%x+' or '0x%x+'
+    matches('%[[R%-][A%-][I%-]%] +async +' .. pointer_pattern, read_file(testlog))
   end)
 end)
