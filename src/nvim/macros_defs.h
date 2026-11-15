@@ -4,6 +4,26 @@
 # include "auto/config.h"
 #endif
 
+#ifndef DLLEXPORT
+# ifdef MSWIN
+#  define DLLEXPORT __declspec(dllexport)
+# else
+#  define DLLEXPORT
+# endif
+#endif
+
+/// Exports a function whose definition is supplied by another language.
+#if defined(MSWIN) && defined(_MSC_VER)
+# define EXTERN_EXPORT(return_type, name) \
+  __pragma(comment(linker, "/EXPORT:" #name)) DLLEXPORT return_type name
+#elif defined(MSWIN)
+# define EXTERN_EXPORT(return_type, name) \
+  __asm__ (".section .drectve\n.ascii \" -export:" #name "\"\n.text"); \
+  DLLEXPORT return_type name
+#else
+# define EXTERN_EXPORT(return_type, name) DLLEXPORT return_type name
+#endif
+
 // EXTERN is only defined in main.c. That's where global variables are
 // actually defined and initialized.
 #ifndef EXTERN

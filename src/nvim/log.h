@@ -54,22 +54,22 @@
 #endif
 
 /// Initializes the Rust logger and its tracing subscriber during native startup.
-void log_init(void);
+DLLEXPORT void log_init(void);
 /// Sets the Rust logger's minimum severity and returns its previous value.
-int log_set_level(int level);
+EXTERN_EXPORT(int, log_set_level)(int level);
 /// Formats one native message; returns false when filtered, recursive, or failed.
-bool logmsg(int log_level, const char *context, const char *func_name, int line_num, bool eol,
-            const char *fmt, ...) REAL_FATTR_PRINTF(6, 7);
+DLLEXPORT bool logmsg(int log_level, const char *context, const char *func_name, int line_num,
+                      bool eol, const char *fmt, ...) REAL_FATTR_PRINTF(6, 7);
 /// Emits debug text only when the build enables native debug logging.
-void log_debug_message(const char *message);
+DLLEXPORT void log_debug_message(const char *message);
 /// Writes libuv's native handle diagnostic through the Rust logger.
-void log_uv_handles(void *loop);
+DLLEXPORT void log_uv_handles(void *loop);
 
 #ifdef HAVE_EXECINFO_BACKTRACE
 /// Writes a mixed native stack, consuming streams other than stdout and stderr.
-void log_callstack_to_file(FILE *log_file, const char *func_name, int line_num);
+DLLEXPORT void log_callstack_to_file(FILE *log_file, const char *func_name, int line_num);
 /// Writes a mixed native stack to the selected logging destination.
-void log_callstack(const char *func_name, int line_num);
+DLLEXPORT void log_callstack(const char *func_name, int line_num);
 #endif
 
 /// Native formatter using vsnprintf's length convention; it retains no pointers.
@@ -77,10 +77,11 @@ typedef int (*LogFormatter)(char *buffer, size_t capacity, const char *format, v
 REAL_FATTR_PRINTF(3, 0);
 
 /// Borrows native arguments synchronously while Rust formats and writes a message.
-bool rustvim_logmsg(int log_level, const char *context, const char *func_name, int line_num,
-                    bool eol, bool fatal, const char *format, void *arguments,
-                    LogFormatter formatter);
+DLLEXPORT bool rustvim_logmsg(int log_level, const char *context, const char *func_name,
+                              int line_num, bool eol, bool fatal, const char *format,
+                              void *arguments, LogFormatter formatter);
 /// Adapts libuv's native diagnostic under Rust-owned output locking.
-void rustvim_log_uv_handles(void *loop, FILE *standard_error);
+DLLEXPORT void rustvim_log_uv_handles(void *loop, FILE *standard_error);
 /// Writes a Rust-captured stack, optionally consuming a native stream.
-void rustvim_log_callstack(FILE *output, bool close_output, const char *func_name, int line_num);
+DLLEXPORT void rustvim_log_callstack(FILE *output, bool close_output, const char *func_name,
+                                     int line_num);
