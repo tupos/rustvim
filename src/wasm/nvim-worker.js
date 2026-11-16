@@ -335,13 +335,10 @@ self.onmessage = async (ev) => {
     state = new Int32Array(msg.sab, 0, 3); // [head, tail, closed]
     ringData = new Uint8Array(msg.sab, 12, CAP); // offset moved from 8 → 12
     safeStatus("loading wasm...");
-    importScripts("../../zig-out/bin/nvim.js");
+    importScripts("nvim.js");
 
     const m = await createNvim({
-      locateFile: (p) =>
-        p.endsWith(".data")
-          ? "../../zig-out/bin/nvim.data"
-          : "../../zig-out/bin/" + p,
+      locateFile: (p) => new URL(p, self.location.href).href,
       noInitialRun: true,
       interactive: false,
 
@@ -356,6 +353,7 @@ self.onmessage = async (ev) => {
           m.ENV.TERM = "xterm-256color";
           m.ENV.HOME = "/home/user";
           m.ENV.VIMRUNTIME = "/runtime";
+          m.FS.mkdirTree("/home/user");
         },
       ],
     });
@@ -394,27 +392,11 @@ self.onmessage = async (ev) => {
       m.FS.syncfs(true, (e) => (e ? rej(e) : res())),
     );
     try {
-      m.FS.mkdir("/home/user/.config/nvim");
+      m.FS.mkdirTree("/home/user/.config/nvim");
     } catch (e) {}
     try {
-      m.FS.mkdir("/home/user/.local/share/nvim");
+      m.FS.mkdirTree("/home/user/.local/share/nvim");
     } catch (e) {}
-    try {
-      m.FS.mkdir("/runtime/parser");
-    } catch (e) {}
-    [
-      "lua",
-      "c",
-      "vim",
-      "vimdoc",
-      "query",
-      "markdown",
-      "markdown_inline",
-    ].forEach((p) => {
-      try {
-        m.FS.writeFile(`/runtime/parser/${p}.so`, "");
-      } catch (e) {}
-    });
 
     const patchedOps = stdinStream.tty && stdinStream.tty.ops;
     // Dump every open fd and confirm which fd libuv is actually polling

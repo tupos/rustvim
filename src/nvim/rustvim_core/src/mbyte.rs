@@ -3,7 +3,6 @@
 use std::ffi::CStr;
 
 #[link(name = "nvim")]
-#[link(name = "utf8proc")]
 unsafe extern "C" {
     #[link_name = "utf_ptr2cells"]
     fn utf_ptr2cells_ffi(p_in: *const libc::c_char) -> libc::c_int;

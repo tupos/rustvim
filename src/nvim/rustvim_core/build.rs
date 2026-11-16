@@ -108,7 +108,7 @@ fn link_cmake_library(cache: &str, key: &str) {
     println!("cargo::rustc-link-search=native={}", directory.display());
     if path.extension().is_some_and(|extension| extension == "a") {
         // Preserve CMake's archive selection when shared libraries coexist.
-        println!("cargo::rustc-link-lib=static={name}");
+        println!("cargo::rustc-link-lib=static:-bundle={name}");
     } else {
         println!("cargo::rustc-link-lib={name}");
     }
@@ -173,9 +173,13 @@ fn main() {
         link_cmake_library(&cache, "LUAJIT_LIBRARY");
     }
 
-    if cfg!(unix) {
+    if env::var_os("CARGO_CFG_UNIX").is_some() {
         println!("cargo::rustc-link-lib=m");
-        println!("cargo::rustc-link-lib=util");
+        let target_os =
+            env::var("CARGO_CFG_TARGET_OS").expect("Cargo must set CARGO_CFG_TARGET_OS");
+        if target_os != "emscripten" {
+            println!("cargo::rustc-link-lib=util");
+        }
     }
 
     link_cmake_library(&cache, "LIBUV_LIBRARY");

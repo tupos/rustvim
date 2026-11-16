@@ -150,20 +150,27 @@ functionaltest-lua: | nvim
 	$(CMAKE) --build build --target functionaltest
 
 FORMAT=formatc formatlua formatquery format
-RUSTFMT_TOOLCHAIN ?= nightly-2026-11-15
+RUST_NIGHTLY_TOOLCHAIN ?= nightly-2026-11-15
 
 # Install the compiler and components selected by rust-toolchain.toml.
 rust-toolchain:
 	rustup toolchain install --no-self-update
 
-rustfmt-toolchain:
-	rustup toolchain install $(RUSTFMT_TOOLCHAIN) --profile minimal --component rustfmt
+rust-nightly-toolchain:
+	rustup toolchain install $(RUST_NIGHTLY_TOOLCHAIN) --no-self-update --profile minimal \
+		--component rustfmt --component rust-src --target wasm32-unknown-emscripten
 
-# Install the compiler toolchain and the nightly formatter.
-rust-toolchains: rust-toolchain rustfmt-toolchain
+# Install the stable compiler and the nightly formatter and WASM compiler.
+rust-toolchains: rust-toolchain rust-nightly-toolchain
+
+wasm:
+	.github/scripts/build_wasm.sh "$(RUST_NIGHTLY_TOOLCHAIN)" wasm-package
+
+wasmtest:
+	.github/scripts/build_wasm.sh "$(RUST_NIGHTLY_TOOLCHAIN)" wasmtest
 
 formatrust:
-	rustup run $(RUSTFMT_TOOLCHAIN) cargo fmt --all
+	rustup run $(RUST_NIGHTLY_TOOLCHAIN) cargo fmt --all
 
 format: formatrust
 
@@ -217,5 +224,5 @@ appimage:
 appimage-%:
 	bash scripts/genappimage.sh $*
 
-.PHONY: rust-toolchain rust-toolchains lintrust
-.PHONY: test clean distclean nvim libnvim rvim_libs cmake deps install appimage checkprefix benchmark rustfmt-toolchain formatrust $(FORMAT) $(LINT) $(TEST)
+.PHONY: rust-toolchain rust-toolchains lintrust wasm wasmtest
+.PHONY: test clean distclean nvim libnvim rvim_libs cmake deps install appimage checkprefix benchmark rust-nightly-toolchain formatrust $(FORMAT) $(LINT) $(TEST)

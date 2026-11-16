@@ -130,6 +130,10 @@ function M.add(lang, opts)
       return nil, string.format('Invalid language name "%s"', lang)
     end
 
+    if vim._ts_add_language_from_static and vim._ts_add_language_from_static(lang, symbol_name) then
+      return true
+    end
+
     local fname = 'parser/' .. lang .. '.*'
     local paths = api.nvim_get_runtime_file(fname, false)
     if #paths == 0 then
@@ -194,6 +198,9 @@ end
 function M._complete()
   local parsers = api.nvim_get_runtime_file('parser/*', true)
   local parser_names_set = {} ---@type table<string, boolean>
+  for lang in pairs(vim._ts_static_languages or {}) do
+    parser_names_set[lang] = true
+  end
   for _, parser in ipairs(parsers) do
     local parser_name = vim.fn.fnamemodify(parser, ':t:r')
     parser_names_set[parser_name] = true

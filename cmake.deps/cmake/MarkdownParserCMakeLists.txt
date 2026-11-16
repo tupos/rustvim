@@ -3,14 +3,19 @@ project(${PARSERLANG} C)
 
 add_compile_options(-w)
 
-add_library(markdown MODULE
+set(PARSER_LIBRARY_TYPE MODULE)
+if(EMSCRIPTEN)
+  set(PARSER_LIBRARY_TYPE STATIC)
+endif()
+
+add_library(markdown ${PARSER_LIBRARY_TYPE}
 tree-sitter-markdown/src/parser.c
 tree-sitter-markdown/src/scanner.c)
 target_include_directories(markdown
   PRIVATE
   tree-sitter-markdown/src)
 
-add_library(markdown_inline MODULE
+add_library(markdown_inline ${PARSER_LIBRARY_TYPE}
 tree-sitter-markdown-inline/src/parser.c
 tree-sitter-markdown-inline/src/scanner.c)
 target_include_directories(markdown_inline
@@ -23,6 +28,8 @@ set_target_properties(
     PREFIX ""
 )
 
-install(TARGETS markdown markdown_inline LIBRARY DESTINATION lib/nvim/parser)
+install(TARGETS markdown markdown_inline
+  LIBRARY DESTINATION lib/nvim/parser
+  ARCHIVE DESTINATION lib/nvim/parser)
 
 # vim: set ft=cmake:

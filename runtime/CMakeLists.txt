@@ -44,7 +44,7 @@ foreach(PACKAGE ${PACKAGES})
       COMMAND ${NVIM_HOST_PRG}
         -u NONE -l ${PROJECT_SOURCE_DIR}/src/gen/gen_helptags.lua doc/tags doc
       DEPENDS
-        nvim_bin
+        "${NVIM_HOST_PRG}"
         nvim_runtime_deps
         ${PROJECT_SOURCE_DIR}/src/gen/gen_helptags.lua
       WORKING_DIRECTORY "${GENERATED_PACKAGE_DIR}/${PACKNAME}"
@@ -77,7 +77,7 @@ add_custom_command(OUTPUT ${GENERATED_HELP_TAGS}
   COMMAND ${NVIM_HOST_PRG}
     -u NONE -l ${PROJECT_SOURCE_DIR}/src/gen/gen_helptags.lua doc/tags doc ++t
   DEPENDS
-    nvim_bin
+    "${NVIM_HOST_PRG}"
     nvim_runtime_deps
     ${PROJECT_SOURCE_DIR}/src/gen/gen_helptags.lua
   WORKING_DIRECTORY "${GENERATED_RUNTIME_DIR}"

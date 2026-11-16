@@ -26,6 +26,9 @@ function(BuildTSParser)
     CMAKE_ARGS ${DEPS_CMAKE_ARGS}
       -D PARSERLANG=${TS_LANG}
     ${EXTERNALPROJECT_OPTIONS})
+
+  ExternalProject_Add_StepDependencies(${NAME} patch
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/${TS_CMAKE_FILE}")
 endfunction()
 
 foreach(lang c diff lua vim vimdoc query)

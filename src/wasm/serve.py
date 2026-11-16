@@ -2,7 +2,7 @@
 
 """
 Local server for the WASM demo.
-Usage: python3 src/wasm/serve.py
+Usage: python3 build/wasm/site/serve.py
 """
 
 import http.server
@@ -10,12 +10,12 @@ import socketserver
 from pathlib import Path
 from functools import partial
 
-PORT = 8002
+PORT: int = 8002
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT: Path = Path(__file__).resolve().parent
 
 class Handler(http.server.SimpleHTTPRequestHandler):
-    def end_headers(self):
+    def end_headers(self) -> None:
         self.send_header("Cross-Origin-Opener-Policy", "same-origin")
         self.send_header("Cross-Origin-Embedder-Policy", "require-corp")
         super().end_headers()

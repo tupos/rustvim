@@ -5,8 +5,13 @@ add_compile_options(-w)
 
 file(GLOB source_files src/*.c)
 
+set(PARSER_LIBRARY_TYPE MODULE)
+if(EMSCRIPTEN)
+  set(PARSER_LIBRARY_TYPE STATIC)
+endif()
+
 add_library(parser
-  MODULE
+  ${PARSER_LIBRARY_TYPE}
   ${source_files}
 )
 set_target_properties(
@@ -18,6 +23,8 @@ set_target_properties(
 
 include_directories(src)
 
-install(TARGETS parser LIBRARY DESTINATION lib/nvim/parser)
+install(TARGETS parser
+  LIBRARY DESTINATION lib/nvim/parser
+  ARCHIVE DESTINATION lib/nvim/parser)
 
 # vim: set ft=cmake:
