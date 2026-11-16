@@ -1,0 +1,84 @@
+name: Tree-sitter WASM parser tests
+on:
+  push:
+    branches:
+      - 'master'
+      - 'release-[0-9]+.[0-9]+'
+    paths:
+      - 'src/**'
+      - 'runtime/**'
+      - 'test/**'
+      - 'cmake*/**'
+      - 'scripts/**'
+      - '.cargo/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'CMakeLists.txt'
+      - 'CMakePresets.json'
+      - 'Makefile'
+      - '.gitattributes'
+      - '.github/actions/setup/**'
+      - '.github/actions/cache/**'
+      - '.github/scripts/install_deps.sh'
+      - '.github/workflows/test_treesitter_wasm.yml'
+  pull_request:
+    branches:
+      - 'master'
+      - 'release-[0-9]+.[0-9]+'
+    paths:
+      - 'src/**'
+      - 'runtime/**'
+      - 'test/**'
+      - 'cmake*/**'
+      - 'scripts/**'
+      - '.cargo/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'CMakeLists.txt'
+      - 'CMakePresets.json'
+      - 'Makefile'
+      - '.gitattributes'
+      - '.github/actions/setup/**'
+      - '.github/actions/cache/**'
+      - '.github/scripts/install_deps.sh'
+      - '.github/workflows/test_treesitter_wasm.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  BIN_DIR: ${{ github.workspace }}/bin
+
+jobs:
+  wasmtime:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          install_flags: "--test"
+      - name: Build dependencies with Wasmtime
+        run: |
+          set -euo pipefail
+          cmake -S cmake.deps --preset ci -D ENABLE_WASMTIME=ON -D USE_BUNDLED_TS_PARSERS=ON
+          cmake --build .deps -j"$(nproc)"
+      - name: Build
+        run: |
+          set -euo pipefail
+          cmake --preset ci -D ENABLE_WASMTIME=ON
+          cmake --build build -j"$(nproc)"
+      - name: functionaltest
+        timeout-minutes: 10
+        env:
+          TEST_FILE: test/functional/treesitter/wasm_spec.lua
+        run: cmake --build build --target functionaltest

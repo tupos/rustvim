@@ -1,0 +1,95 @@
+name: WASM build
+
+on:
+  push:
+    branches:
+      - 'master'
+      - 'release-[0-9]+.[0-9]+'
+    paths:
+      - 'src/**'
+      - 'runtime/**'
+      - 'cmake*/**'
+      - 'scripts/**'
+      - '.cargo/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'Makefile'
+      - 'CMakeLists.txt'
+      - 'test/CMakeLists.txt'
+      - 'test/wasm/**'
+      - '.github/scripts/build_wasm.sh'
+      - '.github/scripts/install_deps.sh'
+      - '.github/workflows/build_wasm.yml'
+  pull_request:
+    branches:
+      - 'master'
+      - 'release-[0-9]+.[0-9]+'
+    paths:
+      - 'src/**'
+      - 'runtime/**'
+      - 'cmake*/**'
+      - 'scripts/**'
+      - '.cargo/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'Makefile'
+      - 'CMakeLists.txt'
+      - 'test/CMakeLists.txt'
+      - 'test/wasm/**'
+      - '.github/scripts/build_wasm.sh'
+      - '.github/scripts/install_deps.sh'
+      - '.github/workflows/build_wasm.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  EMSDK: ${{ github.workspace }}/.deps/emsdk
+  EMSDK_VERSION: '6.0.2'
+
+jobs:
+  build-wasm:
+    name: Build and test WASM (CMake + Cargo + Emscripten)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install native and Rust dependencies
+        run: ./.github/scripts/install_deps.sh
+
+      - name: Cache Emscripten SDK
+        uses: actions/cache@v6.1.0
+        with:
+          path: ${{ env.EMSDK }}
+          key: ${{ runner.os }}-${{ runner.arch }}-emsdk-${{ env.EMSDK_VERSION }}
+
+      - name: Install Emscripten SDK
+        run: |
+          set -euo pipefail
+          if [ ! -f "$EMSDK/emsdk" ]; then
+            git clone --depth 1 https://github.com/emscripten-core/emsdk.git "$EMSDK"
+          fi
+          "$EMSDK/emsdk" install "$EMSDK_VERSION"
+          "$EMSDK/emsdk" activate "$EMSDK_VERSION"
+
+      - name: Build and test WASM
+        run: make wasmtest
+
+      - name: Upload browser bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: rustvim-wasm
+          path: build/wasm/site
+          if-no-files-found: error
