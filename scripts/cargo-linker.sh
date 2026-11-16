@@ -16,6 +16,11 @@ esac
 
 RVIM_CMAKE_CACHE="${RVIM_BUILD_DIR}/CMakeCache.txt"
 if [[ ! -r "${RVIM_CMAKE_CACHE}" ]]; then
+  # Dependencies may build before the editor is configured.
+  if [[ -z "${RUSTVIM_BUILD_DIR:-}" ]]; then
+    exec cc "$@"
+  fi
+
   printf '%s\n' \
     "cargo-linker: ${RVIM_CMAKE_CACHE} is unavailable; configure CMake first" \
     >&2

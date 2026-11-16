@@ -440,9 +440,10 @@ impl GridHandleAllocator {
     fn allocate(&self) -> GridId {
         // Relaxed ordering is sufficient because the counter only provides
         // unique values; access to each grid is synchronized separately.
+        #[allow(deprecated, reason = "OpenBSD 7.9 ships Rust 1.94")]
         let previous = self
             .last
-            .try_update(Ordering::Relaxed, Ordering::Relaxed, |last| {
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |last| {
                 last.checked_add(1)
             })
             .expect("grid handle space exhausted");
