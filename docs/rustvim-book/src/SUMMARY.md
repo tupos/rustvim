@@ -2,6 +2,9 @@
 
 [Introduction](introduction.md)
 
+- [Build system](build-system/index.md)
+  - [WASM build](build-system/wasm.md)
+
 # Rendering
 
 - [Cells, rows, and grids](rendering/basics.md)

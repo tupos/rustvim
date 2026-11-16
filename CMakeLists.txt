@@ -105,6 +105,9 @@ else()
 endif()
 
 list(INSERT CMAKE_PREFIX_PATH 0 ${DEPS_PREFIX})
+if(CMAKE_CROSSCOMPILING)
+  list(APPEND CMAKE_FIND_ROOT_PATH "${DEPS_PREFIX}")
+endif()
 
 if(APPLE)
   # If the macOS deployment target is not set manually (via $MACOSX_DEPLOYMENT_TARGET),
@@ -314,6 +317,17 @@ add_subdirectory(src/xxd)
 add_subdirectory(cmake.config)
 add_subdirectory(runtime)
 add_subdirectory(test)
+
+if(EMSCRIPTEN)
+  include(Wasm)
+elseif(NOT CMAKE_CROSSCOMPILING)
+  file(GENERATE OUTPUT "${PROJECT_BINARY_DIR}/host-tools-$<CONFIG>.cmake" CONTENT
+"set(LUA_PRG \"${LUA_GEN_PRG}\" CACHE FILEPATH \"Native Lua\" FORCE)
+set(LUA_GEN_PRG \"${LUA_GEN_PRG}\" CACHE FILEPATH \"Native generator Lua\" FORCE)
+set(NLUA0_HOST_PRG \"$<TARGET_FILE:nlua0>\" CACHE FILEPATH \"Native nlua0\" FORCE)
+set(NVIM_HOST_PRG \"$<TARGET_FILE:nvim_bin>\" CACHE FILEPATH \"Native editor\" FORCE)
+")
+endif()
 
 add_custom_target(uninstall
   COMMAND ${CMAKE_COMMAND} -P ${PROJECT_SOURCE_DIR}/cmake/UninstallHelper.cmake)

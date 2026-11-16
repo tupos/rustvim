@@ -2,7 +2,7 @@
 #include <stddef.h>
 #include <string.h>
 
-#include "tree_sitter/api.h"
+#include "static_ts_registry.h"
 
 extern const TSLanguage *tree_sitter_lua(void);
 extern const TSLanguage *tree_sitter_c(void);
@@ -30,6 +30,15 @@ static TsParserEntry parsers[] = {
   { "query", tree_sitter_query },
   { "vimdoc", tree_sitter_vimdoc },
 };
+
+// Returns a registry name, or NULL after the last entry.
+const char *nvim_ts_get_parser_name(size_t index)
+{
+  if (index >= sizeof(parsers) / sizeof(parsers[0])) {
+    return NULL;
+  }
+  return parsers[index].name;
+}
 
 const TSLanguage *nvim_ts_get_parser(const char *lang)
 {

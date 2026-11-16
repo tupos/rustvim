@@ -14,6 +14,31 @@ local NIL = vim.NIL
 before_each(clear)
 
 describe('treesitter language API', function()
+  it('loads a static parser without a runtime library file', function()
+    eq(
+      { true, { 'rustvim_builtin', 'lua' } },
+      exec_lua(function()
+        local requested
+        vim._ts_add_language_from_static = function(lang, symbol_name)
+          requested = { lang, symbol_name }
+          return true
+        end
+        local added = vim.treesitter.language.add('rustvim_builtin', { symbol_name = 'lua' })
+        return { added, requested }
+      end)
+    )
+  end)
+
+  it('includes static parsers in language completion', function()
+    eq(
+      true,
+      exec_lua(function()
+        vim._ts_static_languages = { rustvim_builtin = true }
+        return vim.list_contains(vim.treesitter.language._complete(), 'rustvim_builtin')
+      end)
+    )
+  end)
+
   -- error tests not requiring a parser library
   it('handles missing language', function()
     local parser, error = exec_lua(function()

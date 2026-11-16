@@ -1,102 +1,55 @@
 #!/usr/bin/env bash
 
-# Build nvim.wasm
-
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-OUTDIR="$ROOT/build-wasm"
-
-source "$ROOT/.emsdk/emsdk_env.sh"
-
-mkdir -p "$OUTDIR"
-
-if ! command -v emcc >/dev/null 2>&1; then
-  echo "ERROR: emcc not found"
-  exit 1
-fi
-
-if ! command -v zig >/dev/null 2>&1; then
-  echo "ERROR: zig not found"
-  exit 1
-fi
-
-emcc --version
-zig version
-
-# Install Binaryen if it is not already available.
-BINARYEN_VERSION=132
-BINARYEN_DIR="$ROOT/.binaryen"
-BINARYEN_BIN="$BINARYEN_DIR/binaryen-version_${BINARYEN_VERSION}/bin"
-
-if [ ! -x "$BINARYEN_BIN/wasm-opt" ]; then
-  echo "Installing Binaryen ${BINARYEN_VERSION}..."
-
-  mkdir -p "$BINARYEN_DIR"
-
-  curl -L \
-    "https://github.com/WebAssembly/binaryen/releases/download/version_${BINARYEN_VERSION}/binaryen-version_${BINARYEN_VERSION}-x86_64-linux.tar.gz" \
-    -o /tmp/binaryen.tar.gz
-
-  tar -xf /tmp/binaryen.tar.gz -C "$BINARYEN_DIR"
-fi
-
-export PATH="$BINARYEN_BIN:$PATH"
-
-wasm-opt --version
-
-zig build nvim_bin \
-  -Dtarget=wasm32-emscripten \
-  -Dcpu=generic+atomics+bulk_memory+mutable_globals \
-  -Demscripten-sysroot="$EMSDK/upstream/emscripten/cache/sysroot" \
-  -Doptimize=ReleaseSmall
-
-ZIG_OUT="$ROOT/zig-out/bin"
-
-# Optimize the final WASM artifact with Binaryen.
-wasm-opt -Oz -o "$ZIG_OUT/nvim.wasm" "$ZIG_OUT/nvim.wasm"
-
-required=(
-  nvim.wasm
-  nvim.js
-  nvim.data
-)
-
-missing=()
-
-for name in "${required[@]}"; do
-  if [ -f "$ZIG_OUT/$name" ]; then
-    cp "$ZIG_OUT/$name" "$OUTDIR/$name"
-  else
-    missing+=("$name")
-  fi
-done
-
-if [ "${#missing[@]}" -ne 0 ]; then
-  echo "ERROR: Missing required WASM artifacts: ${missing[*]}"
-  ls -la "$ZIG_OUT" || true
+if [[ $# -ne 2 ]]; then
+  printf 'Usage: %s RUST_TOOLCHAIN {wasm-package|wasmtest}\n' "$0" >&2
   exit 2
 fi
+wasm_rust_toolchain=$1
+wasm_target=$2
+case "$wasm_target" in
+  wasm-package|wasmtest) ;;
+  *) printf 'Unknown WASM build target: %s\n' "$wasm_target" >&2; exit 2 ;;
+esac
 
-echo "build-wasm.sh finished successfully."
+wasm_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+wasm_host_build="$wasm_root/build"
+wasm_host_deps="$wasm_root/.deps"
+wasm_build="$wasm_root/build/wasm"
+wasm_deps="$wasm_root/.deps/wasm"
 
-if [ "${BUNDLE_WASM:-0}" = "1" ]; then
-  BUNDLE_DIR="$ROOT/bundle-wasm"
-  ZIP_PATH="$ROOT/nvim-wasm-emscripten.zip"
-
-  rm -rf "$BUNDLE_DIR" "$ZIP_PATH"
-  mkdir -p "$BUNDLE_DIR"
-
-  cp "$OUTDIR"/nvim.wasm "$OUTDIR"/nvim.js "$OUTDIR"/nvim.data "$BUNDLE_DIR"/
-
-  cp "$ROOT"/src/wasm/*.py "$ROOT"/src/wasm/*.html "$ROOT"/src/wasm/*.js "$ROOT"/src/wasm/*.css "$BUNDLE_DIR"/
-
-  # Rewrite repo relative paths for the flat bundle layout
-  sed -i 's#\.\./\.\./zig-out/bin/#./#g' "$BUNDLE_DIR/nvim-worker.js"
-  sed -i 's#Path(__file__)\.resolve()\.parents\[2\]#Path(__file__).resolve().parent#' "$BUNDLE_DIR/serve.py"
-
-  ( cd "$BUNDLE_DIR" && zip -r "$ZIP_PATH" . )
-  rm -rf "$BUNDLE_DIR"
-
-  echo "Created $ZIP_PATH"
+if [[ ! -f "$wasm_host_deps/CMakeCache.txt" ]]; then
+  cmake -S "$wasm_root/cmake.deps" -B "$wasm_host_deps" -G Ninja
 fi
+cmake --build "$wasm_host_deps" -j"$(nproc)"
+
+if [[ ! -f "$wasm_host_build/CMakeCache.txt" ]]; then
+  cmake -S "$wasm_root" -B "$wasm_host_build" -G Ninja \
+    -DCMAKE_BUILD_TYPE=Release -DENABLE_LIBINTL=OFF
+fi
+wasm_host_config="$(sed -n 's/^CMAKE_BUILD_TYPE:[^=]*=//p' "$wasm_host_build/CMakeCache.txt")"
+wasm_host_config="${wasm_host_config:-Release}"
+cmake --build "$wasm_host_build" --config "$wasm_host_config" --target nvim -j"$(nproc)"
+
+wasm_sdk="${EMSDK:-$wasm_root/.deps/emsdk}"
+if [[ ! -f "$wasm_sdk/emsdk_env.sh" ]]; then
+  printf 'Install and activate Emscripten in %s or set EMSDK.\n' "$wasm_sdk" >&2
+  exit 1
+fi
+# shellcheck source=/dev/null
+source "$wasm_sdk/emsdk_env.sh"
+
+emcmake cmake -S "$wasm_root/cmake.deps" -B "$wasm_deps" -G Ninja \
+  -DUSE_BUNDLED_LUAJIT=OFF -DUSE_BUNDLED_LUA=ON \
+  -DUSE_BUNDLED_TS_PARSERS=ON -DCMAKE_C_FLAGS=-pthread
+cmake --build "$wasm_deps" -j"$(nproc)"
+
+emcmake cmake -S "$wasm_root" -B "$wasm_build" -G Ninja \
+  -C "$wasm_host_build/host-tools-$wasm_host_config.cmake" \
+  -DCMAKE_BUILD_TYPE=Release -DENABLE_LIBINTL=OFF -DENABLE_LTO=OFF \
+  -DPREFER_LUA=ON -DCOMPILE_LUA=OFF -DCMAKE_C_FLAGS=-pthread \
+  -DDEPS_PREFIX="$wasm_deps/usr" -DRUST_TARGET=wasm32-unknown-emscripten \
+  -DRUST_TOOLCHAIN="$wasm_rust_toolchain"
+cmake --build "$wasm_build" --target "$wasm_target" -j"$(nproc)"
+printf 'WASM browser bundle: %s/site\n' "$wasm_build"

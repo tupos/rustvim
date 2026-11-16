@@ -58,6 +58,10 @@ endif()
 # The unit test lib requires LuaJIT; it will be skipped if LuaJIT is missing.
 option(PREFER_LUA "Prefer Lua over LuaJIT in the nvim executable." OFF)
 if(PREFER_LUA)
+  if(EMSCRIPTEN)
+    # Emscripten resolves -lm through its C runtime, without a separate libm.a.
+    set(LUA_MATH_LIBRARY m)
+  endif()
   find_package(Lua 5.1 EXACT REQUIRED)
   target_include_directories(main_lib SYSTEM BEFORE INTERFACE ${LUA_INCLUDE_DIR})
   target_include_directories(nlua0 SYSTEM BEFORE PUBLIC ${LUA_INCLUDE_DIR})
@@ -772,6 +776,11 @@ if(WIN32)
 endif()
 
 find_program(CARGO_PRG cargo REQUIRED)
+set(RUST_TOOLCHAIN "" CACHE STRING "Optional rustup toolchain for Cargo")
+set(RUST_CARGO_COMMAND ${CARGO_PRG})
+if(RUST_TOOLCHAIN)
+  list(APPEND RUST_CARGO_COMMAND "+${RUST_TOOLCHAIN}")
+endif()
 set(RUST_WORKSPACE_DIR "${PROJECT_SOURCE_DIR}")
 set(CARGO_OUTPUT_DIR ${PROJECT_BINARY_DIR}/rust_target)
 set(RUST_TARGET "$ENV{CARGO_BUILD_TARGET}" CACHE STRING
@@ -820,6 +829,16 @@ if(RUST_TARGET)
   set(RUST_TARGET_OUTPUT_DIR "${RUST_TARGET_OUTPUT_DIR}/${RUST_TARGET}")
 endif()
 
+set(RUST_FLAGS "$ENV{RUSTFLAGS}")
+if(EMSCRIPTEN)
+  if(NOT RUST_TOOLCHAIN)
+    message(FATAL_ERROR "Set RUST_TOOLCHAIN to the nightly selected by the Makefile")
+  endif()
+  # Rebuild std with atomics for the browser's shared memory.
+  list(APPEND RUST_TARGET_ARGS -Zbuild-std=std,panic_unwind)
+  string(APPEND RUST_FLAGS " -Ctarget-feature=+atomics,+bulk-memory,+mutable-globals")
+endif()
+
 file(GLOB_RECURSE RUST_SOURCES CONFIGURE_DEPENDS
   "${CMAKE_CURRENT_SOURCE_DIR}/*.rs"
 )
@@ -829,6 +848,7 @@ file(GLOB_RECURSE RUST_MANIFESTS CONFIGURE_DEPENDS
 list(APPEND RUST_MANIFESTS
   "${RUST_WORKSPACE_DIR}/Cargo.toml"
   "${RUST_WORKSPACE_DIR}/Cargo.lock"
+  "${RUST_WORKSPACE_DIR}/rust-toolchain.toml"
 )
 set(RUST_DEPENDENCIES ${RUST_SOURCES} ${RUST_MANIFESTS})
 
@@ -836,6 +856,9 @@ set(RUST_CARGO_ENV
   "RUSTVIM_BUILD_DIR=${PROJECT_BINARY_DIR}"
   "RUSTVIM_CMAKE_BUILD=1"
   "RUSTVIM_CMAKE_CONFIG=$<CONFIG>")
+if(EMSCRIPTEN)
+  list(APPEND RUST_CARGO_ENV "RUSTFLAGS=${RUST_FLAGS}")
+endif()
 
 set(RUST_LIB_NAME
   "${CMAKE_STATIC_LIBRARY_PREFIX}rustvim_lib${CMAKE_STATIC_LIBRARY_SUFFIX}")
@@ -857,7 +880,7 @@ if(isMultiConfig)
 
   add_custom_target(build_rust ALL
     COMMAND ${CMAKE_COMMAND} -E env ${RUST_CARGO_ENV}
-      ${CARGO_PRG} build --locked --profile "${RUST_BUILD_PROFILE}"
+      ${RUST_CARGO_COMMAND} build --locked --profile "${RUST_BUILD_PROFILE}"
         ${RUST_TARGET_ARGS} --target-dir "${CARGO_OUTPUT_DIR}"
     BYPRODUCTS
       "${RUST_DEBUG_LIB_PATH}"
@@ -885,7 +908,7 @@ else()
     DEPENDS ${RUST_DEPENDENCIES}
     WORKING_DIRECTORY "${RUST_WORKSPACE_DIR}/src/nvim/rustvim_lib"
     COMMAND ${CMAKE_COMMAND} -E env ${RUST_CARGO_ENV}
-      ${CARGO_PRG} build --locked --profile "${RUST_BUILD_PROFILE}"
+      ${RUST_CARGO_COMMAND} build --locked --profile "${RUST_BUILD_PROFILE}"
         ${RUST_TARGET_ARGS} --target-dir "${CARGO_OUTPUT_DIR}"
     COMMENT "Building Rust library with Cargo..."
   )
@@ -902,6 +925,13 @@ set_property(TARGET nvim_bin APPEND PROPERTY
   LINK_DEPENDS ${RUST_DEPENDENCIES})
 target_link_libraries(nvim_bin PRIVATE rustvim_lib)
 add_dependencies(nvim_bin build_rust)
+
+if(EMSCRIPTEN)
+  add_custom_command(TARGET nvim_bin POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E true
+    BYPRODUCTS "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/nvim.wasm" "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/nvim.data"
+    VERBATIM)
+endif()
 
 target_sources(nlua0 PUBLIC ${NLUA0_SOURCES})
 
@@ -1021,7 +1051,7 @@ add_dependencies(rvim_libs libnvim build_rust)
 add_custom_target(build_rvim_libs)
 add_dependencies(build_rvim_libs libnvim build_rust)
 
-set(RUST_TEST_FLAGS "$ENV{RUSTFLAGS}")
+set(RUST_TEST_FLAGS "${RUST_FLAGS}")
 if(NOT MSVC)
   string(APPEND RUST_TEST_FLAGS " -Clinker=${CMAKE_C_COMPILER}")
 endif()
@@ -1030,7 +1060,7 @@ add_custom_target(rusttest
   COMMAND ${CMAKE_COMMAND} -E env
     ${RUST_CARGO_ENV}
     "RUSTFLAGS=${RUST_TEST_FLAGS}"
-    ${CARGO_PRG} test --workspace --locked ${RUST_TARGET_ARGS}
+    ${RUST_CARGO_COMMAND} test --workspace --locked ${RUST_TARGET_ARGS}
       --target-dir "${CARGO_OUTPUT_DIR}"
   DEPENDS build_rvim_libs
   WORKING_DIRECTORY "${RUST_WORKSPACE_DIR}"

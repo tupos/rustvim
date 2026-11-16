@@ -47,7 +47,7 @@ type CWindowPositionEmitter = unsafe extern "C" fn(VimHandleT, bool);
 unsafe extern "C" {
     fn ui_call_win_float_pos(
         grid: Integer,
-        window: Integer,
+        window: VimHandleT,
         anchor: CVimString,
         anchor_grid: Integer,
         anchor_row: f64,
@@ -320,7 +320,7 @@ impl WindowSurfaceOutput for NvimWindowSurfaceOutput {
         unsafe {
             ui_call_win_float_pos(
                 Integer::from(event.grid_id.as_native_handle()),
-                Integer::from(event.window_handle),
+                event.window_handle,
                 anchor,
                 Integer::from(event.anchor_grid_id.as_native_handle()),
                 event.anchor_position.row,

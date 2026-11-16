@@ -23,12 +23,23 @@ if [[ ! -r "${RVIM_CMAKE_CACHE}" ]]; then
 fi
 
 RVIM_C_COMPILER=
+RVIM_RUST_TARGET=
 while IFS='=' read -r RVIM_CACHE_KEY RVIM_CACHE_VALUE; do
-  if [[ "${RVIM_CACHE_KEY}" == CMAKE_C_COMPILER:* ]]; then
-    RVIM_C_COMPILER="${RVIM_CACHE_VALUE}"
-    break
-  fi
+  case "${RVIM_CACHE_KEY}" in
+    CMAKE_C_COMPILER:*)
+      RVIM_C_COMPILER="${RVIM_CACHE_VALUE}"
+      ;;
+    RUST_TARGET:*)
+      RVIM_RUST_TARGET="${RVIM_CACHE_VALUE}"
+      ;;
+  esac
 done < "${RVIM_CMAKE_CACHE}"
+
+# Cargo selects this GNU/Linux wrapper only for native build tools when
+# the configured target is Emscripten.
+if [[ "${RVIM_RUST_TARGET}" == wasm32-unknown-emscripten ]]; then
+  RVIM_C_COMPILER=cc
+fi
 
 if [[ -z "${RVIM_C_COMPILER}" ]]; then
   printf '%s\n' "cargo-linker: CMAKE_C_COMPILER is missing from ${RVIM_CMAKE_CACHE}" >&2

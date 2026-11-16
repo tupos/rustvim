@@ -43,7 +43,7 @@
 #define TS_META_QUERYMATCH "treesitter_querymatch"
 
 #ifdef __EMSCRIPTEN__
-extern const TSLanguage *nvim_ts_get_parser(const char *lang);
+# include "static_ts_registry.h"
 #endif
 
 typedef struct {
@@ -70,6 +70,47 @@ static PMap(cstr_t) langs = MAP_INIT;
 #ifdef HAVE_WASMTIME
 static wasm_engine_t *wasmengine;
 static TSWasmStore *ts_wasmstore;
+#endif
+
+// Validates and registers a parser shared by the file and static loaders.
+static int register_language(lua_State *L, const char *lang_name, const TSLanguage *lang,
+                             const char *description)
+{
+  if (map_has(cstr_t, &langs, lang_name)) {
+    lua_pushboolean(L, true);
+    return 1;
+  }
+
+  uint32_t lang_version = ts_language_abi_version(lang);
+  if (lang_version < TREE_SITTER_MIN_COMPATIBLE_LANGUAGE_VERSION
+      || lang_version > TREE_SITTER_LANGUAGE_VERSION) {
+    return luaL_error(L,
+                      "ABI version mismatch for %s: supported between %d and %d, found %d",
+                      description,
+                      TREE_SITTER_MIN_COMPATIBLE_LANGUAGE_VERSION,
+                      TREE_SITTER_LANGUAGE_VERSION, lang_version);
+  }
+
+  pmap_put(cstr_t)(&langs, xstrdup(lang_name), (TSLanguage *)lang);
+
+  lua_pushboolean(L, true);
+  return 1;
+}
+
+#ifdef __EMSCRIPTEN__
+// Loads a linked-in parser without a filesystem path.
+static int tslua_add_language_from_static(lua_State *L)
+{
+  const char *lang_name = luaL_checkstring(L, 1);
+  const char *symbol_name = luaL_optstring(L, 2, lang_name);
+  const TSLanguage *lang = nvim_ts_get_parser(symbol_name);
+  if (lang == NULL) {
+    lua_pushboolean(L, false);
+    return 1;
+  }
+
+  return register_language(L, lang_name, lang, lang_name);
+}
 #endif
 
 // TSLanguage
@@ -137,13 +178,6 @@ static int tslua_add_language_from_object(lua_State *L)
 static const TSLanguage *load_language_from_object(lua_State *L, const char *path,
                                                    const char *lang_name, const char *symbol)
 {
-#ifdef __EMSCRIPTEN__
-  const TSLanguage *static_lang = nvim_ts_get_parser(symbol);
-  if (static_lang != NULL) {
-    return static_lang;
-  }
-#endif
-
   uv_lib_t lib;
   if (uv_dlopen(path, &lib)) {
     xstrlcpy(IObuff, uv_dlerror(&lib), sizeof(IObuff));
@@ -236,20 +270,7 @@ static int add_language(lua_State *L, bool is_wasm)
                            ? load_language_from_wasm(L, path, lang_name)
                            : load_language_from_object(L, path, lang_name, symbol_name);
 
-  uint32_t lang_version = ts_language_abi_version(lang);
-  if (lang_version < TREE_SITTER_MIN_COMPATIBLE_LANGUAGE_VERSION
-      || lang_version > TREE_SITTER_LANGUAGE_VERSION) {
-    return luaL_error(L,
-                      "ABI version mismatch for %s: supported between %d and %d, found %d",
-                      path,
-                      TREE_SITTER_MIN_COMPATIBLE_LANGUAGE_VERSION,
-                      TREE_SITTER_LANGUAGE_VERSION, lang_version);
-  }
-
-  pmap_put(cstr_t)(&langs, xstrdup(lang_name), (TSLanguage *)lang);
-
-  lua_pushboolean(L, true);
-  return 1;
+  return register_language(L, lang_name, lang, path);
 }
 
 static int tslua_remove_lang(lua_State *L)
@@ -1848,6 +1869,22 @@ void nlua_treesitter_init(lua_State *const lstate) FUNC_ATTR_NONNULL_ALL
 
   lua_pushcfunction(lstate, tslua_add_language_from_object);
   lua_setfield(lstate, -2, "_ts_add_language_from_object");
+
+#ifdef __EMSCRIPTEN__
+  lua_pushcfunction(lstate, tslua_add_language_from_static);
+  lua_setfield(lstate, -2, "_ts_add_language_from_static");
+
+  lua_newtable(lstate);
+  for (size_t i = 0;; i++) {
+    const char *name = nvim_ts_get_parser_name(i);
+    if (name == NULL) {
+      break;
+    }
+    lua_pushboolean(lstate, true);
+    lua_setfield(lstate, -2, name);
+  }
+  lua_setfield(lstate, -2, "_ts_static_languages");
+#endif
 
 #ifdef HAVE_WASMTIME
   lua_pushcfunction(lstate, tslua_add_language_from_wasm);
