@@ -50,7 +50,7 @@ if(ENABLE_UNIBILIUM)
 endif()
 
 if(ENABLE_WASMTIME)
-  find_package(Wasmtime 48.0 EXACT REQUIRED)
+  find_package(Wasmtime 48.0.8 EXACT REQUIRED)
   target_link_libraries(main_lib INTERFACE wasmtime)
   target_compile_definitions(nvim_bin PRIVATE HAVE_WASMTIME)
 endif()
@@ -823,6 +823,9 @@ if(RUST_BUILD_PROFILE STREQUAL "dev")
 endif()
 
 set(RUST_TARGET_ARGS)
+if(ENABLE_WASMTIME)
+  list(APPEND RUST_TARGET_ARGS --features rustvim_core/wasmtime)
+endif()
 set(RUST_TARGET_OUTPUT_DIR "${CARGO_OUTPUT_DIR}")
 if(RUST_TARGET)
   list(APPEND RUST_TARGET_ARGS --target "${RUST_TARGET}")
@@ -923,6 +926,10 @@ endif()
 add_dependencies(rustvim_lib build_rust)
 set_property(TARGET nvim_bin APPEND PROPERTY
   LINK_DEPENDS ${RUST_DEPENDENCIES})
+if(ENABLE_WASMTIME)
+  # Tree-sitter's Wasmtime references must precede the archive providing them.
+  target_link_libraries(nvim_bin PRIVATE ${TREESITTER_LIBRARY})
+endif()
 target_link_libraries(nvim_bin PRIVATE rustvim_lib)
 add_dependencies(nvim_bin build_rust)
 
@@ -1063,6 +1070,16 @@ add_custom_target(rusttest
     ${RUST_CARGO_COMMAND} test --workspace --locked ${RUST_TARGET_ARGS}
       --target-dir "${CARGO_OUTPUT_DIR}"
   DEPENDS build_rvim_libs
+  WORKING_DIRECTORY "${RUST_WORKSPACE_DIR}"
+  USES_TERMINAL
+  VERBATIM
+)
+
+add_custom_target(lintrust
+  COMMAND ${CMAKE_COMMAND} -E env ${RUST_CARGO_ENV}
+    ${RUST_CARGO_COMMAND} clippy --workspace --all-targets --locked --keep-going
+      ${RUST_TARGET_ARGS} --target-dir "${CARGO_OUTPUT_DIR}" -- -D warnings
+  DEPENDS libnvim
   WORKING_DIRECTORY "${RUST_WORKSPACE_DIR}"
   USES_TERMINAL
   VERBATIM

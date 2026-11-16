@@ -6,6 +6,10 @@
 #[cfg(test)]
 extern crate rustvim_tracing as _;
 
+// Include Wasmtime's C API in the same Rust link as the editor and its tests.
+#[cfg(feature = "wasmtime")]
+extern crate wasmtime_c_api as _;
+
 mod context;
 pub mod defines;
 pub mod eval;

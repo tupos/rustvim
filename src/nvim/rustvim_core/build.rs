@@ -138,14 +138,18 @@ fn main() {
         workspace_dir.join("src/nvim").display()
     );
 
-    if env::var_os("RUSTVIM_CMAKE_BUILD").is_none() {
-        build_libnvim(&build_dir);
-    }
-
     let cache_path = build_dir.join("CMakeCache.txt");
     println!("cargo::rerun-if-changed={}", cache_path.display());
     let cache = fs::read_to_string(&cache_path)
         .unwrap_or_else(|error| panic!("failed to read {}: {error}", cache_path.display()));
+    assert!(
+        !cmake_cache_enabled(&cache, "ENABLE_WASMTIME") || cfg!(feature = "wasmtime"),
+        "ENABLE_WASMTIME requires --features rustvim_core/wasmtime when invoking Cargo"
+    );
+
+    if env::var_os("RUSTVIM_CMAKE_BUILD").is_none() {
+        build_libnvim(&build_dir);
+    }
 
     println!(
         "cargo::rustc-link-search=native={}",
@@ -162,9 +166,6 @@ fn main() {
     }
     if cmake_cache_enabled(&cache, "ENABLE_UNIBILIUM") {
         link_cmake_library(&cache, "UNIBILIUM_LIBRARY");
-    }
-    if cmake_cache_enabled(&cache, "ENABLE_WASMTIME") {
-        link_cmake_library(&cache, "WASMTIME_LIBRARY");
     }
 
     if cmake_cache_enabled(&cache, "PREFER_LUA") {

@@ -3,7 +3,17 @@ name = "rustvim_core"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+wasmtime = ["dep:wasmtime-c-api"]
+
 [dependencies]
 libc = { workspace = true }
 thiserror = { workspace = true }
 rustvim_tracing = { path = "../rustvim_tracing" }
+wasmtime-c-api = {
+  package = "wasmtime-c-api-impl",
+  version = "=48.0.8",
+  optional = true,
+  default-features = false,
+  features = ["cranelift", "gc", "gc-null"],
+}

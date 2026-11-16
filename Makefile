@@ -175,8 +175,7 @@ formatrust:
 format: formatrust
 
 lintrust: | build/.ran-cmake
-	cargo clippy --workspace --all-targets --locked --keep-going \
-		--target-dir build/rust_target -- -D warnings
+	$(CMAKE) --build build --target lintrust
 
 LINT=lintlua lintsh lintc clang-analyzer lintcommit lintdoc lintdocurls lint emmylua-check lintquery linterrcodes
 TEST=functionaltest unittest rusttest

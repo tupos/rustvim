@@ -1,5 +1,8 @@
 if(ENABLE_WASMTIME)
-  set(TREESITTER_ARGS -D TREE_SITTER_FEATURE_WASM=ON)
+  # The final executable resolves Wasmtime's C API from the Rustvim archive.
+  set(TREESITTER_ARGS
+    -D TREE_SITTER_FEATURE_WASM=ON
+    -D WASMTIME_LIBRARY:STRING=rustvim_lib)
 endif()
 
 get_externalproject_options(treesitter ${DEPS_IGNORE_SHA})
