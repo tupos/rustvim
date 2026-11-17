@@ -1,3 +1,63 @@
+# Installing Rustvim
+
+Rustvim currently provides **nightly builds only**. Stable Rustvim releases will
+be available later.
+
+You can install Rustvim from a [nightly download](#rustvim-nightly-downloads) or
+[build it from source](#building-rustvim-from-source).
+
+## Rustvim nightly downloads
+
+Download packages from the [Rustvim nightly release](https://github.com/tupos/rustvim/releases/tag/nightly).
+
+| Platform | Downloads |
+| --- | --- |
+| Linux x86-64 | [tar.gz](https://github.com/tupos/rustvim/releases/download/nightly/nvim-linux-x86_64.tar.gz), [AppImage](https://github.com/tupos/rustvim/releases/download/nightly/nvim-linux-x86_64.appimage) |
+| Linux ARM64 | [tar.gz](https://github.com/tupos/rustvim/releases/download/nightly/nvim-linux-arm64.tar.gz), [AppImage](https://github.com/tupos/rustvim/releases/download/nightly/nvim-linux-arm64.appimage) |
+| macOS x86-64 | [tar.gz](https://github.com/tupos/rustvim/releases/download/nightly/nvim-macos-x86_64.tar.gz) |
+| macOS ARM64 | [tar.gz](https://github.com/tupos/rustvim/releases/download/nightly/nvim-macos-arm64.tar.gz) |
+| Windows x86-64 | [MSI](https://github.com/tupos/rustvim/releases/download/nightly/nvim-win64.msi), [ZIP](https://github.com/tupos/rustvim/releases/download/nightly/nvim-win64.zip) |
+| Windows ARM64 | [MSI](https://github.com/tupos/rustvim/releases/download/nightly/nvim-win-arm64.msi), [ZIP](https://github.com/tupos/rustvim/releases/download/nightly/nvim-win-arm64.zip) |
+| Browser (WASM) | [ZIP](https://github.com/tupos/rustvim/releases/download/nightly/nvim-wasm-emscripten.zip) |
+
+See the nightly release notes for platform-specific installation steps. Start
+the native editor with `nvim` (`nvim.exe` on Windows).
+
+User documentation is available at https://rustvim.org/doc/.
+
+## Building Rustvim from source
+
+Use the `master` branch of the [Rustvim repository](https://github.com/tupos/rustvim).
+Rust and Cargo are required in addition to the native build prerequisites listed
+in [BUILD.md](./BUILD.md#build-prerequisites).
+
+For example, on a Unix-like system with [rustup](https://rustup.rs/) installed:
+
+```bash
+git clone --branch master https://github.com/tupos/rustvim.git
+cd rustvim
+make rust-toolchain
+make CMAKE_BUILD_TYPE=RelWithDebInfo \
+  CMAKE_INSTALL_PREFIX="$HOME/.local/opt/rustvim"
+make install
+```
+
+To use this installation, add its `bin` directory to your shell configuration:
+
+```bash
+export PATH="$HOME/.local/opt/rustvim/bin:$PATH"
+```
+
+On BSD, use `gmake` instead of `make` and the platform's Rust/Cargo packages.
+For Windows builds, see [Building on Windows](./BUILD.md#building-on-windows).
+
+# Upstream Neovim installation instructions
+
+The following is upstream Neovim documentation. Its stable and nightly releases,
+repository links, and package-manager commands refer to Neovim.
+
+---
+
 You can install Neovim from [download](#install-from-download), [package](#install-from-package), or [source](#install-from-source) in just a few seconds.
 
 ---
