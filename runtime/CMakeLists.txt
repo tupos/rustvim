@@ -113,7 +113,7 @@ endif()
 
 install_helper(
   FILES ${CMAKE_CURRENT_SOURCE_DIR}/nvim.png
-  DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/icons/hicolor/128x128/apps)
+  DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/icons/hicolor/512x512/apps)
 
 file(GLOB RUNTIME_ROOT_FILES CONFIGURE_DEPENDS *.vim *.lua *.ico)
 install_helper(FILES ${RUNTIME_ROOT_FILES}
