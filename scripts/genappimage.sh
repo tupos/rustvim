@@ -16,7 +16,7 @@ ARCH_OUTPUT=$ARCH
 TAG=$1
 
 # App name
-APP=org.neovim.nvim
+APP=org.rustvim.rustvim
 
 ROOT_DIR="$(git rev-parse --show-toplevel)"
 APP_BUILD_DIR="$ROOT_DIR/build"
@@ -86,7 +86,8 @@ export OUTPUT="${OUTPUT:-nvim-linux-$ARCH_OUTPUT.appimage}"
 
 # If it's a release generate the zsync file
 if [ -n "$TAG" ]; then
-  export UPDATE_INFORMATION="gh-releases-zsync|neovim|neovim|$TAG|${OUTPUT}.zsync"
+  APPIMAGE_REPOSITORY="${GITHUB_REPOSITORY:-tupos/rustvim}"
+  export UPDATE_INFORMATION="gh-releases-zsync|${APPIMAGE_REPOSITORY/\//|}|$TAG|${OUTPUT}.zsync"
 fi
 
 # Generate AppImage.

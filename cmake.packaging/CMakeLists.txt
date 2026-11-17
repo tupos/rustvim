@@ -2,12 +2,11 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|ARM64|aarch64)$")
   set(CMAKE_SYSTEM_PROCESSOR arm64)
 endif()
 
-set(CPACK_PACKAGE_NAME "Neovim")
-set(CPACK_PACKAGE_VENDOR "neovim.io")
+set(CPACK_PACKAGE_NAME "Rustvim")
+set(CPACK_PACKAGE_VENDOR "rustvim.org")
 set(CPACK_PACKAGE_DIRECTORY ${PROJECT_BINARY_DIR})
 
-# From the GitHub About section
-set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Vim-fork focused on extensibility and usability.")
+set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Neovim fork with components rewritten in Rust.")
 
 set(CPACK_PACKAGE_INSTALL_DIRECTORY ${CPACK_PACKAGE_NAME})
 
@@ -37,14 +36,13 @@ if(WIN32)
   # CPACK_WIX_UPGRADE_GUID should be set, but should never change.
   # CPACK_WIX_PRODUCT_GUID should not be set (leave as default to auto-generate).
 
-  # The following guid is just a randomly generated guid that's been pasted here.
-  # It has no special meaning other than to supply it to WIX.
-  set(CPACK_WIX_UPGRADE_GUID "207A1A70-7B0C-418A-A153-CA6883E38F4D")
+  # Rustvim has a separate upgrade identity from Neovim.
+  set(CPACK_WIX_UPGRADE_GUID "43505FDE-B995-4A3F-A410-D3D63C76FF64")
   set(CPACK_WIX_PRODUCT_ICON ${PROJECT_SOURCE_DIR}/runtime/neovim.ico)
 
   # Create start menu and desktop shortcuts
   set(CPACK_WIX_PROGRAM_MENU_FOLDER "${CPACK_PACKAGE_NAME}")
-  set(CPACK_PACKAGE_EXECUTABLES "nvim" "Neovim")
+  set(CPACK_PACKAGE_EXECUTABLES "nvim" "Rustvim")
   set(CPACK_WIX_INSTALL_SCOPE "perMachine")
 
   set(CPACK_WIX_UI_REF "WixUI_CustomInstallDir")
@@ -62,8 +60,8 @@ elseif(APPLE)
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   set(CPACK_PACKAGE_FILE_NAME "nvim-linux-${CMAKE_SYSTEM_PROCESSOR}" CACHE STRING "Base filename for cpack output (no extension)")
   set(CPACK_GENERATOR TGZ DEB)
-  set(CPACK_DEBIAN_PACKAGE_NAME "Neovim") # required
-  set(CPACK_DEBIAN_PACKAGE_MAINTAINER "Neovim.io") # required
+  set(CPACK_DEBIAN_PACKAGE_NAME "rustvim") # required
+  set(CPACK_DEBIAN_PACKAGE_MAINTAINER "Rustvim") # required
 
   # Automatically compute required shared lib dependencies.
   # Unfortunately, you "just need to know" that this has a hidden

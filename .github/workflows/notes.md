@@ -4,8 +4,8 @@ ${NVIM_VERSION}
 
 ## Release notes
 
-- [Changelog](https://github.com/neovim/neovim/commit/${NVIM_COMMIT}) (fixes + features)
-- [News](./runtime/doc/news.txt) (`:help news` in Nvim)
+- [Source commit](https://github.com/${GH_REPO}/commit/${NVIM_COMMIT})
+- [News](https://github.com/${GH_REPO}/blob/${NVIM_COMMIT}/runtime/doc/news.txt) (`:help news`)
 
 ## Install
 
@@ -23,7 +23,7 @@ ${NVIM_VERSION}
 2. Run the MSI
 3. Run `nvim.exe` in your terminal
 
-Note: On Windows "Server" you may need to [install `vcruntime*.dll`](https://neovim.io/doc/install/#windows).
+If a required runtime DLL is missing, install the [Microsoft Visual C++ Redistributable](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist).
 
 ### macOS (x86_64)
 
@@ -41,7 +41,7 @@ Note: On Windows "Server" you may need to [install `vcruntime*.dll`](https://neo
 
 ### Linux (x86_64)
 
-If your system does not have the required glibc version, try the (unsupported) [builds for older glibc](https://github.com/neovim/neovim-releases).
+The Linux packages are built on Ubuntu 22.04. For older glibc systems, build Rustvim from source.
 
 #### AppImage
 
@@ -77,6 +77,14 @@ If your system does not have the required glibc version, try the (unsupported) [
 2. Extract: `tar xzvf nvim-linux-arm64.tar.gz`
 3. Run `./nvim-linux-arm64/bin/nvim`
 
+### Browser (WASM)
+
+1. Download **nvim-wasm-emscripten.zip** and extract it.
+2. Run `python3 serve.py` in the extracted directory.
+3. Open http://localhost:8002 in your browser.
+
+The included server sets the cross-origin isolation headers required by WASM threads.
+
 ### Other
 
-- Install by [package manager](https://github.com/neovim/neovim/blob/master/INSTALL.md#install-from-package)
+- [Build from source](https://github.com/${GH_REPO}/blob/${NVIM_COMMIT}/BUILD.md)

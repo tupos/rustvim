@@ -42,12 +42,18 @@ on:
       - '.github/scripts/install_deps.sh'
       - '.github/workflows/build_wasm.yml'
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      source_sha:
+        description: Commit to build for a release
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ inputs.source_sha || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
@@ -64,6 +70,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7.0.1
         with:
+          ref: ${{ inputs.source_sha || github.sha }}
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Install native and Rust dependencies
