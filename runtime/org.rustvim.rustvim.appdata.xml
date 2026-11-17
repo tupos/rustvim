@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Copyright 2018 Neovim contributors
+  Copyright 2026 Rustvim contributors
+-->
+<component type="desktop-application">
+  <id>org.rustvim.rustvim</id>
+  <translation type="gettext">nvim</translation>
+  <project_license>Apache-2.0</project_license>
+  <metadata_license>CC0-1.0</metadata_license>
+  <name>Rustvim</name>
+  <summary>Neovim fork with components rewritten in Rust</summary>
+
+  <description>
+    <p>Rustvim keeps Neovim's editing model and plugin interfaces while moving editor components from C to Rust.</p>
+  </description>
+
+  <developer id="org.rustvim">
+    <name>Rustvim contributors</name>
+  </developer>
+
+  <!-- Populated by scripts/release.sh when a Rustvim release is tagged. -->
+  <releases>
+  </releases>
+
+  <content_rating type="oars-1.1"/>
+  <launchable type="desktop-id">org.rustvim.rustvim.desktop</launchable>
+  <url type="homepage">https://rustvim.org/</url>
+  <url type="bugtracker">https://github.com/tupos/rustvim/issues</url>
+  <url type="help">https://rustvim.org/doc/</url>
+  <url type="translate">https://github.com/tupos/rustvim/tree/master/src/nvim/po</url>
+  <provides>
+    <binary>nvim</binary>
+    <id>nvim</id>
+  </provides>
+</component>

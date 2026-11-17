@@ -1,0 +1,346 @@
+name: release
+on:
+  schedule:
+    - cron: '5 5 * * *'
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'nightly or an existing vMAJOR.MINOR.PATCH tag'
+        required: false
+        default: nightly
+  push:
+    tags:
+      - v[0-9]+.[0-9]+.[0-9]+
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.event_name == 'push' && github.ref_name || github.event.inputs.tag_name || 'nightly' }}
+  cancel-in-progress: false
+
+# Build on the oldest supported images, so we have broader compatibility
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      build_needed: ${{ steps.changes.outputs.build_needed }}
+      build_type: ${{ steps.build.outputs.build_type }}
+      appimage_tag: ${{ steps.build.outputs.appimage_tag }}
+      tag_name: ${{ steps.build.outputs.tag_name }}
+      source_sha: ${{ steps.build.outputs.source_sha }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check whether a nightly build is needed
+        id: changes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          build_needed=true
+          if [ "$GITHUB_EVENT_NAME" = schedule ]; then
+            commit="$(git rev-parse HEAD)"
+            if nightly_commit="$(git rev-parse -q --verify 'refs/tags/nightly^{commit}')" &&
+               [ "$commit" = "$nightly_commit" ] &&
+               [ "$(gh release view nightly --json isDraft --jq '.isDraft')" = false ]; then
+              build_needed=false
+            fi
+          fi
+          printf 'build_needed=%s\n' "$build_needed" >> "$GITHUB_OUTPUT"
+      - name: Select release source and build type
+        id: build
+        env:
+          REQUESTED_TAG: ${{ github.event.inputs.tag_name || 'nightly' }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            tag_name="$GITHUB_REF_NAME"
+          else
+            tag_name="$REQUESTED_TAG"
+          fi
+
+          if [ "$tag_name" = nightly ]; then
+            source_sha="$(git rev-parse HEAD)"
+            build_type=RelWithDebInfo
+            appimage_tag=nightly
+          else
+            if [[ ! "$tag_name" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              printf 'Expected nightly or an existing vMAJOR.MINOR.PATCH tag.\n' >&2
+              exit 1
+            fi
+            source_sha="$(git rev-parse --verify "refs/tags/${tag_name}^{commit}")"
+            build_type=Release
+            appimage_tag=latest
+          fi
+
+          {
+            printf 'tag_name=%s\n' "$tag_name"
+            printf 'source_sha=%s\n' "$source_sha"
+            printf 'build_type=%s\n' "$build_type"
+            printf 'appimage_tag=%s\n' "$appimage_tag"
+          } >> "$GITHUB_OUTPUT"
+
+  linux:
+    needs: setup
+    if: needs.setup.outputs.build_needed == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ ubuntu-22.04, ubuntu-22.04-arm ]
+        include:
+          - runner: ubuntu-22.04
+            arch: x86_64
+          - runner: ubuntu-22.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    env:
+      CMAKE_BUILD_TYPE: ${{ needs.setup.outputs.build_type }}
+      LDAI_NO_APPSTREAM: 1 # skip checking (broken) AppStream metadata for issues
+    outputs:
+      version: ${{ steps.build.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ needs.setup.outputs.source_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - run: ./.github/scripts/install_deps.sh
+      - run: sudo apt-get install -y libfuse2
+
+      - name: appimage
+        env:
+          APPIMAGE_TAG: ${{ needs.setup.outputs.appimage_tag }}
+        run:  |
+          ./scripts/genappimage.sh "${APPIMAGE_TAG}"
+
+      - name: tar.gz
+        run: cpack --config build/CPackConfig.cmake -G TGZ
+      - uses: actions/upload-artifact@v7
+        with:
+          name: nvim-appimage-${{ matrix.arch }}
+          path: |
+            build/bin/nvim-linux-${{ matrix.arch }}.appimage
+            build/bin/nvim-linux-${{ matrix.arch }}.appimage.zsync
+          if-no-files-found: error
+          retention-days: 1
+      - uses: actions/upload-artifact@v7
+        with:
+          name: nvim-linux-${{ matrix.arch }}
+          path: |
+            build/nvim-linux-${{ matrix.arch }}.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+      - name: Export version
+        id: build
+        run: |
+          printf 'version<<END\n' >> $GITHUB_OUTPUT
+          ./build/bin/nvim --version | head -n 3 >> $GITHUB_OUTPUT
+          printf 'END\n' >> $GITHUB_OUTPUT
+  macos:
+    needs: setup
+    if: needs.setup.outputs.build_needed == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ macos-15-intel, macos-15 ]
+        include:
+          - runner: macos-15-intel
+            arch: x86_64
+          - runner: macos-15
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    env:
+      CMAKE_BUILD_TYPE: ${{ needs.setup.outputs.build_type }}
+      MACOSX_DEPLOYMENT_TARGET: 11.0
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ needs.setup.outputs.source_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install dependencies
+        run: ./.github/scripts/install_deps.sh
+
+      - name: Build deps
+        run: |
+          cmake -S cmake.deps -B .deps -G Ninja \
+            -D CMAKE_BUILD_TYPE="${CMAKE_BUILD_TYPE}" \
+            -D CMAKE_FIND_FRAMEWORK=NEVER
+          cmake --build .deps
+      - name: Build Rustvim
+        run: |
+          cmake -B build -G Ninja \
+            -D CMAKE_BUILD_TYPE="${CMAKE_BUILD_TYPE}" \
+            -D ENABLE_LIBINTL=OFF \
+            -D CMAKE_FIND_FRAMEWORK=NEVER
+          cmake --build build
+      - name: Package
+        run: cpack --config build/CPackConfig.cmake
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: nvim-macos-${{ matrix.arch }}
+          path: build/nvim-macos-${{ matrix.arch }}.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  windows:
+    needs: setup
+    if: needs.setup.outputs.build_needed == 'true'
+    strategy:
+      matrix:
+        include:
+          - runner: windows-2022
+            arch: x86_64
+            rust_target: x86_64-pc-windows-msvc
+            archive_name: nvim-win64
+          - runner: windows-11-arm
+            arch: arm64
+            rust_target: aarch64-pc-windows-msvc
+            archive_name: nvim-win-arm64
+    runs-on: ${{ matrix.runner }}
+    env:
+      CMAKE_BUILD_TYPE: ${{ needs.setup.outputs.build_type }}
+      CARGO_BUILD_TARGET: ${{ matrix.rust_target }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ needs.setup.outputs.source_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - run: .github/scripts/env.ps1
+        env:
+          BUILD_ARCH: ${{ matrix.arch }}
+      - name: Install native and Rust dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./.github/scripts/install_deps.sh
+          rustup target add "$CARGO_BUILD_TARGET"
+      - name: Install Wix
+        run: |
+          Invoke-WebRequest -Uri "https://github.com/wixtoolset/wix3/releases/download/wix3141rtm/wix314-binaries.zip" -OutFile "wix314-binaries.zip"
+          Expand-Archive -Path "wix314-binaries.zip" -DestinationPath "C:/wix"
+          echo "C:\wix" >> $env:GITHUB_PATH
+      - name: Build deps
+        shell: pwsh
+        run: |
+          cmake -S cmake.deps -B .deps -G Ninja -DCMAKE_BUILD_TYPE="${env:CMAKE_BUILD_TYPE}"
+          cmake --build .deps
+      - name: Build package
+        shell: pwsh
+        run: |
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE="${env:CMAKE_BUILD_TYPE}"
+          cmake --build build --target package
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: nvim-win-${{ matrix.arch }}
+          path: |
+            build/${{ matrix.archive_name }}.zip
+            build/${{ matrix.archive_name }}.msi
+          if-no-files-found: error
+          retention-days: 1
+
+  wasm:
+    needs: setup
+    if: needs.setup.outputs.build_needed == 'true'
+    uses: ./.github/workflows/build_wasm.yml
+    with:
+      source_sha: ${{ needs.setup.outputs.source_sha }}
+
+  publish:
+    needs: [setup, linux, macos, windows, wasm]
+    if: needs.setup.outputs.build_needed == 'true'
+    runs-on: ubuntu-latest
+    env:
+      GH_REPO: ${{ github.repository }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TAG_NAME: ${{ needs.setup.outputs.tag_name }}
+    concurrency:
+      group: release-publish
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    steps:
+      # Must perform checkout first, since it deletes the target directory
+      # before running, and would therefore delete the downloaded artifacts
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ needs.setup.outputs.source_sha }}
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v8
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y gettext-base zip
+
+      - name: Package browser bundle
+        working-directory: rustvim-wasm
+        run: |
+          set -euo pipefail
+          mkdir ../nvim-wasm-emscripten
+          zip -r ../nvim-wasm-emscripten/nvim-wasm-emscripten.zip .
+
+      - name: Publish release
+        env:
+          NVIM_VERSION: ${{ needs.linux.outputs.version }}
+          NVIM_COMMIT: ${{ needs.setup.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          envsubst '${GH_REPO} ${NVIM_VERSION} ${NVIM_COMMIT}' \
+            < "$GITHUB_WORKSPACE/.github/workflows/notes.md" > "$RUNNER_TEMP/notes.md"
+
+          shopt -s failglob
+          assets=(
+            nvim-macos-x86_64/* nvim-macos-arm64/*
+            nvim-linux-x86_64/* nvim-linux-arm64/*
+            nvim-appimage-x86_64/* nvim-appimage-arm64/*
+            nvim-win-x86_64/* nvim-win-arm64/*
+            nvim-wasm-emscripten/*
+          )
+          tags=("$TAG_NAME")
+          if [ "$TAG_NAME" != nightly ]; then
+            tag_commit="$(gh api "repos/$GH_REPO/commits/$TAG_NAME" --jq '.sha')"
+            if [ "$tag_commit" != "$NVIM_COMMIT" ]; then
+              printf 'Release tag %s changed during the build.\n' "$TAG_NAME" >&2
+              exit 1
+            fi
+            tags+=(stable)
+          fi
+
+          for tag in "${tags[@]}"; do
+            release_draft="$(gh api "repos/$GH_REPO/releases?per_page=100" --paginate \
+              --jq ".[] | select(.tag_name == \"$tag\") | .draft")"
+            if [ -n "$release_draft" ]; then
+              if [[ "$tag" != nightly && "$tag" != stable && "$release_draft" != true ]]; then
+                printf 'Release %s is already published.\n' "$tag"
+                continue
+              fi
+              gh release delete "$tag" --yes
+            fi
+
+            options=(--latest)
+            if [[ "$tag" == nightly || "$tag" == stable ]]; then
+              ref="$(gh api "repos/$GH_REPO/git/matching-refs/tags/$tag" \
+                --jq ".[] | select(.ref == \"refs/tags/$tag\") | .ref")"
+              if [ -n "$ref" ]; then
+                gh api --silent --method PATCH "repos/$GH_REPO/git/refs/tags/$tag" \
+                  -f "sha=$NVIM_COMMIT" -F force=true
+              else
+                gh api --silent --method POST "repos/$GH_REPO/git/refs" \
+                  -f "ref=refs/tags/$tag" -f "sha=$NVIM_COMMIT"
+              fi
+              options=(--latest=false)
+              if [ "$tag" == nightly ]; then
+                options+=(--prerelease)
+              fi
+            fi
+
+            gh release create "$tag" --draft --verify-tag --title "Rustvim $tag" \
+              --notes-file "$RUNNER_TEMP/notes.md" "${assets[@]}"
+            gh release edit "$tag" --draft=false "${options[@]}"
+          done
