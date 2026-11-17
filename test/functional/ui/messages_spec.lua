@@ -24,6 +24,12 @@ local is_os = t.is_os
 local fn = n.fn
 local skip = t.skip
 
+local intro_attrs = {
+  [100] = { foreground = 0x57a6e5 },
+  [101] = { foreground = 0x91c95b },
+  [102] = { foreground = 0xdb763e },
+}
+
 describe('ui/ext_messages', function()
   local screen
   local fname = 'Xtest_functional_ui_messages_spec'
@@ -2258,14 +2264,15 @@ describe('ui/builtin messages', function()
 
   it('supports :intro with cmdheight=0 #26505', function()
     screen:try_resize(80, 24)
+    screen:add_extra_attr_ids(intro_attrs)
     command('set cmdheight=0')
     feed(':intro<CR>')
     screen:expect([[
                                                                                       |*3
-                                           {16:│} {26:╲} {26:││}                                     |
-                                           {16:││}{26:╲╲││}                                     |
-                                           {16:││} {26:╲} {26:│}                                     |
-                                                                                      |
+                                          {100:▄}{101:▄█}{102:▄▄▄▄▄}                                    |
+                                          {100:██}{101:██▄}{102:▄██}                                    |
+                                          {100:██} {101:▀██}{102:█▄}                                    |
+                                          {100:▀█}  {101:▀█▀}{102:▀}                                    |
       {MATCH:.*}|
                         {1:────────────────────────────────────────────}                  |
                       Rustvim is open source and freely distributable                 |
@@ -2327,15 +2334,16 @@ describe('ui/ext_messages', function()
   end)
 
   it('supports intro screen', function()
+    screen:add_extra_attr_ids(intro_attrs)
     -- intro message is not externalized. But check that it still works.
     -- Note parts of it depends on version or is indeterministic. We ignore those parts.
     local introscreen = [[
       ^                                                                                |
       {1:~                                                                               }|*2
-      {1:~                                    }{16:│} {26:╲} {26:││}{1:                                     }|
-      {1:~                                    }{16:││}{26:╲╲││}{1:                                     }|
-      {1:~                                    }{16:││} {26:╲} {26:│}{1:                                     }|
-      {1:~                                                                               }|
+      {1:~                                  } {100:▄}{101:▄█}{102:▄▄▄▄▄} {1:                                   }|
+      {1:~                                  } {100:██}{101:██▄}{102:▄██} {1:                                   }|
+      {1:~                                  } {100:██} {101:▀██}{102:█▄} {1:                                   }|
+      {1:~                                  } {100:▀█}  {101:▀█▀}{102:▀} {1:                                   }|
       {1:~{MATCH: +}}{26:RUSTVIM {MATCH:%S+}}{1:{MATCH: +}}|
       {1:~                 ────────────────────────────────────────────                  }|
       {1:~               }Rustvim is open source and freely distributable{1:                 }|
@@ -2372,10 +2380,10 @@ describe('ui/ext_messages', function()
         ^                                                                                |
         {1:~    }{4:     }{1:                                                                      }|
         {1:~                                                                               }|
-        {1:~                                    }{16:│} {26:╲} {26:││}{1:                                     }|
-        {1:~                                    }{16:││}{26:╲╲││}{1:                                     }|
-        {1:~                                    }{16:││} {26:╲} {26:│}{1:                                     }|
-        {1:~                                                                               }|
+        {1:~                                  } {100:▄}{101:▄█}{102:▄▄▄▄▄} {1:                                   }|
+        {1:~                                  } {100:██}{101:██▄}{102:▄██} {1:                                   }|
+        {1:~                                  } {100:██} {101:▀██}{102:█▄} {1:                                   }|
+        {1:~                                  } {100:▀█}  {101:▀█▀}{102:▀} {1:                                   }|
         {1:~{MATCH: +}}{26:RUSTVIM {MATCH:%S+}}{1:{MATCH: +}}|
         {1:~                 ────────────────────────────────────────────                  }|
         {1:~               }Rustvim is open source and freely distributable{1:                 }|
@@ -2413,10 +2421,10 @@ describe('ui/ext_messages', function()
       grid = [[
         ^                                                                                |
                                                                                         |*2
-                                             {16:│} {26:╲} {26:││}                                     |
-                                             {16:││}{26:╲╲││}                                     |
-                                             {16:││} {26:╲} {26:│}                                     |
-                                                                                        |
+                                            {100:▄}{101:▄█}{102:▄▄▄▄▄}                                    |
+                                            {100:██}{101:██▄}{102:▄██}                                    |
+                                            {100:██} {101:▀██}{102:█▄}                                    |
+                                            {100:▀█}  {101:▀█▀}{102:▀}                                    |
         {MATCH: +}{26:RUSTVIM {MATCH:%S+}}{MATCH: +}|
                           {1:────────────────────────────────────────────}                  |
                         Rustvim is open source and freely distributable                 |
@@ -2538,6 +2546,7 @@ end)
 it('ui/ext_multigrid supports intro screen', function()
   clear { args_rm = { '--headless' }, args = { '--cmd', 'set shortmess-=I' } }
   local screen = Screen.new(80, 24, { rgb = true, ext_multigrid = true })
+  screen:add_extra_attr_ids(intro_attrs)
 
   screen:expect {
     grid = [[
@@ -2547,10 +2556,10 @@ it('ui/ext_multigrid supports intro screen', function()
     ## grid 2
       ^                                                                                |
       {1:~                                                                               }|*2
-      {1:~                                    }{16:│} {26:╲} {26:││}{1:                                     }|
-      {1:~                                    }{16:││}{26:╲╲││}{1:                                     }|
-      {1:~                                    }{16:││} {26:╲} {26:│}{1:                                     }|
-      {1:~                                                                               }|
+      {1:~                                  } {100:▄}{101:▄█}{102:▄▄▄▄▄} {1:                                   }|
+      {1:~                                  } {100:██}{101:██▄}{102:▄██} {1:                                   }|
+      {1:~                                  } {100:██} {101:▀██}{102:█▄} {1:                                   }|
+      {1:~                                  } {100:▀█}  {101:▀█▀}{102:▀} {1:                                   }|
       {1:~{MATCH: +}}{26:RUSTVIM {MATCH:%S+}}{1:{MATCH: +}}|
       {1:~                 ────────────────────────────────────────────                  }|
       {1:~               }Rustvim is open source and freely distributable{1:                 }|

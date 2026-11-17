@@ -33,6 +33,7 @@
 #include "nvim/message.h"
 #include "nvim/option_vars.h"
 #include "nvim/os/os.h"
+#include "nvim/rustvim.h"
 #include "nvim/strings.h"
 #include "nvim/ui.h"
 #include "nvim/ui_defs.h"
@@ -46,7 +47,8 @@
   NVIM_VERSION_PRERELEASE
 #endif
 #define RUSTVIM_NAME "RUSTVIM"
-#define NVIM_VERSION_LONG RUSTVIM_NAME " " NVIM_VERSION_MEDIUM
+#define NVIM_VERSION_LONG "NVIM " NVIM_VERSION_MEDIUM " " RUSTVIM_NAME
+#define RUSTVIM_VERSION_LONG RUSTVIM_NAME " " NVIM_VERSION_MEDIUM
 
 char *Versions[] = { "8.1", "8.2", "9.0", "9.1", "9.2" };
 char *longVersion = NVIM_VERSION_LONG;
@@ -4047,6 +4049,8 @@ void list_version(void)
   msg_puts(version_buildtype);
   msg_putchar('\n');
   list_lua_version();
+  msg_putchar('\n');
+  msg_puts(rustvim_rust_build_info());
 
   if (p_verbose > 0) {
     msg_putchar('\n');
@@ -4102,6 +4106,14 @@ bool may_show_intro(void)
           && (vim_strchr(p_shm, kShmIntro) == NULL));
 }
 
+/// Per-cell startup-logo colors: blue, green, and rust.
+static const char *intro_logo_colors[] = {
+  " BGGRRRRR ",
+  " BBGGGRRR ",
+  " BB GGGRR ",
+  " BB  GGGR ",
+};
+
 /// Give an introductory message about Vim.
 /// Only used when starting Vim on an empty file, without a file name.
 /// Or with the ":intro" command (for Sven :-).
@@ -4110,12 +4122,12 @@ bool may_show_intro(void)
 void intro_message(bool colon)
 {
   static char *(lines[]) = {
-    "│ ╲ ││",
-    "││╲╲││",
-    "││ ╲ │",
-    "",
+    " ▄▄█▄▄▄▄▄ ",
+    " ████▄▄██ ",
+    " ██ ▀███▄ ",
+    " ▀█  ▀█▀▀ ",
     // NOLINTNEXTLINE(bugprone-suspicious-missing-comma): version macros form one string.
-    N_(NVIM_VERSION_LONG),
+    N_(RUSTVIM_VERSION_LONG),
     "────────────────────────────────────────────",
     N_("Rustvim is open source and freely distributable"),
     "https://rustvim.org",
@@ -4174,7 +4186,8 @@ void intro_message(bool colon)
       }
 
       if (*mesg != NUL && row < Rows - 1) {
-        do_intro_line(row, mesg, colon, i < 3);
+        do_intro_line(row, mesg, colon,
+                      i < (int)ARRAY_SIZE(intro_logo_colors) ? intro_logo_colors[i] : NULL);
       }
       row++;
 
@@ -4185,8 +4198,8 @@ void intro_message(bool colon)
   }
 }
 
-/// Adds extra highlighting.
-static void do_intro_line(int row, char *mesg, bool colon, bool is_logo)
+/// Draws one centered intro line, with optional per-cell logo colors.
+static void do_intro_line(int row, char *mesg, bool colon, const char *logo_colors)
 {
   int l;
   // Center the message horizontally.
@@ -4205,21 +4218,27 @@ static void do_intro_line(int row, char *mesg, bool colon, bool is_logo)
   // Compute special highlighting attributes
   int id_attr = syn_id2attr(syn_name2id("Identifier"));
   int nontext_attr = syn_id2attr(syn_name2id("NonText"));
-  int special_attr = syn_id2attr(syn_name2id("Special"));
   int string_attr = syn_id2attr(syn_name2id("String"));
 
-  // Handle logo lines
-  if (is_logo) {
-    bool seen_diagonal = false;
+  // Handle logo lines.
+  if (logo_colors != NULL) {
+    int blue_attr = syn_id2attr(syn_name2id("RustvimLogoBlue"));
+    int green_attr = syn_id2attr(syn_name2id("RustvimLogoGreen"));
+    int rust_attr = syn_id2attr(syn_name2id("RustvimLogoRust"));
 
-    for (char *p = mesg; *p != NUL;) {
+    for (char *p = mesg; *p != NUL; logo_colors++) {
       int clen = utfc_ptr2len(p);
       int attr = 0;
-      // Multi-byte (box-drawing) character.
-      if ((uint8_t)(*p) >= 0x80) {
-        // Found "╲" diagonal logo part.
-        seen_diagonal = seen_diagonal || (clen == 3 && utf_ptr2char(p) == 0x2572);
-        attr = seen_diagonal ? string_attr : special_attr;
+      switch (*logo_colors) {
+      case 'B':
+        attr = blue_attr;
+        break;
+      case 'G':
+        attr = green_attr;
+        break;
+      case 'R':
+        attr = rust_attr;
+        break;
       }
       col += grid_line_puts(col, p, clen, attr);
       p += clen;

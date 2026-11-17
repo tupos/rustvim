@@ -35,7 +35,7 @@ cmake --install build --prefix="$APP_BUILD_DIR/${APP_DIR}/usr"
 ########################################################################
 
 # App version, used by generate_appimage.
-VERSION=$("$ROOT_DIR"/build/bin/nvim --version | head -n 1 | grep -o 'v.*')
+VERSION=$("$ROOT_DIR"/build/bin/nvim --version | awk 'NR == 1 { print $2 }')
 export VERSION
 
 cd "$APP_BUILD_DIR" || exit

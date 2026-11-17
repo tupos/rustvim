@@ -114,7 +114,39 @@ fn link_cmake_library(cache: &str, key: &str) {
     }
 }
 
+/// Records the compiler and Cargo settings used for this crate.
+fn capture_build_info() {
+    for (tool, variable) in [
+        ("RUSTC", "RUSTVIM_RUSTC_VERSION"),
+        ("CARGO", "RUSTVIM_CARGO_VERSION"),
+    ] {
+        let program = env::var_os(tool).unwrap_or_else(|| panic!("Cargo must set {tool}"));
+        let output = Command::new(program)
+            .arg("--version")
+            .output()
+            .unwrap_or_else(|error| panic!("cannot read {tool} version: {error}"));
+        assert!(output.status.success(), "cannot read {tool} version");
+        let version = String::from_utf8(output.stdout).expect("tool version must be UTF-8");
+        println!("cargo::rustc-env={variable}={}", version.trim());
+    }
+
+    for variable in ["TARGET", "OPT_LEVEL", "DEBUG"] {
+        let value = env::var(variable).unwrap_or_else(|_| panic!("Cargo must set {variable}"));
+        println!("cargo::rustc-env=RUSTVIM_{variable}={value}");
+    }
+    let features = env::var("CARGO_CFG_TARGET_FEATURE").unwrap_or_default();
+    println!("cargo::rustc-env=RUSTVIM_TARGET_FEATURES={features}");
+
+    println!("cargo::rerun-if-env-changed=RUSTVIM_CARGO_PROFILE");
+    let profile = env::var("RUSTVIM_CARGO_PROFILE")
+        .or_else(|_| env::var("PROFILE"))
+        .expect("Cargo must set PROFILE");
+    println!("cargo::rustc-env=RUSTVIM_PROFILE={profile}");
+}
+
 fn main() {
+    capture_build_info();
+
     println!("cargo::rerun-if-env-changed=CMAKE");
     println!("cargo::rerun-if-env-changed=RUSTVIM_BUILD_DIR");
     println!("cargo::rerun-if-env-changed=RUSTVIM_CMAKE_BUILD");
