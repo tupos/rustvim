@@ -1,4 +1,52 @@
 <h1 align="center">
+  <img src="https://raw.githubusercontent.com/tupos/rustvim.org/master/rustvim-logos/Rust-Takeover/Rustvim-Rust-Takeover-Horizontal.png" alt="Rustvim" width="420">
+</h1>
+
+<p align="center">
+  <a href="https://rustvim.org/">Website</a> |
+  <a href="https://rustvim.org/doc/">User documentation</a> |
+  <a href="https://book.rustvim.org/">Developer book</a> |
+  <a href="https://github.com/tupos/rustvim">Repository</a>
+</p>
+
+Rustvim is a gradual rewrite of [Neovim](https://github.com/neovim/neovim) in
+Rust. The editor currently contains both C and Rust code. Components are
+migrated incrementally, with the goal of preserving editor behavior and plugin
+compatibility.
+
+## Installation
+
+Rustvim currently provides **nightly builds only**. Stable Rustvim releases will
+be available later.
+
+Download [nightly builds](https://github.com/tupos/rustvim/releases/tag/nightly)
+and follow the [installation instructions](./INSTALL.md#installing-rustvim).
+The native executable is `nvim` (`nvim.exe` on Windows).
+
+To build Rustvim from the `master` branch, follow the
+[source-build instructions](./INSTALL.md#building-rustvim-from-source).
+Building requires Rust and Cargo in addition to the native build prerequisites.
+
+## Development
+
+The [Rustvim Book](https://book.rustvim.org/) describes the implementation,
+C/Rust integration, and build system through source-code walkthroughs.
+
+See [LICENSE.txt](./LICENSE.txt) for licensing details and
+[SECURITY.md](./.github/SECURITY.md) for reporting security vulnerabilities.
+
+## Contributions
+
+Public pull requests are not accepted before the first stable Rustvim release.
+
+# Upstream Neovim README
+
+The following is upstream Neovim documentation. Its badges, releases,
+package-manager references, and project links refer to Neovim.
+
+---
+
+<h1 align="center">
   <img src="https://raw.githubusercontent.com/neovim/neovim.github.io/master/static/logos/neovim-logo-300x87.png" alt="Neovim">
 
   <a href="https://neovim.io/doc/">Documentation</a> |
