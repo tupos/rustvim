@@ -4,6 +4,9 @@
 
 #include "nvim/types_defs.h"
 
+/// Returns static Rust compiler and Cargo build diagnostics.
+extern const char *rustvim_rust_build_info(void);
+
 extern bool rustvim_context_register(void);
 extern void rustvim_rendering_initialize(void);
 extern void rustvim_rendering_free_all_mem(void);

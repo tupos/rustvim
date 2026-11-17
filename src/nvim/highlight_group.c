@@ -229,6 +229,11 @@ static const char *highlight_init_both[] = {
   "default link SpecialKey     Special",
   "default link Dimmed         Comment",
 
+  // Rustvim startup logo.
+  "default RustvimLogoBlue guifg=#57a6e5 ctermfg=75",
+  "default RustvimLogoGreen guifg=#91c95b ctermfg=114",
+  "default RustvimLogoRust guifg=#db763e ctermfg=173",
+
   // Built-in LSP
   "default link LspCodeLens                 NonText",
   "default link LspCodeLensSeparator        LspCodeLens",

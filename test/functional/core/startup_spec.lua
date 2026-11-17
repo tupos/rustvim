@@ -39,6 +39,23 @@ local check_close = n.check_close
 local testlog = 'Xtest-startupspec-log'
 
 describe('startup', function()
+  it('--version and :version report NVIM compatibility and Rust build information', function()
+    local process = n.spawn_wait('--version')
+    eq(0, process.status)
+    clear()
+
+    for _, output in ipairs({ process.stdout, exec_capture('version') }) do
+      output = output:gsub('\r\n', '\n')
+      matches('^NVIM v%d+%.%d+%.%d+%S* RUSTVIM\n', output)
+      matches('\nRust compiler: rustc %d+%.%d+%.%d+', output)
+      matches('\nCargo: cargo %d+%.%d+%.%d+', output)
+      matches('\nRust target: [%w_-]+\n', output)
+      matches('\nRust profile: [%w_-]+\n', output)
+      matches('\nRust build: opt%-level=[0-3sz], debuginfo=%S+\n', output)
+      matches('\nRust target features: [^\n]*\n', output)
+    end
+  end)
+
   it('--clean', function()
     clear()
     matches(vim.pesc(fn.stdpath('config')), api.nvim_get_option_value('runtimepath', {}))

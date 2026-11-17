@@ -9,6 +9,7 @@ extern crate rustvim_tracing as _;
 mod context;
 pub mod defines;
 pub mod eval;
+mod ffi;
 pub mod generated;
 pub mod globals;
 pub mod grid;
