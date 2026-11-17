@@ -5713,8 +5713,8 @@ void didset_window_options(win_T *wp, bool valid_cursor)
   set_chars_option(wp, wp->w_p_lcs, kListchars, true, NULL);
   parse_winhl_opt(NULL, wp);  // sets w_hl_needs_update also for w_p_winbl
   check_blending(wp);
-  set_winbar_win(wp, false, valid_cursor);
   check_signcolumn(NULL, wp);
+  set_winbar_win(wp, false, valid_cursor);
 }
 
 #define COPY_OPT_SCTX(buf, bv) buf->b_p_script_ctx[bv] = options[buf_opt_idx[bv]].script_ctx
