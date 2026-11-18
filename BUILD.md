@@ -1,30 +1,98 @@
-- **IMPORTANT**: Before upgrading to a new version, **always check for [breaking changes](https://neovim.io/doc/user/news.html#news-breaking).**
+# Building Rustvim
 
+Rustvim contains both C and Rust code. CMake builds the editor and invokes
+Cargo to compile and link its Rust components. The Makefile provides shortcuts
+for configuring, building, testing, and installing.
+
+Before upgrading, check the [upstream breaking changes](https://neovim.io/doc/user/news.html#news-breaking).
 
 ## Quick start
 
-1. Install [build prerequisites](#build-prerequisites) on your system
-2. `git clone https://github.com/neovim/neovim`
-3. `cd neovim`
-    - If you want the **stable release**, also run `git checkout stable`.
-4. `make CMAKE_BUILD_TYPE=RelWithDebInfo`
-    - If you want to install to a custom location, set `CMAKE_INSTALL_PREFIX`. See also [INSTALL.md](./INSTALL.md#install-from-source).
+1. Install the [native build prerequisites](#build-prerequisites) and
+   [Rust tooling](#rust-and-cargo) for your system.
+2. `git clone https://github.com/tupos/rustvim.git`
+3. `cd rustvim`
+4. `make rust-toolchain` to install the Rust toolchain selected by the repository.
+    - On OpenBSD, use the system Rust/Cargo package instead.
+5. `make CMAKE_BUILD_TYPE=RelWithDebInfo`
+    - To install to a custom location, set `CMAKE_INSTALL_PREFIX`. See also [INSTALL.md](./INSTALL.md#building-rustvim-from-source).
     - On BSD, use `gmake` instead of `make`.
-    - To build on Windows, see the [Building on Windows](#building-on-windows) section. _MSVC (Visual Studio) is recommended._
-5. `sudo make install`
-    - Default install location is `/usr/local`
-    - On Debian/Ubuntu, instead of `sudo make install`, you can try `cd build && cpack -G DEB && sudo dpkg -i nvim-linux-<arch>.deb` (with `<arch>` either `x86_64` or `arm64`) to build DEB-package and install it. This helps ensure clean removal of installed files. Note: This is an unsupported, "best-effort" feature of the Nvim build.
+    - To build on Windows, see [Building on Windows](#building-on-windows). MSVC (Visual Studio) is recommended.
+6. `sudo make install`
+    - Default install location is `/usr/local`.
+    - On Debian/Ubuntu, you can instead try `cd build && cpack -G DEB && sudo dpkg -i nvim-linux-<arch>.deb`
+      (with `<arch>` either `x86_64` or `arm64`). This is a best-effort packaging option.
 
 **Notes**:
-- From the repository's root directory, running `make` will download and build all the needed dependencies and put the `nvim` executable in `build/bin`.
-- Third-party dependencies (libuv, LuaJIT, etc.) are downloaded automatically to `.deps/`. See the [FAQ](https://neovim.io/doc/user/faq.html#faq-build) if you have issues.
-- After building, you can run the `nvim` executable without installing it by running `VIMRUNTIME=runtime ./build/bin/nvim`.
-- If you plan to develop Neovim, install [Ninja](https://ninja-build.org/) for faster builds. It will automatically be used.
-- Install [ccache](https://ccache.dev/) for faster rebuilds of Neovim. It's used by default. To disable it, use `CCACHE_DISABLE=true make`.
 
-## Running tests
+- Run the commands from the repository root.
+- `make` downloads and builds dependencies and produces `build/bin/nvim`
+  (`build/bin/nvim.exe` on Windows). The executable name remains `nvim`.
+- Native dependencies (libuv, LuaJIT, etc.) are downloaded to `.deps/`.
+  Cargo downloads Rust dependencies to its cache, normally under `~/.cargo/`,
+  and CMake places Rust build output in `build/rust_target/`.
+- CMake links the Rust implementation into the editor; installing a separate
+  Rust library is not required to run it.
+- Run without installing with `VIMRUNTIME=runtime ./build/bin/nvim`.
+- Install [Ninja](https://ninja-build.org/) for faster builds; it is selected
+  automatically when available.
+- Install [ccache](https://ccache.dev/) for faster C rebuilds. It is used by
+  default. To disable it, use `CCACHE_DISABLE=true make`.
 
-See [test/README.md](https://github.com/neovim/neovim/blob/master/test/README.md).
+## Development checks and tests
+
+Install the nightly toolchain needed by the Rust formatter:
+
+```bash
+make rust-nightly-toolchain
+```
+
+Run the Rust checks from the repository root:
+
+```bash
+make formatrust
+make lintrust
+RUST_TEST_THREADS=1 make rusttest
+```
+
+`formatrust` formats the complete workspace with the nightly selected in the
+Makefile. `lintrust` runs Clippy for all workspace targets, rejects warnings,
+and uses `--keep-going` to check independent crates after an error.
+`rusttest` builds the native libraries and runs the Rust workspace tests.
+Use one test thread because some tests share process-wide editor state.
+
+For a focused functional test:
+
+```bash
+NVIM_RPLUGIN_MANIFEST="$PWD/build/Xtest_rplugin_manifest" \
+  make functionaltest TEST_FILE=test/functional/core/startup_spec.lua
+```
+
+Omit `TEST_FILE` to run the complete functional suite. For the other test
+targets and filtering options, see [dev_test.txt](./runtime/doc/dev_test.txt).
+
+### Running Cargo directly
+
+Configure CMake and build the native dependencies first, for example with
+`make CMAKE_BUILD_TYPE=Debug`. You can then run:
+
+```bash
+cargo test --workspace --locked --target-dir build/rust_target -- --test-threads=1
+```
+
+The Rust build script builds `libnvim` as needed and reads native dependency
+paths from CMake's cache. On GNU/Linux, the Cargo linker wrapper also uses the
+C compiler selected by CMake.
+
+For a different configured build directory, set `RUSTVIM_BUILD_DIR`:
+
+```bash
+RUSTVIM_BUILD_DIR=build-clang \
+  cargo test --workspace --locked --target-dir build-clang/rust_target -- --test-threads=1
+```
+
+With a multi-configuration CMake generator, also set
+`RUSTVIM_CMAKE_CONFIG` to the configuration to build, such as `Debug`.
 
 ## Building
 
@@ -34,9 +102,21 @@ The _build type_ determines the level of used compiler optimizations and debug i
 
 - `Release`: Full compiler optimizations and no debug information. Expect the best performance from this build type. Often used by package maintainers.
 - `Debug`: Full debug information; few optimizations. Use this for development to get meaningful output from debuggers like GDB or LLDB. This is the default if `CMAKE_BUILD_TYPE` is not specified.
-- `RelWithDebInfo` ("Release With Debug Info"): Enables many optimizations and adds enough debug info so that when Neovim ever crashes, you can still get a backtrace.
+- `RelWithDebInfo` ("Release With Debug Info"): Enables many optimizations and adds enough debug info so that when Rustvim crashes, you can still get a backtrace.
 
-So, for a release build, just use:
+CMake selects the corresponding Cargo profile:
+
+| CMake build type | Cargo profile with LTO disabled | Cargo profile with LTO enabled |
+| --- | --- | --- |
+| `Debug` | `dev` | `dev` |
+| `Release` | `release` | `release-lto` |
+| `RelWithDebInfo` | `release-debinfo` | `release-debinfo-lto` |
+| `MinSizeRel` | `strip-release` | `strip-release-lto` |
+
+LTO is controlled by `ENABLE_LTO` and is enabled by default except for MinGW.
+The `strip-release` profiles strip symbols from an optimized release build.
+
+For a release build, use:
 
 ```bash
 make CMAKE_BUILD_TYPE=Release
@@ -46,18 +126,33 @@ make CMAKE_BUILD_TYPE=Release
 Afterwards, the `nvim` executable can be found in `build/bin`. To verify the build type after compilation, run:
 
 ```bash
-./build/bin/nvim --version | grep ^Build
+./build/bin/nvim --version
 ```
 
-To install the executable to a certain location, use:
+The output includes the Rust compiler, Cargo version, target, profile,
+optimization level, debug-information setting, and target features.
+
+To install the editor and runtime files to a custom location, use:
 
 ```bash
-make CMAKE_INSTALL_PREFIX=$HOME/local/nvim install
+make CMAKE_BUILD_TYPE=RelWithDebInfo CMAKE_INSTALL_PREFIX="$HOME/local/rustvim"
+make install
 ```
 
-CMake, our main build system, caches a lot of things in `build/CMakeCache.txt`. If you ever want to change `CMAKE_BUILD_TYPE` or `CMAKE_INSTALL_PREFIX`, run `rm -rf build` first. This is also required when rebuilding after a Git commit adds or removes files (including from `runtime`) — when in doubt, run `make distclean` (which is basically a shortcut for `rm -rf build .deps`).
+CMake caches its settings in `build/CMakeCache.txt`. Reconfigure explicitly
+when changing the build type or install prefix:
 
-By default (`USE_BUNDLED=1`), Neovim downloads and statically links its needed dependencies. In order to be able to use a debugger on these libraries, you might want to compile them with debug information as well:
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug \
+  -DCMAKE_INSTALL_PREFIX="$HOME/local/rustvim"
+cmake --build build
+```
+
+Use a fresh build directory when changing compilers or target platforms.
+`make distclean` removes both `build/` and `.deps/`, including any Emscripten
+SDK installed under `.deps/emsdk`.
+
+By default (`USE_BUNDLED=1`), Rustvim downloads and statically links its native dependencies. In order to be able to use a debugger on these libraries, you might want to compile them with debug information as well:
 
 <!-- THIS CAUSES SCREEN INTERFERENCE
 ```
@@ -88,11 +183,21 @@ cmake -B build -LH
 
 ### Windows / MSVC
 
-**MSVC (Visual Studio) is the recommended way to build on Windows.** These steps were confirmed as of 2023.
+**MSVC (Visual Studio) is the recommended way to build on Windows.**
 
-1. Install [Visual Studio](https://visualstudio.microsoft.com/thank-you-downloading-visual-studio/?sku=Community) (2017 or later) with the _Desktop development with C++_ workload.
-    - On 32-bit Windows, you will need [this workaround](https://developercommunity.visualstudio.com/content/problem/212989/ninja-binary-format.html).
-2. Open the Neovim project folder.
+Install [rustup](https://rustup.rs/) and ensure `rustup`, `rustc`, and `cargo`
+are on `PATH` before starting the IDE or developer shell. From the repository
+root, install the toolchain selected by `rust-toolchain.toml`:
+
+```powershell
+rustup toolchain install --no-self-update
+```
+
+Use an MSVC Rust host toolchain that matches the C build architecture.
+Rustvim's release workflow builds x86-64 and ARM64.
+
+1. Install [Visual Studio](https://visualstudio.microsoft.com/thank-you-downloading-visual-studio/?sku=Community) (2022 or later) with the _Desktop development with C++_ workload.
+2. Open the Rustvim project folder.
     - Visual Studio should detect the cmake files and automatically start building...
 3. Choose the `nvim.exe (bin\nvim.exe)` target and hit F5.
     - If the build fails, it may be because Visual Studio started the build with `x64-{Debug,Release}` before you switched the configuration to `x86-Release`.
@@ -123,16 +228,24 @@ To build from the command line (i.e. invoke the `cmake` commands yourself),
    cmake -B build -G Ninja -D CMAKE_BUILD_TYPE=Release
    cmake --build build --config Release
    ```
-    - Omit `--config Release` if you want a debug build.
-    - Omit `-G Ninja` to use the "Visual Studio" generator.
+    - With Ninja, select a debug build by using
+      `-D CMAKE_BUILD_TYPE=Debug` when configuring `build`.
+    - Omit `-G Ninja` to use the "Visual Studio" generator; select the build
+      configuration with `--config Debug` or `--config Release`.
+    - Run Rust tests with
+      `cmake --build build --config Release --target rusttest`, with
+      `RUST_TEST_THREADS` set to `1`.
 
 ### Windows / CLion
 
 1. Install [CLion](https://www.jetbrains.com/clion/).
-2. Open the Neovim project in CLion.
+2. Open the Rustvim project in CLion with Cargo available on `PATH`.
 3. Select _Build → Build All in 'Release'_.
 
 ### Windows / Cygwin
+
+These inherited Neovim instructions have not been verified for Rustvim.
+The Cygwin C environment also needs compatible Rust target support.
 
 Since https://github.com/neovim/neovim/pull/36417 , building on Cygwin may be as easy as:
 ```bash
@@ -153,6 +266,10 @@ If that fails, an alternative is:
    ```
 
 ### Windows / MSYS2 / MinGW
+
+These inherited Neovim instructions have not been verified for Rustvim.
+Install a Rust GNU toolchain matching the MinGW architecture; an MSVC Rust
+toolchain is not interchangeable with it.
 
 1. From the MSYS2 shell, install these packages:
    ```bash
@@ -197,6 +314,9 @@ Build Ubuntu/Debian linux binary on [WSL](https://learn.microsoft.com/en-us/wind
 ```bash
 # Install build prerequisites
 sudo apt-get install ninja-build gettext cmake build-essential
+
+# Install rustup inside WSL as described under "Rust and Cargo", then:
+make rust-toolchain
 
 # Build the linux binary in WSL
 make CMAKE_BUILD_TYPE=RelWithDebInfo
@@ -286,7 +406,8 @@ cmake -S cmake.deps -B .deps -G Ninja -D CMAKE_BUILD_TYPE=RelWithDebInfo
 cmake --build .deps
 ```
 
-By default the libraries and headers are placed in `.deps/usr`. Now you can build Neovim:
+By default the native libraries and headers are placed in `.deps/usr`.
+With Rust installed, build Rustvim:
 
 ```bash
 cmake -B build -G Ninja -D CMAKE_BUILD_TYPE=RelWithDebInfo
@@ -294,6 +415,9 @@ cmake --build build
 ```
 
 ### Build without "bundled" dependencies
+
+These settings control native dependencies. Cargo still uses `Cargo.lock`
+to select Rust dependencies.
 
 1. Manually install the dependencies:
     - libuv libluv libutf8proc luajit lua-lpeg tree-sitter tree-sitter-c tree-sitter-lua tree-sitter-markdown tree-sitter-query tree-sitter-vim tree-sitter-vimdoc unibilium
@@ -323,11 +447,26 @@ to build *with* bundled dependencies. This is supported as follows.
     - Fetch https://github.com/neovim/deps/tree/master/src into `.deps/build/src/`.
       (https://github.com/neovim/deps/tree/master/src is an auto-updated, "cleaned up", snapshot of `.deps/build/src/`).
     - Run `make deps` to generate `.deps/`, then clean it up using [these commands](https://github.com/neovim/neovim/blob/1c12073db6c64eb365748f153f96be9b0fe61070/.github/workflows/build.yml#L67-L74).
-2. Copy the prepared `.deps` to the isolated machine (without network access).
-3. Build with `USE_EXISTING_SRC_DIR` enabled, on the isolated machine:
+2. On the network-enabled machine, install the required Rust toolchains and
+   fetch the locked Rust dependencies:
+
+   ```bash
+   make rust-toolchain
+   cargo fetch --locked
+   ```
+
+   Use `make rust-toolchains` instead if formatting or WASM builds are needed.
+   Prepare for the same host and target platforms as the offline build.
+3. Copy the prepared `.deps` and Cargo cache to the isolated machine.
+   Cargo normally stores downloaded sources and archives under
+   `${CARGO_HOME:-$HOME/.cargo}/registry` and any Git dependencies under
+   `${CARGO_HOME:-$HOME/.cargo}/git`. The selected Rust toolchain must also
+   be installed on that machine before it goes offline.
+4. Build with `USE_EXISTING_SRC_DIR` enabled and Cargo offline:
+
    ```bash
    make deps DEPS_CMAKE_FLAGS=-DUSE_EXISTING_SRC_DIR=ON
-   make
+   CARGO_NET_OFFLINE=true make
    ```
 
 ### Build without unibilium
@@ -366,7 +505,7 @@ podman run \
   -v "$PWD:/workdir" \
   -w /workdir \
   alpine:latest \
-  sh -c 'apk add build-base cmake coreutils curl gettext-tiny-dev git linux-headers && make CMAKE_EXTRA_FLAGS="-DSTATIC_BUILD=1"'
+  sh -c 'apk add build-base cmake coreutils curl gettext-tiny-dev git linux-headers rust cargo && make CMAKE_EXTRA_FLAGS="-DSTATIC_BUILD=1"'
 ```
 
 The resulting binary in `build/bin/nvim` will have all the dependencies statically linked:
@@ -377,14 +516,53 @@ build/bin/nvim: ELF 64-bit LSB executable, ARM aarch64, version 1 (SYSV), static
 
 ## Build prerequisites
 
-General requirements (see [#1469](https://github.com/neovim/neovim/issues/1469#issuecomment-63058312)):
+General requirements:
 
-- Clang or GCC version 4.9+
+- A C compiler: GCC or Clang on Unix-like systems, or MSVC on Windows.
+- GNU Make for the repository's Makefile shortcuts; use `gmake` on BSD.
+- Rust and Cargo; see [Rust and Cargo](#rust-and-cargo).
 - CMake version 3.16+, built with TLS/SSL support
   - Optional: Get the latest CMake from https://cmake.org/download/
     - Provides a shell script which works on most Linux systems. After running it, ensure the resulting `cmake` binary is in your $PATH so the Nvim build will find it.
 
-Platform-specific requirements are listed below.
+The package commands below install native prerequisites. Install Rust
+separately unless the command explicitly includes it.
+
+### Rust and Cargo
+
+The native build uses the toolchain in [rust-toolchain.toml](./rust-toolchain.toml).
+Formatting and WASM builds use `RUST_NIGHTLY_TOOLCHAIN` from the
+[Makefile](./Makefile). These files select the versions used by CI.
+
+On systems supported by [rustup](https://rustup.rs/), install it first.
+For example, on Linux or macOS:
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+  sh -s -- -y --default-toolchain none
+. "$HOME/.cargo/env"
+```
+
+Then, from the Rustvim checkout:
+
+```bash
+make rust-toolchain
+```
+
+For development or WASM builds, install both toolchains:
+
+```bash
+make rust-toolchains
+```
+
+The nightly rule installs host `rustfmt`, `rust-src`, and the
+`wasm32-unknown-emscripten` standard library. Adding the WASM target retains
+host support, so the same nightly can format the native workspace.
+
+OpenBSD uses its packaged Rust and Cargo because rustup does not provide an
+OpenBSD host toolchain. With system packages, ensure the compiler supports
+the workspace's language features and locked dependencies. Rustup-based commands
+require rustup and cannot install components into a system-managed compiler.
 
 ### Ubuntu / Debian
 
@@ -424,57 +602,17 @@ xbps-install base-devel cmake curl git
 
 ### NixOS / Nix
 
-Starting from NixOS 18.03, the Neovim binary resides in the `neovim-unwrapped` Nix package (the `neovim` package being just a wrapper to setup runtime options like Ruby/Python support):
+Neovim's `neovim-unwrapped` package and
+[neovim-nightly-overlay](https://github.com/nix-community/neovim-nightly-overlay/)
+build upstream Neovim. They do not include Rustvim's Cargo build requirements.
+This repository currently has no Rustvim-specific Nix derivation.
 
-```bash
-cd path/to/neovim/src
-```
-
-Drop into `nix-shell` to pull in the Neovim dependencies:
-
-```bash
-nix-shell '<nixpkgs>' -A neovim-unwrapped
-```
-
-Configure and build:
-
-```bash
-rm -rf build && cmakeConfigurePhase
-buildPhase
-```
-
-Tests are not available by default, because of some unfixed failures. You can enable them via adding this package in your overlay:
-```nix
-  neovim-dev = (super.pkgs.neovim-unwrapped.override  {
-    doCheck=true;
-  }).overrideAttrs(oa:{
-    cmakeBuildType="debug";
-
-    nativeBuildInputs = oa.nativeBuildInputs ++ [ self.pkgs.valgrind ];
-    shellHook = ''
-      export NVIM_PYTHON_LOG_LEVEL=DEBUG
-      export NVIM_LOG_FILE=/tmp/log
-      export VALGRIND_LOG="$PWD/valgrind.log"
-    '';
-  });
-```
-and replacing `neovim-unwrapped` with `neovim-dev`:
-```bash
-nix-shell '<nixpkgs>' -A neovim-dev
-```
-
-A flake for Neovim is hosted at [nix-community/neovim-nightly-overlay](https://github.com/nix-community/neovim-nightly-overlay/), with 3 packages:
-- `neovim` to run the nightly
-- `neovim-debug` to run the package with debug symbols
-- `neovim-developer` to get all the tools to develop on `neovim`
-
-Thus you can run Neovim nightly with `nix run github:nix-community/neovim-nightly-overlay`.
-Similarly to develop on Neovim: `nix run github:nix-community/neovim-nightly-overlay#neovim-developer`.
-
-To use a specific version of Neovim, you can pass `--override-input neovim-src .` to use your current directory,
-or a specific SHA1 like `--override-input neovim-src github:neovim/neovim/89dc8f8f4e754e70cbe1624f030fb61bded41bc2`.
+**TODO:** Add a Nix derivation that builds Rustvim with CMake and Cargo.
 
 ### Haiku
+
+These inherited Neovim dependency instructions have not been verified for
+Rustvim. A compatible Rust host toolchain is also required.
 
 Some deps can be pulled from haiku repos, the rest need "bundled" deps:
 ```bash
@@ -485,7 +623,10 @@ make -C .deps
 ### FreeBSD
 
 ```bash
-sudo pkg install cmake gmake sha wget gettext curl git
+sudo pkg install cmake gmake ninja sha wget gettext curl git rustup-init
+rustup-init -y --no-modify-path --default-toolchain none
+. "$HOME/.cargo/env"
+gmake rust-toolchain
 ```
 
 If you get an error regarding a `sha256sum` mismatch, where the actual SHA-256 hash is `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`, then this is your issue (that's the `sha256sum` of an empty file).
@@ -493,7 +634,7 @@ If you get an error regarding a `sha256sum` mismatch, where the actual SHA-256 h
 ### OpenBSD
 
 ```bash
-doas pkg_add gmake cmake curl gettext-tools git ninja
+doas pkg_add gmake cmake curl gettext-tools git ninja rust
 ```
 
 While `ninja` is technically optional, the build is likely to fail without it. This is because `cmake` will use `make` in that case, and the bundled LuaJIT requires `gmake`. Instead of installing `ninja`, you could work around this by installing `luajit` and disabling the bundled LuaJIT:
@@ -510,7 +651,7 @@ Another workaround is to edit `cmake/Deps.cmake` and comment out the line `set(M
 
 1. Install Xcode Command Line Tools: `xcode-select --install`
 2. Install [Homebrew](http://brew.sh)
-3. Install Neovim build dependencies:
+3. Install Rustvim build dependencies:
     ```bash
     brew install ninja cmake gettext curl git
     ```
@@ -528,7 +669,7 @@ Another workaround is to edit `cmake/Deps.cmake` and comment out the line `set(M
 
 1. Install Xcode Command Line Tools: `xcode-select --install`
 2. Install [MacPorts](http://www.macports.org)
-3. Install Neovim build dependencies:
+3. Install Rustvim build dependencies:
     ```bash
     sudo port install ninja cmake gettext git
     ```
@@ -547,59 +688,42 @@ Another workaround is to edit `cmake/Deps.cmake` and comment out the line `set(M
 From a newer macOS version, to build for older macOS versions, you will have to set the macOS deployment target:
 
 ```
-make CMAKE_BUILD_TYPE=Release MACOSX_DEPLOYMENT_TARGET=10.13 DEPS_CMAKE_FLAGS="-DCMAKE_CXX_COMPILER=$(xcrun -find c++)"
+make CMAKE_BUILD_TYPE=Release MACOSX_DEPLOYMENT_TARGET=11.0 DEPS_CMAKE_FLAGS="-DCMAKE_CXX_COMPILER=$(xcrun -find c++)"
 ```
 
 Note that the C++ compiler is explicitly set so that it can be found when the deployment target is set.
 
-## Building with zig
-
-### Prerequisites
-
-- zig 0.16.x
-
-### Instructions
-
-- Build the editor: `zig build`, run it with `./zig-out/bin/nvim`
-- Complete installation with runtime: `zig build install --prefix ~/.local`
-- Tests:
-  - `zig build functionaltest` to run all functionaltests
-  - `zig build functionaltest -- test/functional/autocmd/bufenter_spec.lua` to run the tests in one file
-  - `zig build unittest` to run all unittests
-  - `zig build oldtest` to run all oldtests
-
-#### Using system dependencies
-
-See "Available System Integrations" in `zig build -h` to see available system integrations. Enabling an integration, e.g. `zig build -fsys=utf8proc` will use the system's installation of utf8proc.
-
-`zig build --system deps_dir` will enable all integrations and turn off dependency fetching. This requires you to pre-download the dependencies which don't have a system integration into `deps_dir` (at the time of writing these are ziglua and the built-in tree-sitter parsers). You have to create subdirectories whose names are the respective package's hash under `deps_dir` and unpack the dependencies inside that directory - ziglua should go under `deps_dir/zlua-0.1.0-hGRpC1dCBQDf-IqqUifYvyr8B9-4FlYXqY8cl7HIetrC` and so on. Hashes should be taken from `build.zig.zon`.
-
-See the `prepare` function of [this `PKGBUILD`](https://git.sr.ht/~chinmay/nvim_build/tree/26364a4cf9b4819f52a3e785fa5a43285fb9cea2/item/PKGBUILD#L90) for an example.
-
 ## Cross-compiling
 
-Cross-compilation is not fully supported, but we collect notes here for reference (improvements welcome).
-Also relevant for webassembly (WASM) build.
+Cross-compilation outside the WASM build is not fully supported. CMake and
+Cargo must target the same platform:
 
-- cmake: Set `NVIM_HOST_PRG` so that the docs and tags generation works without
-  depending on the target binary.
-- zig build: cross-compilation is often enabled by just setting -Dtarget, e.g. from a linux host:
-  ```
-   zig build -Dtarget=aarch64-macos
-  ```
-  will automatically compile a host lua for use during build. The
-  "-Dhost={target_string}" option can be used to override the platform for
-  running binaries during compile-time. use "-Dhost=native" to force
-  cross-compiling or "-Dhost=" (empty string) to assume that target binaries
-  can run on the host during the build process (e.g. if target is x86 on a
-  x86_64 system, or if emulation set up with binfmt or similar)
+- Set CMake's target compiler or toolchain file.
+- Set `RUST_TARGET` to the matching Cargo target triple, or set
+  `CARGO_BUILD_TARGET` before the first CMake configuration.
+- Install the target's Rust standard library, for example with
+  `rustup target add TARGET_TRIPLE`.
+- Provide native tools for code generation, including `LUA_PRG`,
+  `LUA_GEN_PRG`, `NLUA0_HOST_PRG`, and `NVIM_HOST_PRG`.
+
+Rustvim uses CMake and Cargo. The inherited Zig build does not integrate
+Rustvim's Rust components.
 
 ### WebAssembly (experimental)
 
 Rustvim builds WebAssembly with CMake, Cargo, and the
 [Emscripten SDK](https://emscripten.org/docs/getting_started/downloads.html).
 Install and activate the SDK in `.deps/emsdk`, or set `EMSDK` to its directory.
+CI uses Emscripten 6.0.2. For the same SDK locally:
+
+```sh
+git clone https://github.com/emscripten-core/emsdk.git .deps/emsdk
+.deps/emsdk/emsdk install 6.0.2
+.deps/emsdk/emsdk activate 6.0.2
+```
+
 The SDK does not need to be added to your shell's `PATH`.
+The current build script requires Bash, Ninja, and `nproc`.
 
 Install the pinned Rust toolchains and build the browser bundle:
 
@@ -629,4 +753,6 @@ python3 build/wasm/site/serve.py
 ```
 
 Visit http://localhost:8002. The server supplies the cross-origin isolation
-headers required for shared memory.
+headers required for shared memory. See the
+[WASM build chapter](./docs/rustvim-book/src/build-system/wasm.md) for the build
+stages, generated files, and browser integration.
