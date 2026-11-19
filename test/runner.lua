@@ -48,11 +48,13 @@ if _G.arg[1] and vim.startswith(_G.arg[1], '-X') then
   vim.env.XDG_DATA_HOME = xdg_dir .. '/share'
   vim.env.XDG_STATE_HOME = xdg_dir .. '/state'
   if vim.fn.has('win32') == 0 then
-    -- Socket dir (stdpath("run")), deliberately NOT in the build dir. sockaddr_un.sun_path is 104
-    -- bytes on macOS/BSD, "/…/build/tmp/nvim.<pid>.<n>" can exceed it. #38623
+    -- Keep temporary and socket paths short, even with a long checkout path.
     run_dir = ('/tmp/nvim_%d'):format(vim.uv.os_getpid())
-    vim.env.XDG_RUNTIME_DIR = run_dir
     vim.fn.mkdir(run_dir, 'p')
+    run_dir = assert(uv.fs_realpath(run_dir))
+    vim.env.XDG_RUNTIME_DIR = run_dir
+    vim.env.TMPDIR = run_dir .. '/Xtest_tmpdir'
+    vim.fn.mkdir(vim.env.TMPDIR, 'p')
   end
 end
 
