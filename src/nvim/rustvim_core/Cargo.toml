@@ -6,4 +6,6 @@ edition = "2024"
 [dependencies]
 libc = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
 rustvim_tracing = { path = "../rustvim_tracing" }
