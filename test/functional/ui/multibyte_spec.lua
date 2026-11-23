@@ -73,6 +73,15 @@ describe('multibyte rendering', function()
     end
   end)
 
+  it('draws the character after an Indic conjunct in the next cell', function()
+    local conjunct = 'ड्न'
+    api.nvim_set_current_line(conjunct .. 'X')
+    feed('0l')
+    eq({ 1, #conjunct }, api.nvim_win_get_cursor(0))
+    eq(conjunct, fn.screenstring(1, 1))
+    eq('X', fn.screenstring(1, 3))
+  end)
+
   it('works with doublewidth char at end of line', function()
     feed('58a <esc>a馬<esc>')
     screen:expect([[

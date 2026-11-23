@@ -1795,8 +1795,11 @@ ClusterInfo utf_ClusterInfo_impl(StrCharInfo base, int *max_len)
   assert(*next >= 0x80 && *max_len > 0);
   int cluster_len = base.chr.len;
 
-  bool check_emoji = cells == 1 && p_emoji
-                     && prop_is_emojilike(utf8proc_get_property(base.chr.value));
+  const utf8proc_property_t *base_prop = cells == 1
+                                         ? utf8proc_get_property(base.chr.value) : NULL;
+  bool check_emoji = p_emoji && base_prop != NULL && prop_is_emojilike(base_prop);
+  bool after_indic_linker = base_prop != NULL
+                           && base_prop->indic_conjunct_break == UTF8PROC_INDIC_CONJUNCT_BREAK_LINKER;
 
   while (true) {
     uint8_t const next_len = utf8len_tab[*next];
@@ -1832,9 +1835,18 @@ ClusterInfo utf_ClusterInfo_impl(StrCharInfo base, int *max_len)
 
     cluster_len += next_len;
     if (cells == 1) {
-      /// A SpacingMark does not break the cluster (UAX#29 GB9a) but has positive
-      /// advance width (Unicode core spec D55), so it needs a cell of its own.
-      if (utf8proc_get_property(next_code)->boundclass == UTF8PROC_BOUNDCLASS_SPACINGMARK
+      const utf8proc_property_t *prop = utf8proc_get_property(next_code);
+      const int indic_break = prop->indic_conjunct_break;
+      const bool joined_consonant = after_indic_linker
+                                    && indic_break == UTF8PROC_INDIC_CONJUNCT_BREAK_CONSONANT;
+      // GB9c permits Extend characters between a linker and a consonant.
+      after_indic_linker = indic_break == UTF8PROC_INDIC_CONJUNCT_BREAK_LINKER
+                          || (after_indic_linker
+                              && indic_break == UTF8PROC_INDIC_CONJUNCT_BREAK_EXTEND);
+
+      // Spacing marks (GB9a) and joined Indic consonants (GB9c) can occupy
+      // their own cells within a cluster.
+      if (prop->boundclass == UTF8PROC_BOUNDCLASS_SPACINGMARK || joined_consonant
           || (next_code & ~1) == 0xFF9E) {  // halfwidth katakana voiced sound marks
         // TODO(bfredl): too many places assume ASCII lead byte can never
         // be promoted to double width. Later on we should allow this
