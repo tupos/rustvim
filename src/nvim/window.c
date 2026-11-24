@@ -933,7 +933,7 @@ void ui_ext_win_position(win_T *wp, bool validate)
       .columns = wp->w_width_outer,
       .screen_rows = Rows,
       .screen_columns = Columns,
-      .reserved_rows = c.zindex < kZIndexMessages ? (int)p_ch : 0,
+      .reserved_rows = win_float_above_ch(wp),
       .z_index = c.zindex,
       .blending = wp->w_p_winbl > 0 || c.shadow,
       .valid = valid,
@@ -6920,7 +6920,9 @@ static void win_fix_cursor(bool normal)
   win_T *wp = curwin;
 
   if (!wp->w_do_win_fix_cursor
-      || wp->w_buffer->b_ml.ml_line_count < wp->w_view_height) {
+      || wp->w_buffer->b_ml.ml_line_count < wp->w_view_height
+      // In cmdline: defer until next resize, so temp 'cmdheight' does not move cursor. #42386
+      || (get_real_state() & MODE_CMDLINE)) {
     return;
   }
 
@@ -7214,7 +7216,7 @@ void command_height(void)
   redraw_cmdline = true;
 
   // Clear the cmdheight area.
-  if (msg_scrolled == 0 && full_screen) {
+  if (msg_scrolled == 0) {
     if (!ui_has(kUIMessages)) {
       msg_grid_validate();
       grid_message_view_clear(cmdline_row, Rows, 0, Columns, 0);

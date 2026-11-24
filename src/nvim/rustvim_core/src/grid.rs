@@ -535,7 +535,6 @@ fn allocate_grid_id() -> GridId {
 }
 
 unsafe extern "C" {
-    static mut full_screen: bool;
     static mut rdb_flags: libc::c_uint;
 
     static mut p_arshape: libc::c_int;
@@ -2014,7 +2013,7 @@ impl LineState {
         assert!(self.max_col <= line_buf.len() as i32);
 
         unsafe {
-            if full_screen && (rdb_flags & RdbFlags::Invalid as u32 != 0) {
+            if rdb_flags & RdbFlags::Invalid as u32 != 0 {
                 // Current batch must not depend on previous line-buffer characters.
                 // Set invalid values which will cause assertion failures later if they are used.
                 line_buf.invalidate_chars_and_attrs();

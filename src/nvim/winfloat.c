@@ -38,6 +38,7 @@
 #include "nvim/os/fs.h"
 #include "nvim/plines.h"
 #include "nvim/pos_defs.h"
+#include "nvim/state_defs.h"
 #include "nvim/strings.h"
 #include "nvim/types_defs.h"
 #include "nvim/ui.h"
@@ -219,6 +220,20 @@ void win_float_draw_border(win_T *wp)
                        wp->w_hl_attr_normal);
 }
 
+/// Cmdline/message area (rows) at the bottom of the screen, which float `wp` must not overlay.
+int win_float_above_ch(const win_T *wp)
+{
+  if (wp->w_config.zindex >= kZIndexMessages) {
+    return 0;  // Message layer: may overlay the cmdline.
+  }
+  int rows = (int)p_ch;
+  // In Cmdline-mode the ext_cmdline window (ui2) may overlay beyond 'cmdheight'.
+  if ((State & MODE_CMDLINE) && cmdline_win != NULL && !cmdline_win->w_config.hide) {
+    rows = MAX(rows, cmdline_win->w_height_outer);
+  }
+  return rows;
+}
+
 void win_config_float(win_T *wp, WinConfig fconfig)
 {
   // Process statusline changes before applying new height from config
@@ -269,8 +284,7 @@ void win_config_float(win_T *wp, WinConfig fconfig)
   }
 
   if (!ui_has(kUIMultigrid)) {
-    int above_ch = wp->w_config.zindex < kZIndexMessages ? (int)p_ch : 0;
-    wp->w_height = MIN(wp->w_height, Rows - win_border_height(wp) - above_ch);
+    wp->w_height = MIN(wp->w_height, Rows - win_border_height(wp) - win_float_above_ch(wp));
     wp->w_width = MIN(wp->w_width, Columns - win_border_width(wp));
   }
 
