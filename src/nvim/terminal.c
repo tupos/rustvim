@@ -42,6 +42,7 @@
 #include <string.h>
 
 #include "klib/kvec.h"
+#include "nvim/api/extmark.h"
 #include "nvim/api/private/helpers.h"
 #include "nvim/ascii_defs.h"
 #include "nvim/autocmd.h"
@@ -65,6 +66,7 @@
 #include "nvim/event/multiqueue.h"
 #include "nvim/event/time.h"
 #include "nvim/ex_docmd.h"
+#include "nvim/extmark.h"
 #include "nvim/globals.h"
 #include "nvim/grid.h"
 #include "nvim/highlight.h"
@@ -506,6 +508,11 @@ static bool term_may_alloc_scrollback(Terminal *term, buf_T *buf)
 Terminal *terminal_alloc(buf_T *buf, TerminalOptions opts)
   FUNC_ATTR_NONNULL_ALL
 {
+  // Clear the previous terminal's exit message before the new terminal can close.
+  uint32_t exitmsg_ns =
+    (uint32_t)nvim_create_namespace(STATIC_CSTR_AS_STRING("nvim.terminal.exitmsg"));
+  extmark_clear(buf, exitmsg_ns, 0, 0, MAXLNUM - 1, MAXCOL);
+
   // If win has zero size (hidden float, 'cmdheight'), use the pty_proc_init() default.
   opts.width = opts.width ? opts.width : 80;
   opts.height = opts.height ? opts.height : 24;

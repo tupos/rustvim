@@ -1011,6 +1011,25 @@ describe(':terminal buffer', function()
     ]])
   end)
 
+  it('keeps the exit message when the job exits before TermOpen', function()
+    local screen = Screen.new(50, 7)
+    exec_lua(function()
+      vim.api.nvim_create_autocmd('OptionSet', {
+        pattern = 'buftype',
+        nested = true,
+        once = true,
+        callback = function()
+          local channel = vim.bo.channel
+          vim.api.nvim_chan_send(channel, 'exit 0\r')
+          vim.g.terminal_job_status = vim.fn.jobwait({ channel }, 10000)
+        end,
+      })
+    end)
+    fn.jobstart({ testprg('shell-test'), 'INTERACT' }, { term = true })
+    eq({ 0 }, api.nvim_get_var('terminal_job_status'))
+    screen:expect({ any = vim.pesc('[Process exited 0]') })
+  end)
+
   it('handles split UTF-8 sequences #16245', function()
     local screen = Screen.new(50, 10)
     fn.jobstart({ testprg('shell-test'), 'UTF-8' }, { term = true })

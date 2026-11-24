@@ -622,17 +622,13 @@ do
 
     local buf = vim.bo[ev.buf]
     local pos = ev.data.pos ---@type integer
-    local buf_has_exitmsg = #(
-        vim.api.nvim_buf_get_extmarks(ev.buf, nvim_terminal_exitmsg_ns, 0, -1)
-      ) > 0
 
     -- `nvim_open_term` buffers do not have an attached 'channel'.
     local msg = buf.channel == 0 and '[Terminal closed]'
       or ('[Process exited %d]'):format(vim.v.event.status)
 
-    if buf.buftype ~= 'terminal' or buf_has_exitmsg then
-      -- TermClose may be queued before TermOpen if process exits before `terminal_open` is called.
-      -- Don't display the msg now, let TermOpen display it.
+    if buf.buftype ~= 'terminal' then
+      -- TermClose can run before the buffer's 'buftype' is set.
       nvim_on('TermOpen', nil, {
         buf = ev.buf,
         once = true,
@@ -750,9 +746,6 @@ do
     vim.keymap.set({ 'n', 'x', 'o' }, ']]', function()
       jump_to_prompt(nvim_terminal_prompt_ns, 0, ev.buf, vim.v.count1)
     end, { buf = ev.buf, desc = 'Jump [count] shell prompts forward' })
-
-    -- If the terminal buffer is being reused, clear the previous exit msg
-    vim.api.nvim_buf_clear_namespace(ev.buf, nvim_terminal_exitmsg_ns, 0, -1)
   end)
 
   vim.api.nvim_create_autocmd('CmdwinEnter', {
