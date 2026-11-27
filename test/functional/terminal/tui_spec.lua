@@ -1173,7 +1173,9 @@ describe('TUI :connect', function()
     else
       -- Relative to CWD.
       local dir, name = vim.fs.dirname(server1), vim.fs.basename(server1)
-      tt.feed_data((':cd %s | connect %s\013'):format(dir, name))
+      local ok, err = server2_session:request('nvim_set_current_dir', dir)
+      assert(ok, vim.inspect(err))
+      tt.feed_data((':connect %s\013'):format(name))
     end
     screen2:expect({ any = vim.pesc('This is server 1^.') })
 
