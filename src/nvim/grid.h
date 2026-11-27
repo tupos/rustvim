@@ -345,7 +345,7 @@ static const schar_T braille_space = 0x0080a0e2;
 #endif
 
 DLLEXPORT schar_T schar_from_cluster_impl(const char *buf, size_t len, bool first_compose);
-DLLEXPORT schar_T unittest_schar_from_cluster(const char *buf, int *firstc);
+DLLEXPORT schar_T unittest_schar_from_cluster(const char *buf, int *firstc, int *cells);
 
 /// Get the screen char from a valid cluster
 ///

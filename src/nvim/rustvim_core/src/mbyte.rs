@@ -16,9 +16,6 @@ unsafe extern "C" {
     #[link_name = "utf_char2bytes"]
     fn utf_char2bytes_ffi(c: libc::c_int, buf: *mut libc::c_char) -> libc::c_int;
 
-    #[link_name = "mb_string2cells_len"]
-    fn mb_string2cells_len_ffi(text: *const libc::c_char, len: libc::size_t) -> libc::size_t;
-
     /// Copies primitive results from the editor's bounded cluster decoder.
     fn rustvim_cluster_info(
         text: *const libc::c_char,
@@ -91,14 +88,6 @@ pub(crate) fn utf_ptr2len(p_in: &CStr) -> usize {
     // SAFETY: CStr guarantees a non-null pointer to a readable,
     // NUL-terminated byte sequence for the duration of this call.
     unsafe { utf_ptr2len_ffi(p_in.as_ptr()) as usize }
-}
-
-/// Returns the display width of a byte string using Neovim's multibyte rules.
-pub(crate) fn string_cells(text: &[u8]) -> usize {
-    // SAFETY: `text` supplies a valid pointer and length for the duration of
-    // the call. The length-delimited C function does not require a trailing
-    // NUL.
-    unsafe { mb_string2cells_len_ffi(text.as_ptr().cast::<libc::c_char>(), text.len()) }
 }
 
 /// A codepoint encoded with Neovim's extended UTF-8 representation.

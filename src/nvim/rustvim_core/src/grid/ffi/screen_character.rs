@@ -13,7 +13,6 @@ use super::super::schar_from_bytes;
 use super::super::schar_get_first_codepoint_impl;
 use super::super::schar_len_impl;
 use super::super::schar_to_ascii;
-use crate::mbyte;
 
 /// Constructs a screen character from an already decoded cluster.
 ///
@@ -32,34 +31,6 @@ pub unsafe extern "C" fn schar_from_cluster_impl(
         unsafe { std::slice::from_raw_parts(buf.cast(), len) }
     };
     TextGlyph::screen_character(text, first_compose, &mut lock_glyph_mapping())
-}
-
-/// Exposes cluster extraction to the existing native compatibility tests.
-///
-/// # Safety
-/// buf must be a readable NUL-terminated string; firstc must be writable.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn unittest_schar_from_cluster(
-    buf: *const libc::c_char,
-    firstc: *mut libc::c_int,
-) -> VimSCharT {
-    // SAFETY: The caller retains the terminated input and exclusive output storage.
-    unsafe {
-        let text = std::ffi::CStr::from_ptr(buf).to_bytes();
-        let Some(cluster) = mbyte::first_cluster(text) else {
-            *firstc = 0;
-            return 0;
-        };
-        *firstc = cluster.value;
-        if cluster.value < 0 {
-            return 0;
-        }
-        TextGlyph::screen_character(
-            &text[..cluster.len],
-            cluster.first_compose,
-            &mut lock_glyph_mapping(),
-        )
-    }
 }
 
 /// @param buf need not be NUL terminated, but may not contain embedded NULs.

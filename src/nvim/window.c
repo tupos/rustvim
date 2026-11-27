@@ -436,14 +436,14 @@ newwindow:
   case 'j':
   case K_DOWN:
   case Ctrl_J:
-    win_goto_ver(false, Prenum1);
+    win_goto_neighbor('j', Prenum1);
     break;
 
   // cursor to window above
   case 'k':
   case K_UP:
   case Ctrl_K:
-    win_goto_ver(true, Prenum1);
+    win_goto_neighbor('k', Prenum1);
     break;
 
   // cursor to left window
@@ -451,14 +451,14 @@ newwindow:
   case K_LEFT:
   case Ctrl_H:
   case K_BS:
-    win_goto_hor(true, Prenum1);
+    win_goto_neighbor('h', Prenum1);
     break;
 
   // cursor to right window
   case 'l':
   case K_RIGHT:
   case Ctrl_L:
-    win_goto_hor(false, Prenum1);
+    win_goto_neighbor('l', Prenum1);
     break;
 
   // move window to new tab page
@@ -961,54 +961,65 @@ void ui_ext_win_position(win_T *wp, bool validate)
   }
 }
 
+/// Gets the |ui-event-win_viewport| "scroll_delta": the rows wp.w_topline moved since the last
+/// event. PERF: Beyond the viewport it counts buffer-lines, to limit the cost of win_text_height().
+static int64_t win_viewport_scroll_delta(win_T *wp, linenr_T line_count)
+{
+  // Avoid ml_get errors.
+  const linenr_T cur_topline = MIN(wp->w_topline, line_count);
+  const linenr_T cur_botline = MIN(wp->w_botline, line_count);
+  int64_t const max = wp->w_view_height;  // Measure within viewport; beyond it, only count lines.
+  int64_t delta = 0;
+  linenr_T last_topline = wp->w_viewport_last_topline;
+  linenr_T last_botline = wp->w_viewport_last_botline;
+  int last_topfill = wp->w_viewport_last_topfill;
+  int64_t last_skipcol = wp->w_viewport_last_skipcol;
+  if (last_topline > line_count) {
+    delta -= last_topline - line_count;
+    last_topline = line_count;
+    last_topfill = 0;
+    last_skipcol = MAXCOL;
+  }
+  last_botline = MIN(last_botline, line_count);
+  if (cur_topline < last_topline
+      || (cur_topline == last_topline && wp->w_skipcol < last_skipcol)) {
+    int64_t vcole = last_skipcol;
+    linenr_T lnume = last_topline;
+    if (last_topline > 0 && cur_botline < last_topline) {
+      // Scrolling too many lines: only give an approximate "scroll_delta".
+      delta -= last_topline - cur_botline;
+      lnume = cur_botline;
+      vcole = 0;
+    }
+    linenr_T const lnum_end = lnume;
+    int64_t const height = win_text_height(wp, cur_topline, wp->w_skipcol, &lnume, &vcole, NULL,
+                                           max, true);
+    delta -= height + (height >= max ? MAX(lnum_end - lnume - 1, 0) : 0);
+  } else if (cur_topline > last_topline
+             || (cur_topline == last_topline && wp->w_skipcol > last_skipcol)) {
+    int64_t vcole = wp->w_skipcol;
+    linenr_T lnume = cur_topline;
+    if (last_botline > 0 && cur_topline > last_botline) {
+      // Scrolling too many lines: only give an approximate "scroll_delta".
+      delta += cur_topline - last_botline;
+      lnume = last_botline;
+      vcole = 0;
+    }
+    linenr_T const lnum_end = lnume;
+    int64_t const height = win_text_height(wp, last_topline, last_skipcol, &lnume, &vcole, NULL,
+                                           max, true);
+    delta += height + (height >= max ? MAX(lnum_end - lnume - 1, 0) : 0);
+  }
+  return delta + last_topfill - wp->w_topfill;
+}
+
 void ui_ext_win_viewport(win_T *wp)
 {
   // NOTE: The win_viewport command is delayed until the next flush when there are pending updates.
   // This ensures that the updates and the viewport are sent together.
   if ((wp == curwin || ui_has(kUIMultigrid)) && wp->w_viewport_invalid && wp->w_redr_type == 0) {
     const linenr_T line_count = wp->w_buffer->b_ml.ml_line_count;
-    // Avoid ml_get errors when producing "scroll_delta".
-    const linenr_T cur_topline = MIN(wp->w_topline, line_count);
-    const linenr_T cur_botline = MIN(wp->w_botline, line_count);
-    int64_t delta = 0;
-    linenr_T last_topline = wp->w_viewport_last_topline;
-    linenr_T last_botline = wp->w_viewport_last_botline;
-    int last_topfill = wp->w_viewport_last_topfill;
-    int64_t last_skipcol = wp->w_viewport_last_skipcol;
-    if (last_topline > line_count) {
-      delta -= last_topline - line_count;
-      last_topline = line_count;
-      last_topfill = 0;
-      last_skipcol = MAXCOL;
-    }
-    last_botline = MIN(last_botline, line_count);
-    if (cur_topline < last_topline
-        || (cur_topline == last_topline && wp->w_skipcol < last_skipcol)) {
-      int64_t vcole = last_skipcol;
-      linenr_T lnume = last_topline;
-      if (last_topline > 0 && cur_botline < last_topline) {
-        // Scrolling too many lines: only give an approximate "scroll_delta".
-        delta -= last_topline - cur_botline;
-        lnume = cur_botline;
-        vcole = 0;
-      }
-      delta -= win_text_height(wp, cur_topline, wp->w_skipcol, &lnume, &vcole, NULL, INT64_MAX,
-                               true);
-    } else if (cur_topline > last_topline
-               || (cur_topline == last_topline && wp->w_skipcol > last_skipcol)) {
-      int64_t vcole = wp->w_skipcol;
-      linenr_T lnume = cur_topline;
-      if (last_botline > 0 && cur_topline > last_botline) {
-        // Scrolling too many lines: only give an approximate "scroll_delta".
-        delta += cur_topline - last_botline;
-        lnume = last_botline;
-        vcole = 0;
-      }
-      delta += win_text_height(wp, last_topline, last_skipcol, &lnume, &vcole, NULL, INT64_MAX,
-                               true);
-    }
-    delta += last_topfill;
-    delta -= wp->w_topfill;
+    int64_t const delta = win_viewport_scroll_delta(wp, line_count);
     linenr_T ev_botline = wp->w_botline;
     if (ev_botline == line_count + 1 && wp->w_empty_rows == 0) {
       // TODO(bfredl): The might be more cases to consider, like how does this
@@ -3753,11 +3764,13 @@ static bool frame_has_win(const frame_T *frp, const win_T *wp)
   return false;
 }
 
-/// Check if current window is at the bottom
-/// Returns true if there are no windows below current window
-static bool is_bottom_win(win_T *wp)
+/// Checks if no window is below `wp` in its tabpage. False for a float.
+bool win_is_bottom(win_T *wp)
   FUNC_ATTR_PURE FUNC_ATTR_WARN_UNUSED_RESULT FUNC_ATTR_NONNULL_ALL
 {
+  if (wp->w_floating) {
+    return false;  // Not in the frame tree (`w_frame` is NULL).
+  }
   for (frame_T *frp = wp->w_frame; frp->fr_parent != NULL; frp = frp->fr_parent) {
     if (frp->fr_parent->fr_layout == FR_COL && frp->fr_next != NULL) {
       return false;
@@ -3789,7 +3802,7 @@ void frame_new_height(frame_T *topfrp, int height, bool topfirst, bool wfh, bool
   if (topfrp->fr_win != NULL) {
     // Simple case: just one window.
     win_T *wp = topfrp->fr_win;
-    if (is_bottom_win(wp)) {
+    if (win_is_bottom(wp)) {
       wp->w_hsep_height = 0;
     }
     win_new_height(wp, height - wp->w_hsep_height - wp->w_status_height);
@@ -5058,17 +5071,21 @@ static win_T *win_float_neighbor(tabpage_T *tp)
          ? wp : (tp == curtab ? firstwin : tp->tp_firstwin);
 }
 
-/// Get the above or below neighbor window of the specified window.
+/// Get the above/below or left/right neighbor window of the specified window.
 ///
 /// Returns the specified window if the neighbor is not found.
-/// Returns the previous window if the specifiecied window is a floating window.
+/// Returns the previous window if the specified window is a floating window.
 ///
-/// @param up     true for the above neighbor
+/// @param dir    'h', 'j', 'k' or 'l'
 /// @param count  nth neighbor window
 ///
 /// @return       found window
-win_T *win_vert_neighbor(tabpage_T *tp, win_T *wp, bool up, int count)
+win_T *win_neighbor(tabpage_T *tp, win_T *wp, int dir, int count)
 {
+  bool vert = dir == 'j' || dir == 'k';
+  bool back = dir == 'k' || dir == 'h';
+  int layout = vert ? FR_COL : FR_ROW;
+  int pos = vert ? wp->w_wincol + wp->w_wcol : wp->w_winrow + wp->w_wrow;
   frame_T *foundfr = wp->w_frame;
 
   if (wp->w_floating) {
@@ -5077,40 +5094,36 @@ win_T *win_vert_neighbor(tabpage_T *tp, win_T *wp, bool up, int count)
 
   while (count--) {
     frame_T *nfr;
-    // First go upwards in the tree of frames until we find an upwards or
-    // downwards neighbor.
+    // First go upwards in the tree of frames until we find a neighbor.
     frame_T *fr = foundfr;
     while (true) {
       if (fr == tp->tp_topframe) {
         goto end;
       }
-      if (up) {
-        nfr = fr->fr_prev;
-      } else {
-        nfr = fr->fr_next;
-      }
-      if (fr->fr_parent->fr_layout == FR_COL && nfr != NULL) {
+      nfr = back ? fr->fr_prev : fr->fr_next;
+      if (fr->fr_parent->fr_layout == layout && nfr != NULL) {
         break;
       }
       fr = fr->fr_parent;
     }
 
-    // Now go downwards to find the bottom or top frame in it.
+    // Now go downwards to find the first or last frame in it.
     while (true) {
       if (nfr->fr_layout == FR_LEAF) {
         foundfr = nfr;
         break;
       }
       fr = nfr->fr_child;
-      if (nfr->fr_layout == FR_ROW) {
-        // Find the frame at the cursor row.
-        while (fr->fr_next != NULL
-               && frame2win(fr)->w_wincol + fr->fr_width
-               <= wp->w_wincol + wp->w_wcol) {
-          fr = fr->fr_next;
+      if (nfr->fr_layout != layout) {
+        // Find the frame at the cursor position.
+        for (; fr->fr_next != NULL; fr = fr->fr_next) {
+          int edge = vert ? frame2win(fr)->w_wincol + fr->fr_width
+                          : frame2win(fr)->w_winrow + fr->fr_height;
+          if (edge > pos) {
+            break;
+          }
         }
-      }
-      if (nfr->fr_layout == FR_COL && up) {
+      } else if (back) {
         while (fr->fr_next != NULL) {
           fr = fr->fr_next;
         }
@@ -5122,89 +5135,13 @@ end:
   return foundfr != NULL ? foundfr->fr_win : NULL;
 }
 
-/// Move to window above or below "count" times.
+/// Move to window above/below or left/right "count" times.
 ///
-/// @param up     true to go to win above
+/// @param dir    'h', 'j', 'k' or 'l'
 /// @param count  go count times into direction
-static void win_goto_ver(bool up, int count)
+static void win_goto_neighbor(int dir, int count)
 {
-  win_T *win = win_vert_neighbor(curtab, curwin, up, count);
-  if (win != NULL) {
-    win_goto(win);
-  }
-}
-
-/// Get the left or right neighbor window of the specified window.
-///
-/// Returns the specified window if the neighbor is not found.
-/// Returns the previous window if the specifiecied window is a floating window.
-///
-/// @param left  true for the left neighbor
-/// @param count nth neighbor window
-///
-/// @return      found window
-win_T *win_horz_neighbor(tabpage_T *tp, win_T *wp, bool left, int count)
-{
-  frame_T *foundfr = wp->w_frame;
-
-  if (wp->w_floating) {
-    return win_float_neighbor(tp);
-  }
-
-  while (count--) {
-    frame_T *nfr;
-    // First go upwards in the tree of frames until we find a left or
-    // right neighbor.
-    frame_T *fr = foundfr;
-    while (true) {
-      if (fr == tp->tp_topframe) {
-        goto end;
-      }
-      if (left) {
-        nfr = fr->fr_prev;
-      } else {
-        nfr = fr->fr_next;
-      }
-      if (fr->fr_parent->fr_layout == FR_ROW && nfr != NULL) {
-        break;
-      }
-      fr = fr->fr_parent;
-    }
-
-    // Now go downwards to find the leftmost or rightmost frame in it.
-    while (true) {
-      if (nfr->fr_layout == FR_LEAF) {
-        foundfr = nfr;
-        break;
-      }
-      fr = nfr->fr_child;
-      if (nfr->fr_layout == FR_COL) {
-        // Find the frame at the cursor row.
-        while (fr->fr_next != NULL
-               && frame2win(fr)->w_winrow + fr->fr_height
-               <= wp->w_winrow + wp->w_wrow) {
-          fr = fr->fr_next;
-        }
-      }
-      if (nfr->fr_layout == FR_ROW && left) {
-        while (fr->fr_next != NULL) {
-          fr = fr->fr_next;
-        }
-      }
-      nfr = fr;
-    }
-  }
-end:
-  return foundfr != NULL ? foundfr->fr_win : NULL;
-}
-
-/// Move to left or right window.
-///
-/// @param left   true to go to left window
-/// @param count  go count times into direction
-static void win_goto_hor(bool left, int count)
-{
-  win_T *win = win_horz_neighbor(curtab, curwin, left, count);
+  win_T *win = win_neighbor(curtab, curwin, dir, count);
   if (win != NULL) {
     win_goto(win);
   }
@@ -5258,7 +5195,7 @@ static void win_enter_ext(win_T *const wp, const int flags)
 
   // sync undo before leaving the current buffer
   if ((flags & WEE_UNDO_SYNC) && curbuf != wp->w_buffer) {
-    u_sync(false);
+    u_sync(curbuf, false);
   }
 
   // Might need to scroll the old window before switching, e.g., when the
@@ -7216,7 +7153,7 @@ void command_height(void)
   redraw_cmdline = true;
 
   // Clear the cmdheight area.
-  if (msg_scrolled == 0) {
+  if (msg_scrolled == 0 && starting != NO_SCREEN) {
     if (!ui_has(kUIMessages)) {
       msg_grid_validate();
       grid_message_view_clear(cmdline_row, Rows, 0, Columns, 0);
@@ -7343,7 +7280,7 @@ static void last_status_rec(frame_T *fr, bool statusline, bool is_stl_global)
 {
   if (fr->fr_layout == FR_LEAF) {
     win_T *wp = fr->fr_win;
-    bool is_last = is_bottom_win(wp);
+    bool is_last = win_is_bottom(wp);
 
     if (is_last) {
       if (wp->w_status_height != 0 && (!statusline || is_stl_global)) {

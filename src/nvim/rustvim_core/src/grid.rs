@@ -3008,18 +3008,12 @@ impl BorderText {
             return Some(text);
         }
 
-        let cells = libc::c_int::try_from(mbyte::string_cells(text)).unwrap_or(libc::c_int::MAX);
-        if *overflow >= cells {
-            *overflow -= cells;
-            return None;
-        }
-
-        while !text.is_empty() && *overflow > 0 {
+        while *overflow > 0 {
             let cluster = mbyte::first_cluster(text)?;
             *overflow -= cluster.cells as i32;
             text = &text[cluster.len..];
         }
-        Some(text)
+        (!text.is_empty()).then_some(text)
     }
 
     /// Draws this title or footer over a horizontal border edge.
